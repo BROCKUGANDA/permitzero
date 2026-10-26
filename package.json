@@ -1,0 +1,53 @@
+{
+  "name": "permitzero",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PermitZero — Authority before action. Runtime authorization and transaction-control plane for AI agents.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint . --max-warnings=0",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,css,yml,yaml}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,css,yml,yaml}\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "db:generate": "npm run db:generate -w @permitzero/db",
+    "db:migrate": "npm run db:migrate -w @permitzero/db",
+    "db:seed": "npm run db:seed -w @permitzero/db",
+    "db:reset": "npm run db:reset -w @permitzero/db",
+    "dev": "node scripts/dev.mjs",
+    "dev:api": "npm run dev -w @permitzero/api",
+    "dev:worker": "npm run dev -w @permitzero/worker",
+    "dev:web": "npm run dev -w @permitzero/web",
+    "build": "npm run build --workspaces --if-present",
+    "start:api": "npm run start -w @permitzero/api",
+    "start:worker": "npm run start -w @permitzero/worker",
+    "start:web": "npm run start -w @permitzero/web",
+    "demo:reset": "npm run db:reset && npm run db:seed && npm run demo:scenario -- --dry-run=false",
+    "demo:scenario": "npm run demo:scenario -w @permitzero/api",
+    "test:e2e": "npm run test:e2e -w @permitzero/web",
+    "verify": "node scripts/verify.mjs",
+    "secret:scan": "gitleaks detect --source . --no-git --redact --exit-code 1",
+    "model:check": "npm run model:check -w @permitzero/provider-meta"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^3.0.5",
+    "eslint": "^9.18.0",
+    "prettier": "^3.4.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.20.0",
+    "vitest": "^3.0.5"
+  }
+}

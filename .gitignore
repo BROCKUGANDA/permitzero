@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Builds
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# Test / coverage
+coverage/
+.vitest/
+playwright-report/
+test-results/
+blob-report/
+
+# Env & secrets — never commit credentials
+.env
+.env.local
+.env.*.local
+!.env.example
+*.pem
+*.key
+
+# Runtime state (synthetic demo DB, uploads, local artifacts — all reproducible via scripts)
+storage/
+*.sqlite
+*.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Docker volumes mounted locally
+infra/data/

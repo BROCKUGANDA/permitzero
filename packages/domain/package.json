@@ -1,0 +1,15 @@
+{
+  "name": "@permitzero/domain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": { "types": "./src/index.ts", "default": "./src/index.ts" },
+    "./*": { "types": "./src/*.ts", "default": "./src/*.ts" }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}
