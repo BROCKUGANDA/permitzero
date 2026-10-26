@@ -9,3 +9,4 @@ export * from './types.js';
 export * from './dispatcher.js';
 export * from './workers.js';
 export * from './bullmq.js';
+export * from './adapters.js';

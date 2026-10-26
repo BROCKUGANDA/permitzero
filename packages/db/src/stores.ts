@@ -22,6 +22,8 @@ import type {
   PersistedExecution,
   PersistedPermit,
 } from '@permitzero/broker';
+import { Broker, PermitService, SimulatedFinanceConnector } from '@permitzero/broker';
+import type { Clock } from '@permitzero/broker';
 import { newId } from '@permitzero/domain';
 import type { Db, DbExecutor } from './client.js';
 import {
@@ -373,4 +375,54 @@ export async function resolveConnectorForTool(
 ): Promise<ReturnType<typeof toConnectorRecord> | null> {
   const row = await findConnectorForTool(db.db, tenantId, toolName);
   return row ? toConnectorRecord(row) : null;
+}
+
+export interface BrokerFactoryOptions {
+  signingKey: string;
+  signingKeyId: string;
+  auditHmacKey?: string | null;
+  clock?: Clock;
+}
+
+export interface BuiltBroker {
+  broker: Broker;
+  permits: PermitService;
+  stores: DbStores;
+}
+
+/**
+ * A broker wired to PostgreSQL. The API and the worker share this so the two
+ * processes can never disagree about what backs execution. Accepts a
+ * transaction for callers that issue permits inside a larger commit.
+ */
+export function createBroker(db: Db | DbExecutor, opts: BrokerFactoryOptions): BuiltBroker {
+  const stores = createDbStores(db, { auditHmacKey: opts.auditHmacKey ?? null });
+  const clock = opts.clock;
+  const permits = new PermitService({
+    signingKey: opts.signingKey,
+    signingKeyId: opts.signingKeyId,
+    store: stores.permits,
+    ...(clock ? { clock } : {}),
+  });
+  const ex: DbExecutor = 'db' in db ? db.db : db;
+  const broker = new Broker({
+    permits,
+    actions: stores.actions,
+    executions: stores.executions,
+    data: stores.data,
+    audit: stores.audit,
+    resolveConnector: async (tenantId, toolName) => {
+      const row = await findConnectorForTool(ex, tenantId, toolName);
+      return row ? toConnectorRecord(row) : null;
+    },
+    getConnector: (record) =>
+      new SimulatedFinanceConnector({
+        connectorId: record.connectorId,
+        credentialRef: record.credentialRef,
+        data: stores.data,
+        ...(clock ? { clock } : {}),
+      }),
+    ...(clock ? { clock } : {}),
+  });
+  return { broker, permits, stores };
 }

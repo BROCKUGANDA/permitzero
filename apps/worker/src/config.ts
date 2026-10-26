@@ -1,0 +1,67 @@
+/**
+ * Worker configuration. REDIS_URL is optional: without it the dispatcher and
+ * queue consumers stay home and the process runs the database sweeps only —
+ * degraded but honest, and exactly what the API reports on /v1/status.
+ */
+export interface WorkerConfig {
+  appEnv: string;
+  databaseUrl: string;
+  redisUrl: string | null;
+  permitSigningKey: string;
+  permitSigningKeyId: string;
+  auditHmacKey: string | null;
+  /** Milliseconds between outbox claim batches. */
+  dispatchPollMs: number;
+  /** Milliseconds between sweep passes. */
+  sweepIntervalMs: number;
+  /** Rows claimed per dispatcher batch. */
+  dispatchBatchSize: number;
+  /** Rows settled per sweep pass. */
+  sweepBatchSize: number;
+  /** BullMQ deliveries per job; paired with the consumer retry budget. */
+  jobAttempts: number;
+  /** Consumer concurrency per queue. */
+  workerConcurrency: number;
+  /** Age before an unknown execution is reconciled (in-flight calls settle first). */
+  reconcileGraceMs: number;
+}
+
+function required(env: NodeJS.ProcessEnv, name: string): string {
+  const value = env[name];
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`Missing required environment variable ${name}.`);
+  }
+  return value;
+}
+
+function intIn(env: NodeJS.ProcessEnv, name: string, def: number, min: number, max: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw === '') return def;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be an integer within ${min}..${max}.`);
+  }
+  return parsed;
+}
+
+export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
+  const permitSigningKey = required(env, 'PERMIT_SIGNING_KEY');
+  if (permitSigningKey.length < 16) {
+    throw new Error('PERMIT_SIGNING_KEY must be at least 16 characters.');
+  }
+  return {
+    appEnv: env['APP_ENV'] ?? 'development',
+    databaseUrl: required(env, 'DATABASE_URL'),
+    redisUrl: env['REDIS_URL'] ?? null,
+    permitSigningKey,
+    permitSigningKeyId: env['PERMIT_SIGNING_KEY_ID'] ?? 'k1',
+    auditHmacKey: env['AUDIT_HMAC_KEY'] ?? null,
+    dispatchPollMs: intIn(env, 'DISPATCH_POLL_MS', 500, 50, 60_000),
+    sweepIntervalMs: intIn(env, 'SWEEP_INTERVAL_MS', 30_000, 1_000, 3_600_000),
+    dispatchBatchSize: intIn(env, 'DISPATCH_BATCH_SIZE', 50, 1, 500),
+    sweepBatchSize: intIn(env, 'SWEEP_BATCH_SIZE', 100, 1, 1000),
+    jobAttempts: intIn(env, 'JOB_ATTEMPTS', 5, 1, 25),
+    workerConcurrency: intIn(env, 'WORKER_CONCURRENCY', 5, 1, 100),
+    reconcileGraceMs: intIn(env, 'RECONCILE_GRACE_MS', 30_000, 0, 3_600_000),
+  };
+}

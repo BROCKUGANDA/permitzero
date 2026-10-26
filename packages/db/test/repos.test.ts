@@ -28,6 +28,7 @@ import {
   getUserById,
   listActions,
   listApprovalsByAction,
+  listExpiredApprovalActions,
   listPolicies,
   listRevisions,
   publishRevision,
@@ -258,6 +259,38 @@ describe('action repositories', () => {
     const reloaded = await getAction(db.db, tenantId(), a.actionId);
     expect(reloaded?.decision).toBe('REQUIRE_APPROVAL');
     expect(reloaded?.requiredApprovals).toBe(2);
+  });
+
+  it('lists lapsed approval windows oldest first', async () => {
+    const past = new Date('2026-10-26T11:00:00Z');
+    const future = new Date('2026-10-26T13:00:00Z');
+    const mk = async (expiresAt: Date) => {
+      const a = await makeAction();
+      await walkAction(a.actionId, ['VALIDATING', 'EVALUATING']);
+      await transitionAction(db.db, {
+        tenantId: tenantId(),
+        actionId: a.actionId,
+        to: 'APPROVAL_REQUIRED',
+        expectedVersion: 2,
+        now: NOW,
+        patch: { decision: 'REQUIRE_APPROVAL', decisionReasonCodes: [], expiresAt },
+      });
+      return a.actionId;
+    };
+    const freshId = await mk(future);
+    const staleId = await mk(past);
+    // Decided actions never appear even with a past expiry.
+    const decidedId = await mk(past);
+    await transitionAction(db.db, {
+      tenantId: tenantId(),
+      actionId: decidedId,
+      to: 'REJECTED',
+      expectedVersion: 3,
+      now: NOW,
+    });
+    const expired = await listExpiredApprovalActions(db.db, NOW, 10);
+    expect(expired.map((r) => r.actionId)).toEqual([staleId]);
+    expect(expired.map((r) => r.actionId)).not.toContain(freshId);
   });
 
   it('counts velocity and budget spend', async () => {

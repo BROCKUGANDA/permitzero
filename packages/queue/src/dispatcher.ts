@@ -8,6 +8,12 @@ export interface OutboxDispatcherDeps {
   /** Milliseconds between claim batches. */
   pollIntervalMs?: number;
   batchSize?: number;
+  /**
+   * BullMQ delivery attempts per job. Must match the consumers'
+   * `maxAttempts`: with fewer, the queue drops jobs the wrapper would have
+   * retried and the DLQ path never runs.
+   */
+  jobAttempts?: number;
   /** Exponential backoff base for a failed publish. */
   retryBaseMs?: number;
   retryCapMs?: number;
@@ -46,6 +52,7 @@ export interface OutboxDispatcher {
 export function createOutboxDispatcher(deps: OutboxDispatcherDeps): OutboxDispatcher {
   const pollIntervalMs = deps.pollIntervalMs ?? 500;
   const batchSize = deps.batchSize ?? 50;
+  const jobAttempts = deps.jobAttempts ?? 5;
   const retryBaseMs = deps.retryBaseMs ?? 250;
   const retryCapMs = deps.retryCapMs ?? 8_000;
   const defaultMaxAttempts = deps.maxAttempts ?? 8;
@@ -66,7 +73,7 @@ export function createOutboxDispatcher(deps: OutboxDispatcherDeps): OutboxDispat
         // Deduplicate on the queue side too: the DB unique id is the real guard,
         // this only stops a double-claim from producing two visible jobs.
         jobId: `outbox:${row.id}`,
-        attempts: 1,
+        attempts: jobAttempts,
         removeOnComplete: true,
         removeOnFail: false,
       });

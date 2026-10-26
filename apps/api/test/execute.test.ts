@@ -4,6 +4,7 @@
  */
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createTenant, insertInvoice, insertPurchaseOrder, setEnforcementMode } from '@permitzero/db';
+import { clearConnectorFaultProfile, setConnectorFaultProfile } from '@permitzero/broker';
 import { newId } from '@permitzero/domain';
 import {
   closeApp,
@@ -145,6 +146,31 @@ describe('execute', () => {
       executeBody(action.permit?.token ?? ''),
     );
     expect(res.status).toBe(200);
+    await closeApp(t);
+  });
+
+  it('flags unknown outcomes for reconciliation instead of guessing', async () => {
+    const action = await authorizsedPayment();
+    setConnectorFaultProfile({ timeoutAfterDispatch: true });
+    try {
+      const res = await postJson(
+        t,
+        `/v1/actions/${action.action_id}/execute`,
+        t.agentToken,
+        executeBody(action.permit?.token ?? ''),
+      );
+      expect(res.status).toBe(409);
+      expect(res.json).toMatchObject({ error: { code: 'UNKNOWN_OUTCOME' } });
+      const rows = await t.db.sql<{ event_type: string; queue_name: string }[]>`
+        SELECT event_type, queue_name FROM outbox_events WHERE event_type = 'execution.unknown_outcome'
+      `;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ queue_name: 'pz.reconciliation' });
+      const fetched = await getJson(t, `/v1/actions/${action.action_id}`, t.agentToken);
+      expect(fetched.json).toMatchObject({ state: 'UNKNOWN_OUTCOME' });
+    } finally {
+      clearConnectorFaultProfile();
+    }
     await closeApp(t);
   });
 

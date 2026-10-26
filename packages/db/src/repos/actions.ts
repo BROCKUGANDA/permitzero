@@ -4,7 +4,7 @@
  * after `assertTransition` validation; illegal transitions throw (a bug), lost
  * races return typed conflicts.
  */
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, lte, sql } from 'drizzle-orm';
 import { assertTransition } from '@permitzero/domain';
 import type { ActorType, Environment, EvidenceRef, RiskSignal } from '@permitzero/domain';
 import type { ActionTransitionInput, ActionTransitionResult } from '@permitzero/broker';
@@ -273,6 +273,19 @@ export async function sumSucceededPaymentsSince(ex: DbExecutor, tenantId: string
       ),
     );
   return assertSafeMinor(rows[0]?.total ?? 0n, 'budget spend');
+}
+
+/**
+ * Approval windows that lapsed without a quorum. The worker sweeps these to
+ * EXPIRED; cross-tenant by design (service role), oldest first.
+ */
+export async function listExpiredApprovalActions(ex: DbExecutor, now: Date, limit: number): Promise<ActionRow[]> {
+  return ex
+    .select()
+    .from(actions)
+    .where(and(eq(actions.state, 'APPROVAL_REQUIRED'), lte(actions.expiresAt, now)))
+    .orderBy(asc(actions.expiresAt))
+    .limit(limit);
 }
 
 export interface CreateApprovalInput {

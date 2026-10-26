@@ -23,7 +23,13 @@ import type { Principal } from '@permitzero/domain';
 import type { ExecuteActionRequest, ExecuteActionResponse } from '@permitzero/schemas';
 import { executeActionResponseSchema } from '@permitzero/schemas';
 import { Broker } from '@permitzero/broker';
-import { findConnectorForTool, getAction, getEnforcementMode, toActionRecord } from '@permitzero/db';
+import {
+  findConnectorForTool,
+  getAction,
+  getEnforcementMode,
+  insertOutboxEvent,
+  toActionRecord,
+} from '@permitzero/db';
 import type { Db } from '@permitzero/db';
 import { requireExecute } from './auth.js';
 
@@ -94,8 +100,26 @@ export async function executeApprovedAction(
         trace_id: action.traceId,
       });
     }
-    case 'UNKNOWN_OUTCOME':
+    case 'UNKNOWN_OUTCOME': {
+      // Nudge the reconciler now; the worker's periodic sweep is the backstop
+      // if this insert fails, so a failure here must not mask the 409.
+      try {
+        await insertOutboxEvent(deps.db.db, {
+          tenantId,
+          aggregateType: 'execution',
+          aggregateId: result.execution.executionId,
+          eventType: 'execution.unknown_outcome',
+          queueName: 'pz.reconciliation',
+          payload: { action_id: actionId, execution_id: result.execution.executionId },
+          traceId: action.traceId,
+        });
+      } catch (err) {
+        console.error(
+          `unknown-outcome nudge lost for execution ${result.execution.executionId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       throw new UnknownOutcomeError(actionId, result.execution.executionId);
+    }
     case 'FAILED_RETRYABLE':
       throw new DomainError('The connector failed transiently; reconcile, then retry with a fresh evaluation.', {
         code: ErrorCode.CONNECTOR_ERROR,

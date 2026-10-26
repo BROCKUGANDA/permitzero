@@ -22,11 +22,11 @@ import {
 } from 'fastify-type-provider-zod';
 import { NotFoundError, newId } from '@permitzero/domain';
 import type { Principal } from '@permitzero/domain';
-import { Broker, PermitService, SimulatedFinanceConnector } from '@permitzero/broker';
-import { createDbStores, findConnectorForTool, toConnectorRecord } from '@permitzero/db';
-import type { Db, DbOutboxStore } from '@permitzero/db';
-import { createOutboxDispatcher } from '@permitzero/queue';
-import type { OutboxDispatcher, OutboxStore, QueueFactory, RedisLike } from '@permitzero/queue';
+import type { Broker } from '@permitzero/broker';
+import { createBroker } from '@permitzero/db';
+import type { Db } from '@permitzero/db';
+import { adaptDbOutbox, createOutboxDispatcher } from '@permitzero/queue';
+import type { OutboxDispatcher, QueueFactory, RedisLike } from '@permitzero/queue';
 import type { ApiConfig } from './config.js';
 import { toHttpError } from './errors.js';
 import type { ModelAdapter } from './model.js';
@@ -90,61 +90,19 @@ export interface BuiltApp {
   ctx: AppContext;
 }
 
-/** Adapt the db outbox port to the dispatcher port (clock + signature gaps). */
-function adaptOutbox(store: DbOutboxStore, clock: () => Date): OutboxStore {
-  return {
-    claimPending: (limit, now) => store.claimPending(limit, now),
-    markPublished: (id) => store.markPublished(id, clock()),
-    markFailed: (id, errorClass, nextAttemptAt) => store.markFailed(id, errorClass, nextAttemptAt ?? clock()),
-    markDead: (id, errorClass) => store.markDead(id, errorClass),
-    countByStatus: async () => {
-      const counts = await store.countByStatus();
-      return {
-        PENDING: counts['PENDING'] ?? 0,
-        PUBLISHED: counts['PUBLISHED'] ?? 0,
-        FAILED: counts['FAILED'] ?? 0,
-        DEAD: counts['DEAD'] ?? 0,
-      };
-    },
-    redrive: (id, reason, actorId) => store.redrive(id, reason, actorId),
-    insert: (draft) => store.insert(draft),
-  };
-}
-
 export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
   const clock = deps.clock ?? (() => new Date());
-  const stores = createDbStores(deps.db, { auditHmacKey: deps.config.auditHmacKey });
-
-  const permits = new PermitService({
+  const { broker, stores } = createBroker(deps.db, {
     signingKey: deps.config.permitSigningKey,
     signingKeyId: deps.config.permitSigningKeyId,
-    store: stores.permits,
-    clock,
-  });
-  const broker = new Broker({
-    permits,
-    actions: stores.actions,
-    executions: stores.executions,
-    data: stores.data,
-    audit: stores.audit,
-    resolveConnector: async (tenantId, toolName) => {
-      const row = await findConnectorForTool(deps.db.db, tenantId, toolName);
-      return row ? toConnectorRecord(row) : null;
-    },
-    getConnector: (record) =>
-      new SimulatedFinanceConnector({
-        connectorId: record.connectorId,
-        credentialRef: record.credentialRef,
-        data: stores.data,
-        clock,
-      }),
+    auditHmacKey: deps.config.auditHmacKey,
     clock,
   });
 
   let queues: QueueWiring = { factory: null, redis: null, probeOutboxDepth: null, dispatcher: null };
   if (deps.queues) {
     const dispatcher = createOutboxDispatcher({
-      store: adaptOutbox(stores.outbox, clock),
+      store: adaptDbOutbox(stores.outbox, clock),
       queues: deps.queues.factory,
       now: clock,
     });
