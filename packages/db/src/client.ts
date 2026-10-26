@@ -1,0 +1,123 @@
+/**
+ * Database client: connection lifecycle, transaction helper, SQL migration
+ * runner and test reset.
+ *
+ * Migrations are plain SQL files under `infra/migrations`, applied in filename
+ * order and tracked in `_migrations`. `migrate()` is idempotent: applied files
+ * are skipped, each new file runs inside a transaction with its tracking row.
+ * Drizzle is the query builder only — it never generates schema.
+ */
+import { readdir, readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import postgres from 'postgres';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { getTableName, sql } from 'drizzle-orm';
+import * as schema from './schema.js';
+import { ALL_TABLES } from './schema.js';
+
+export type DrizzleDb = PostgresJsDatabase<typeof schema>;
+export type DbTransaction = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
+/** The query surface repositories need; both the root client and transactions satisfy it. */
+export type DbExecutor = Pick<DrizzleDb, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
+
+export interface Db {
+  sql: postgres.Sql;
+  db: DrizzleDb;
+}
+
+export function createDb(url: string, opts?: { max?: number }): Db {
+  const client = postgres(url, { max: opts?.max ?? 10 });
+  return { sql: client, db: drizzle(client, { schema }) };
+}
+
+export async function closeDb(db: Db): Promise<void> {
+  await db.sql.end({ timeout: 5 });
+}
+
+export async function withTransaction<T>(db: Db, fn: (tx: DbTransaction) => Promise<T>): Promise<T> {
+  return db.db.transaction((tx) => fn(tx));
+}
+
+export async function healthCheck(db: Db): Promise<boolean> {
+  try {
+    await db.sql`SELECT 1`;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Create a database if missing. Used by tests and local setup only. */
+export async function ensureDatabaseExists(adminDb: Db, name: string): Promise<void> {
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
+    throw new Error(`Refusing to create database with unexpected name: ${name}`);
+  }
+  try {
+    await adminDb.sql.unsafe(`CREATE DATABASE "${name}"`);
+  } catch (err) {
+    if ((err as { code?: string }).code === '42P04') return; // already exists
+    throw err;
+  }
+}
+
+const DEFAULT_MIGRATIONS_DIR = fileURLToPath(new URL('../../../infra/migrations', import.meta.url));
+
+export interface MigrateResult {
+  applied: string[];
+}
+
+export async function migrate(db: Db, opts?: { migrationsDir?: string }): Promise<MigrateResult> {
+  const dir = opts?.migrationsDir ?? DEFAULT_MIGRATIONS_DIR;
+  await db.sql`CREATE TABLE IF NOT EXISTS _migrations (filename text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
+  const appliedRows = await db.sql<{ filename: string }[]>`SELECT filename FROM _migrations`;
+  const applied = new Set(appliedRows.map((r) => r.filename));
+  const files = (await readdir(dir)).filter((f) => f.endsWith('.sql')).sort();
+  const newly: string[] = [];
+  for (const file of files) {
+    if (applied.has(file)) continue;
+    const text = await readFile(path.join(dir, file), 'utf8');
+    await withTransaction(db, async (tx) => {
+      await tx.execute(sql.raw(text));
+      await tx.execute(sql`INSERT INTO _migrations (filename) VALUES (${file})`);
+    });
+    newly.push(file);
+  }
+  return { applied: newly };
+}
+
+export interface MigrateStatus {
+  applied: string[];
+  pending: string[];
+}
+
+/** What `/health/ready` reports: every migration file accounted for. */
+export async function migrateStatus(db: Db, opts?: { migrationsDir?: string }): Promise<MigrateStatus> {
+  const dir = opts?.migrationsDir ?? DEFAULT_MIGRATIONS_DIR;
+  let applied: string[] = [];
+  try {
+    const rows = await db.sql<{ filename: string }[]>`SELECT filename FROM _migrations`;
+    applied = rows.map((r) => r.filename);
+  } catch {
+    applied = [];
+  }
+  const files = (await readdir(dir)).filter((f) => f.endsWith('.sql')).sort();
+  const appliedSet = new Set(applied);
+  return { applied, pending: files.filter((f) => !appliedSet.has(f)) };
+}
+
+/**
+ * Truncate all data (audit triggers permit TRUNCATE). Test and local-demo use
+ * only — the CLI refuses production without `--force`.
+ */
+export async function resetDb(db: Db): Promise<void> {
+  const names = ALL_TABLES.map((t) => `"${getTableName(t)}"`).join(', ');
+  await db.sql.unsafe(`TRUNCATE ${names} RESTART IDENTITY CASCADE`);
+}
+
+/** True when `err` is a PostgreSQL error with one of the given SQLSTATE codes. */
+export function isDbError(err: unknown, ...codes: string[]): boolean {
+  const code = (err as { code?: string } | null)?.code;
+  return typeof code === 'string' && codes.includes(code);
+}

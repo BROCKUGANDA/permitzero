@@ -1,5 +1,5 @@
-import { classifyQueueError, type QueueLike, type QueueName } from './types.js';
-import type { AuditSink } from './names.js';
+import { classifyQueueError, type QueueLike } from './types.js';
+import type { AuditSink, QueueName } from './names.js';
 
 export interface QueueJob {
   id: string;

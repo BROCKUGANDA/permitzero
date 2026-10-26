@@ -16,9 +16,15 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "tsx src/cli.ts migrate",
+    "db:seed": "tsx src/cli.ts seed",
+    "db:reset": "tsx src/cli.ts reset",
+    "db:health": "tsx src/cli.ts health",
+    "db:generate": "echo migrations are handwritten SQL under infra/migrations"
   },
   "dependencies": {
+    "@permitzero/broker": "*",
     "@permitzero/domain": "*",
     "@permitzero/schemas": "*",
     "drizzle-orm": "^0.38.3",

@@ -1,6 +1,6 @@
 import { OutboxStatus } from '@permitzero/domain';
-import { QUEUE_PRIORITY, type OutboxRow, type OutboxStore } from './names.js';
-import { classifyQueueError, outboxJobPayload, type QueueFactory, type QueueName } from './types.js';
+import { queuePriority, type OutboxRow, type OutboxStore, type QueueName } from './names.js';
+import { classifyQueueError, outboxJobPayload, type QueueFactory } from './types.js';
 
 export interface OutboxDispatcherDeps {
   store: OutboxStore;
@@ -62,7 +62,7 @@ export function createOutboxDispatcher(deps: OutboxDispatcherDeps): OutboxDispat
     try {
       const queue = deps.queues(row.queueName);
       await queue.add(row.eventType, outboxJobPayload(row), {
-        priority: QUEUE_PRIORITY[row.queueName] ?? QUEUE_PRIORITY.outbox,
+        priority: queuePriority(row.queueName),
         // Deduplicate on the queue side too: the DB unique id is the real guard,
         // this only stops a double-claim from producing two visible jobs.
         jobId: `outbox:${row.id}`,

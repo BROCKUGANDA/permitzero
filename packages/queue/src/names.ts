@@ -23,6 +23,19 @@ export const QUEUE_PRIORITY = {
   deadLetter: 30,
 } as const;
 
+const PRIORITY_BY_QUEUE_NAME: Record<QueueName, number> = {
+  [QUEUE_NAMES.reconciliation]: QUEUE_PRIORITY.reconciliation,
+  [QUEUE_NAMES.outbox]: QUEUE_PRIORITY.outbox,
+  [QUEUE_NAMES.modelAnalysis]: QUEUE_PRIORITY.modelAnalysis,
+  [QUEUE_NAMES.replay]: QUEUE_PRIORITY.replay,
+  [QUEUE_NAMES.deadLetter]: QUEUE_PRIORITY.deadLetter,
+};
+
+/** BullMQ priority for a queue name (lower is more urgent). */
+export function queuePriority(name: QueueName): number {
+  return PRIORITY_BY_QUEUE_NAME[name];
+}
+
 export interface OutboxRow {
   id: string;
   tenantId: string;

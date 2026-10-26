@@ -190,11 +190,14 @@ export const RuleEffect = {
 } as const;
 export type RuleEffect = (typeof RuleEffect)[keyof typeof RuleEffect];
 
+// Thresholds may be fractional (advisory model confidences live in 0..1);
+// the matcher compares plain numbers, so the schema accepts any finite one.
+const finiteNumberSchema = z.number().finite();
 const conditionValueSchema = z.union([
   z.string().max(512),
-  z.number().int().safe(),
+  finiteNumberSchema,
   z.boolean(),
-  z.array(z.union([z.string().max(512), z.number().int().safe()])).max(64),
+  z.array(z.union([z.string().max(512), finiteNumberSchema])).max(64),
   z.null(),
 ]);
 

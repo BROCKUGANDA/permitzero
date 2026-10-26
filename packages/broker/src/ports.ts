@@ -228,6 +228,8 @@ export interface ActionStore {
  */
 export interface ConnectorLedgerEntry {
   tenantId: string;
+  /** Connector that produced the effect (required by storage). */
+  connectorId: string;
   connectorIdempotencyKey: string;
   /** The tool that produced the effect, e.g. `payment.execute`. */
   operation: string;
@@ -235,6 +237,9 @@ export interface ConnectorLedgerEntry {
   receipt: ConnectorReceipt;
   /** Effect detail beyond the receipt contract. Already redacted. */
   detailRedacted: Record<string, unknown>;
+  /** Linkage back to the authorizing action and attempt. */
+  actionId: string | null;
+  executionId: string | null;
   recordedAt: Date;
 }
 

@@ -55,6 +55,8 @@ export interface VendorRecord {
   bankingChangedAt: Date | null;
   /** Out-of-band verification of the latest banking change. */
   bankingChangeVerifiedAt: Date | null;
+  /** Staged beneficiary awaiting verification + cooling; never dispatched. */
+  pendingBeneficiaryRef: string | null;
   allowedDestinationRefs: readonly string[];
   accountAgeDays: number;
   dataClassification: string;

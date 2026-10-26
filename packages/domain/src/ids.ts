@@ -26,17 +26,32 @@ function encodeTime(now: number, len: number): string {
   return out.join('');
 }
 
-function encodeRandom(len: number): string {
-  const bytes = randomBytes(len);
-  let out = '';
-  for (let i = 0; i < len; i++) {
-    out += ENCODING[(bytes[i] as number) % ENCODING_LEN];
-  }
-  return out;
-}
+/**
+ * Monotonic state within one process: ids minted in the same millisecond
+ * increment the random part instead of re-rolling it, so lexicographic order
+ * always matches creation order (the guarantee the module comment makes).
+ */
+let lastMs = 0;
+let lastRandom: number[] | null = null;
 
 export function ulid(seedTime: number = Date.now()): string {
-  return encodeTime(seedTime, TIME_LEN) + encodeRandom(RANDOM_LEN);
+  let now = seedTime;
+  if (now < lastMs) now = lastMs; // clock moved backwards: hold, never go back
+  if (now === lastMs && lastRandom !== null) {
+    const next = [...lastRandom];
+    let i = next.length - 1;
+    for (; i >= 0; i--) {
+      next[i] = ((next[i] as number) + 1) % ENCODING_LEN;
+      if (next[i] !== 0) break;
+    }
+    if (i < 0) throw new Error('ulid random overflow: more than 2^80 ids in one millisecond');
+    lastRandom = next;
+  } else {
+    const bytes = randomBytes(RANDOM_LEN);
+    lastRandom = Array.from(bytes, (b) => (b as number) % ENCODING_LEN);
+    lastMs = now;
+  }
+  return encodeTime(now, TIME_LEN) + (lastRandom as number[]).map((d) => ENCODING[d]).join('');
 }
 
 /** ID prefixes. Add a prefix here and it becomes part of the parsed contract. */
@@ -61,6 +76,8 @@ export const ID_PREFIX = {
   replay: 'rpl',
   modelEvaluation: 'mev',
   idempotency: 'idm',
+  ledger: 'ldg',
+  dispatch: 'dsp',
 } as const;
 
 export type IdKind = keyof typeof ID_PREFIX;

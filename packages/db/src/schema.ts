@@ -162,6 +162,10 @@ export const serviceCredentials = pgTable(
   (t) => [
     primaryKey({ columns: [t.credentialId, t.tenantId] }),
     unique('uq_service_credentials_ref').on(t.tenantId, t.credentialRef),
+    // One live credential per (tenant, name); revoked names may be re-issued.
+    uniqueIndex('uq_service_credentials_active_name')
+      .on(t.tenantId, t.name)
+      .where(sql`${t.status} = 'ACTIVE'`),
     check('chk_service_credentials_subject_type', sql`${t.subjectType} IN ('AGENT','USER','SERVICE')`),
     check(
       'chk_service_credentials_status',
@@ -482,6 +486,11 @@ export const executions = pgTable(
     errorClass: text('error_class'),
     errorMessageRedacted: text('error_message_redacted'),
     retryAfterAt: ts('retry_after_at'),
+    /** Provenance: which permit authorized this attempt (never the token). */
+    permitId: text('permit_id'),
+    permitNonceHash: text('permit_nonce_hash'),
+    actorId: text('actor_id').notNull(),
+    traceId: text('trace_id').notNull(),
     createdAt: tsNow('created_at'),
     updatedAt: tsNow('updated_at'),
   },
@@ -566,6 +575,7 @@ export const outboxEvents = pgTable(
     aggregateType: text('aggregate_type').notNull(),
     aggregateId: text('aggregate_id').notNull(),
     eventType: text('event_type').notNull(),
+    queueName: text('queue_name').notNull().default('pz.outbox'),
     payloadJson: jsonb('payload_json').notNull().default(sql`'{}'::jsonb`).$type<Record<string, unknown>>(),
     status: text('status').notNull().default('PENDING').$type<OutboxStatus>(),
     attemptCount: integer('attempt_count').notNull().default(0),
@@ -581,6 +591,10 @@ export const outboxEvents = pgTable(
     index('idx_outbox_tenant_status_next_attempt').on(t.tenantId, t.status, t.nextAttemptAt),
     index('idx_outbox_status_next_attempt').on(t.status, t.nextAttemptAt),
     check('chk_outbox_status', sql`${t.status} IN ('PENDING','PUBLISHED','FAILED','DEAD')`),
+    check(
+      'chk_outbox_queue_name',
+      sql`${t.queueName} IN ('pz.outbox','pz.model-analysis','pz.reconciliation','pz.replay','pz.dlq')`,
+    ),
     check('chk_outbox_attempt_count_nonneg', sql`${t.attemptCount} >= 0`),
     check('chk_outbox_max_attempts_positive', sql`${t.maxAttempts} > 0`),
     check('chk_outbox_published_at', sql`${t.status} <> 'PUBLISHED' OR ${t.publishedAt} IS NOT NULL`),
@@ -869,6 +883,10 @@ export const connectorLedger = pgTable(
     beneficiaryRef: text('beneficiary_ref'),
     actionId: text('action_id'),
     executionId: text('execution_id'),
+    detailJsonRedacted: jsonb('detail_json_redacted')
+      .notNull()
+      .default(sql`'{}'::jsonb`)
+      .$type<Record<string, unknown>>(),
     simulated: boolean('simulated').notNull().default(true),
     completedAt: tsNow('completed_at'),
     createdAt: tsNow('created_at'),
@@ -878,6 +896,27 @@ export const connectorLedger = pgTable(
     unique('uq_connector_ledger_idempotency').on(t.tenantId, t.connectorIdempotencyKey),
     check('chk_connector_ledger_amount_nonneg', sql`${t.amountMinor} IS NULL OR ${t.amountMinor} >= 0`),
     check('chk_connector_ledger_currency_shape', sql`${t.currency} IS NULL OR ${t.currency} ~ '^[A-Z]{3}$'`),
+  ],
+);
+
+export const connectorDispatches = pgTable(
+  'connector_dispatches',
+  {
+    dispatchId: text('dispatch_id').notNull(),
+    tenantId: text('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    connectorIdempotencyKey: text('connector_idempotency_key').notNull(),
+    operation: text('operation').notNull(),
+    startedAt: ts('started_at').notNull(),
+    completedAt: ts('completed_at'),
+    outcome: text('outcome'),
+    createdAt: tsNow('created_at'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.dispatchId, t.tenantId] }),
+    index('idx_dispatches_tenant_key').on(t.tenantId, t.connectorIdempotencyKey),
+    check('chk_dispatches_completed', sql`${t.completedAt} IS NULL OR ${t.completedAt} >= ${t.startedAt}`),
   ],
 );
 
@@ -908,6 +947,7 @@ export type VendorRow = typeof vendors.$inferSelect;
 export type InvoiceRow = typeof invoices.$inferSelect;
 export type PurchaseOrderRow = typeof purchaseOrders.$inferSelect;
 export type ConnectorLedgerRow = typeof connectorLedger.$inferSelect;
+export type ConnectorDispatchRow = typeof connectorDispatches.$inferSelect;
 
 /** Every table this package owns, in dependency-safe insert order. */
 export const ALL_TABLES = [
@@ -934,4 +974,5 @@ export const ALL_TABLES = [
   invoices,
   purchaseOrders,
   connectorLedger,
+  connectorDispatches,
 ] as const;
