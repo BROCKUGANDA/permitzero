@@ -16,8 +16,7 @@ import {
   seed,
 } from '@permitzero/db';
 
-const DATABASE_URL =
-  process.env['E2E_DATABASE_URL'] ?? 'postgres://postgres@127.0.0.1:5432/permitzero_e2e';
+const DATABASE_URL = process.env['E2E_DATABASE_URL'] ?? 'postgres://postgres@127.0.0.1:5432/permitzero_e2e';
 
 if (!/e2e|test/i.test(new URL(DATABASE_URL).pathname)) {
   throw new Error(`refusing to seed e2e fixtures into non-test database ${DATABASE_URL}`);

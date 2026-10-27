@@ -51,10 +51,7 @@ export interface OutboxRow {
   traceId: string | null;
 }
 
-export type OutboxDraft = Pick<
-  OutboxRow,
-  'tenantId' | 'eventType' | 'queueName' | 'payload'
-> & {
+export type OutboxDraft = Pick<OutboxRow, 'tenantId' | 'eventType' | 'queueName' | 'payload'> & {
   maxAttempts?: number;
   nextAttemptAt?: Date | null;
   traceId?: string | null;

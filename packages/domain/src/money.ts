@@ -60,9 +60,7 @@ export function assertValidAmountMinor(amountMinor: unknown, currency: string): 
   }
   if (!Number.isInteger(amountMinor)) {
     // A fractional "minor unit" means the caller sent a major-unit float.
-    throw new MoneyError(
-      'amount_minor must be an integer; send minor units, not a decimal major amount',
-    );
+    throw new MoneyError('amount_minor must be an integer; send minor units, not a decimal major amount');
   }
   if (!Number.isSafeInteger(amountMinor)) {
     throw new MoneyError('amount_minor exceeds safe integer range');
@@ -85,9 +83,7 @@ export function parseMajorToMinor(major: string, currency: string): number {
   const [, sign, intPart, fracPartRaw] = match;
   const fracPart = fracPartRaw ?? '';
   if (fracPart.length > exp) {
-    throw new MoneyError(
-      `amount ${major} has more than ${exp} decimal places for ${currency}`,
-    );
+    throw new MoneyError(`amount ${major} has more than ${exp} decimal places for ${currency}`);
   }
   const padded = fracPart.padEnd(exp, '0');
   const minor = BigInt(`${intPart}${padded}`);

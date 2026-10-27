@@ -6,11 +6,7 @@
  * approval quorum, explanation ordering, lint codes and replay simulation.
  */
 import { describe, expect, it } from 'vitest';
-import {
-  ApprovalReason,
-  DenyReason,
-  IndeterminateReason,
-} from '@permitzero/domain';
+import { ApprovalReason, DenyReason, IndeterminateReason } from '@permitzero/domain';
 import type {
   AgentRecord,
   ConnectorRecord,
@@ -663,10 +659,7 @@ describe('unresolvable fields', () => {
           effect: 'ALLOW',
           reason_code: 'WITHIN_LIMIT',
           when: {
-            all: [
-              cond('vendor.status', 'equals', 'VERIFIED'),
-              cond('tool.name', 'equals', 'no.such.tool'),
-            ],
+            all: [cond('vendor.status', 'equals', 'VERIFIED'), cond('tool.name', 'equals', 'no.such.tool')],
           },
         }),
         makeRule({
@@ -674,10 +667,7 @@ describe('unresolvable fields', () => {
           effect: 'ALLOW',
           reason_code: 'TOOL_ALLOWED',
           when: {
-            any: [
-              cond('vendor.status', 'equals', 'VERIFIED'),
-              cond('tool.name', 'equals', 'payment.execute'),
-            ],
+            any: [cond('vendor.status', 'equals', 'VERIFIED'), cond('tool.name', 'equals', 'payment.execute')],
           },
         }),
       ],
@@ -747,10 +737,7 @@ describe('model signals', () => {
   });
 
   it('caps a would-be allow at approval when a required model signal is missing', () => {
-    const result = evaluatePolicy(
-      baseInput({ requiredModelSignalUnavailable: true }),
-      makeRevision(apPolicy()),
-    );
+    const result = evaluatePolicy(baseInput({ requiredModelSignalUnavailable: true }), makeRevision(apPolicy()));
     expect(result.decision).toBe('REQUIRE_APPROVAL');
     expect(result.reasonCodes).toEqual([ApprovalReason.REQUIRED_SIGNAL_UNAVAILABLE]);
     expect(result.requiredApprovals).toBe(1);
@@ -958,7 +945,13 @@ describe('lintPolicy', () => {
       schema_version: 'policy.v1',
       default_effect: 'DENY',
       rules: [
-        makeRule({ id: 'wild', effect: 'DENY', reason_code: 'DEFAULT_DENY', scope: { tools: ['*'] }, when: { none: [] } }),
+        makeRule({
+          id: 'wild',
+          effect: 'DENY',
+          reason_code: 'DEFAULT_DENY',
+          scope: { tools: ['*'] },
+          when: { none: [] },
+        }),
         makeRule({
           id: 'partial-unknown',
           effect: 'DENY',
@@ -1029,9 +1022,7 @@ describe('lintPolicy', () => {
     expect(findings.filter((f) => f.code === 'APPROVAL_QUORUM_ONE_FOR_HIGH_RISK').map((f) => f.ruleIds)).toEqual([
       ['solo-approval'],
     ]);
-    expect(findings.filter((f) => f.code === 'AMOUNT_UNIT_SUSPECT').map((f) => f.ruleIds)).toEqual([
-      ['solo-approval'],
-    ]);
+    expect(findings.filter((f) => f.code === 'AMOUNT_UNIT_SUSPECT').map((f) => f.ruleIds)).toEqual([['solo-approval']]);
   });
 
   it('flags textually overlapping allow/deny pairs', () => {
@@ -1040,8 +1031,20 @@ describe('lintPolicy', () => {
       schema_version: 'policy.v1',
       default_effect: 'DENY',
       rules: [
-        makeRule({ id: 'allow-x', effect: 'ALLOW', reason_code: 'WITHIN_LIMIT', scope: { tools: ['payment.execute'] }, when }),
-        makeRule({ id: 'deny-x', effect: 'DENY', reason_code: 'AMOUNT_OVER_LIMIT', scope: { tools: ['payment.execute'] }, when }),
+        makeRule({
+          id: 'allow-x',
+          effect: 'ALLOW',
+          reason_code: 'WITHIN_LIMIT',
+          scope: { tools: ['payment.execute'] },
+          when,
+        }),
+        makeRule({
+          id: 'deny-x',
+          effect: 'DENY',
+          reason_code: 'AMOUNT_OVER_LIMIT',
+          scope: { tools: ['payment.execute'] },
+          when,
+        }),
       ],
     };
     const findings = lintPolicy(doc).filter((f) => f.code === 'OVERLAPPING_ALLOW_DENY');
@@ -1060,7 +1063,11 @@ describe('simulatePolicy', () => {
     const results = simulatePolicy(
       [
         { fixtureId: 'benign', label: 'benign invoice', input: baseInput() },
-        { fixtureId: 'big', label: 'large invoice', input: baseInput({ arguments: { ...baseInput().arguments, amount_minor: 600000 } }) },
+        {
+          fixtureId: 'big',
+          label: 'large invoice',
+          input: baseInput({ arguments: { ...baseInput().arguments, amount_minor: 600000 } }),
+        },
       ],
       revision,
     );

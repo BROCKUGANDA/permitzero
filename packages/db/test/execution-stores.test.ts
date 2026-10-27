@@ -92,7 +92,11 @@ function permits() {
   const stores = createDbStores(db);
   return {
     stores,
-    service: new PermitService({ signingKey: 'test-signing-key-0123456789abcdef', signingKeyId: 'k1', store: stores.permits }),
+    service: new PermitService({
+      signingKey: 'test-signing-key-0123456789abcdef',
+      signingKeyId: 'k1',
+      store: stores.permits,
+    }),
   };
 }
 
@@ -230,7 +234,11 @@ describe('durable execution store', () => {
     };
     await stores.executions.recordIntent(intent);
     await expect(stores.executions.recordIntent(intent)).rejects.toMatchObject({ code: '23505' });
-    const dispatched = await stores.executions.markDispatched(intent.executionId, tenantId(), new Date('2026-10-26T12:00:01Z'));
+    const dispatched = await stores.executions.markDispatched(
+      intent.executionId,
+      tenantId(),
+      new Date('2026-10-26T12:00:01Z'),
+    );
     expect(dispatched?.state).toBe('DISPATCHING');
     const done = await stores.executions.markResult({
       executionId: intent.executionId,
@@ -240,8 +248,12 @@ describe('durable execution store', () => {
       externalReference: 'sim_abc',
     });
     expect(done?.state).toBe('SUCCEEDED');
-    expect((await stores.executions.findLatestByAction(action.actionId, tenantId()))?.executionId).toBe(intent.executionId);
-    expect((await stores.executions.findByIdempotencyKey('v1:test:key-1', tenantId()))?.executionId).toBe(intent.executionId);
+    expect((await stores.executions.findLatestByAction(action.actionId, tenantId()))?.executionId).toBe(
+      intent.executionId,
+    );
+    expect((await stores.executions.findByIdempotencyKey('v1:test:key-1', tenantId()))?.executionId).toBe(
+      intent.executionId,
+    );
     expect(await stores.executions.listUnknownOutcomes(tenantId())).toHaveLength(0);
   });
 
@@ -337,7 +349,9 @@ describe('outbox lease protocol', () => {
     const row = await insertOutboxEvent(db.db, draft('action.submitted'));
     const now = new Date('2026-10-26T12:00:00Z');
     await claimOutboxEvents(db.db, 10, now);
-    expect(await markOutboxFailed(db.db, row.outboxEventId, 'CONNECTOR_TIMEOUT', new Date('2026-10-26T11:00:00Z'))).toBe(true);
+    expect(
+      await markOutboxFailed(db.db, row.outboxEventId, 'CONNECTOR_TIMEOUT', new Date('2026-10-26T11:00:00Z')),
+    ).toBe(true);
     const reclaimed = await claimOutboxEvents(db.db, 10, now);
     expect(reclaimed).toHaveLength(1);
     expect(reclaimed[0]?.attemptCount).toBe(2);
@@ -374,8 +388,18 @@ describe('ledger, dispatches and catalog', () => {
   });
 
   it('tracks dispatch markers and completes the latest open one', async () => {
-    await recordDispatch(db.db, { tenantId: tenantId(), connectorIdempotencyKey: 'key-d', operation: 'payment.execute', startedAt: new Date('2026-10-26T12:00:00Z') });
-    await recordDispatch(db.db, { tenantId: tenantId(), connectorIdempotencyKey: 'key-d', operation: 'payment.execute', startedAt: new Date('2026-10-26T12:01:00Z') });
+    await recordDispatch(db.db, {
+      tenantId: tenantId(),
+      connectorIdempotencyKey: 'key-d',
+      operation: 'payment.execute',
+      startedAt: new Date('2026-10-26T12:00:00Z'),
+    });
+    await recordDispatch(db.db, {
+      tenantId: tenantId(),
+      connectorIdempotencyKey: 'key-d',
+      operation: 'payment.execute',
+      startedAt: new Date('2026-10-26T12:01:00Z'),
+    });
     await completeDispatch(db.db, tenantId(), 'key-d', 'SUCCEEDED', new Date('2026-10-26T12:02:00Z'));
     const markers = await listDispatches(db.db, tenantId(), 'key-d');
     expect(markers).toHaveLength(2);
@@ -467,8 +491,14 @@ describe('database triggers', () => {
   it('keeps action updated_at fresh via trigger', async () => {
     const action = await makeAction();
     const before = action.updatedAt.getTime();
-    await transitionAction(db.db, { tenantId: tenantId(), actionId: action.actionId, to: 'VALIDATING', expectedVersion: 0, now: NOW });
+    await transitionAction(db.db, {
+      tenantId: tenantId(),
+      actionId: action.actionId,
+      to: 'VALIDATING',
+      expectedVersion: 0,
+      now: NOW,
+    });
     const after = await getAction(db.db, tenantId(), action.actionId);
-    expect((after?.updatedAt.getTime() ?? 0)).toBeGreaterThanOrEqual(before);
+    expect(after?.updatedAt.getTime() ?? 0).toBeGreaterThanOrEqual(before);
   });
 });

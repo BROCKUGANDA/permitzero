@@ -66,7 +66,11 @@ export async function createConnector(ex: DbExecutor, input: CreateConnectorInpu
   return row;
 }
 
-export async function getConnector(ex: DbExecutor, tenantId: string, connectorId: string): Promise<ConnectorRow | null> {
+export async function getConnector(
+  ex: DbExecutor,
+  tenantId: string,
+  connectorId: string,
+): Promise<ConnectorRow | null> {
   return first(
     ex
       .select()
@@ -122,7 +126,11 @@ export async function setConnectorStatus(
 
 export async function getVendor(ex: DbExecutor, tenantId: string, vendorId: string): Promise<VendorRow | null> {
   return first(
-    ex.select().from(vendors).where(and(eq(vendors.tenantId, tenantId), eq(vendors.vendorId, vendorId))).limit(1),
+    ex
+      .select()
+      .from(vendors)
+      .where(and(eq(vendors.tenantId, tenantId), eq(vendors.vendorId, vendorId)))
+      .limit(1),
   );
 }
 
@@ -280,7 +288,12 @@ export async function getLedgerEntry(
     ex
       .select()
       .from(connectorLedger)
-      .where(and(eq(connectorLedger.tenantId, tenantId), eq(connectorLedger.connectorIdempotencyKey, connectorIdempotencyKey)))
+      .where(
+        and(
+          eq(connectorLedger.tenantId, tenantId),
+          eq(connectorLedger.connectorIdempotencyKey, connectorIdempotencyKey),
+        ),
+      )
       .limit(1),
   );
 }
@@ -403,7 +416,12 @@ export async function listDispatches(
   return ex
     .select()
     .from(connectorDispatches)
-    .where(and(eq(connectorDispatches.tenantId, tenantId), eq(connectorDispatches.connectorIdempotencyKey, connectorIdempotencyKey)))
+    .where(
+      and(
+        eq(connectorDispatches.tenantId, tenantId),
+        eq(connectorDispatches.connectorIdempotencyKey, connectorIdempotencyKey),
+      ),
+    )
     .orderBy(asc(connectorDispatches.startedAt));
 }
 

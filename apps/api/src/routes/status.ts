@@ -4,13 +4,7 @@
  * health — the three things an operator asks about first.
  */
 import { meSchema, statusSchema } from '@permitzero/schemas';
-import {
-  countOutboxByStatus,
-  getEnforcementMode,
-  getTenantById,
-  healthCheck,
-  listConnectors,
-} from '@permitzero/db';
+import { countOutboxByStatus, getEnforcementMode, getTenantById, healthCheck, listConnectors } from '@permitzero/db';
 import type { AppContext, ZodFastifyInstance } from '../app.js';
 import { authenticateToken } from '../auth.js';
 

@@ -109,7 +109,12 @@ describe('approvals', () => {
     const early = await postJson(t, `/v1/actions/${action.action_id}/permit`, t.agentToken, {});
     expect(early.status).toBe(409);
 
-    const approved = await postJson(t, `/v1/actions/${action.action_id}/approve`, t.approver1Token, approveBody(action));
+    const approved = await postJson(
+      t,
+      `/v1/actions/${action.action_id}/approve`,
+      t.approver1Token,
+      approveBody(action),
+    );
     expect(approved.status).toBe(200);
     const auditor = await postJson(t, `/v1/actions/${action.action_id}/permit`, t.auditorToken, {});
     expect(auditor.status).toBe(403);

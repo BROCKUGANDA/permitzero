@@ -16,7 +16,12 @@ function setup() {
   const now = { t: new Date('2026-10-26T12:00:00Z').getTime() };
   const clock = () => new Date(now.t);
   const stores = createMemoryStores({ clock });
-  const permits = new PermitService({ signingKey: SIGNING_KEY, signingKeyId: SIGNING_KEY_ID, store: stores.permits, clock });
+  const permits = new PermitService({
+    signingKey: SIGNING_KEY,
+    signingKeyId: SIGNING_KEY_ID,
+    store: stores.permits,
+    clock,
+  });
   const input: PermitIssueInput = {
     tenantId: 'ten_test',
     agentId: 'agt_test',
@@ -35,7 +40,15 @@ function setup() {
     now: clock(),
     ...overrides,
   });
-  return { stores, permits, input, context, advance: (ms: number) => { now.t += ms; } };
+  return {
+    stores,
+    permits,
+    input,
+    context,
+    advance: (ms: number) => {
+      now.t += ms;
+    },
+  };
 }
 
 describe('PermitService', () => {
@@ -171,13 +184,15 @@ describe('PermitService', () => {
     };
     await expect(permits.issue({ ...base, ttlSeconds: 0 })).rejects.toThrow(RangeError);
     await expect(permits.issue({ ...base, ttlSeconds: 3601 })).rejects.toThrow(RangeError);
-    await expect(permits.verifyAndConsume('pzpt_' + 'A'.repeat(43), {
-      tenantId: 't',
-      actionId: 'x',
-      actionHash: ACTION_HASH,
-      policyRevisionId: 'p',
-      audienceTool: 'payment.execute',
-      now: new Date(Number.NaN),
-    })).rejects.toThrow(TypeError);
+    await expect(
+      permits.verifyAndConsume('pzpt_' + 'A'.repeat(43), {
+        tenantId: 't',
+        actionId: 'x',
+        actionHash: ACTION_HASH,
+        policyRevisionId: 'p',
+        audienceTool: 'payment.execute',
+        now: new Date(Number.NaN),
+      }),
+    ).rejects.toThrow(TypeError);
   });
 });

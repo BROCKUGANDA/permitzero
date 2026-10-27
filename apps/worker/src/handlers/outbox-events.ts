@@ -8,12 +8,7 @@
  */
 import type { HandlerResult, JobHandler, QueueJob } from '@permitzero/queue';
 
-const KNOWN_EVENTS = new Set([
-  'action.decided',
-  'action.approved',
-  'action.rejected',
-  'action.expired',
-]);
+const KNOWN_EVENTS = new Set(['action.decided', 'action.approved', 'action.rejected', 'action.expired']);
 
 export interface JobEnvelope {
   outboxId: string;

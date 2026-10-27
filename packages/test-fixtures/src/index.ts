@@ -18,13 +18,7 @@ import { CORPUS_VERSION, corpus } from './corpus.js';
 export * from './builders.js';
 export * from './corpus.js';
 
-export const FIXTURE_GROUPS: readonly FixtureGroup[] = [
-  'normal',
-  'deny',
-  'approval',
-  'adversarial',
-  'resilience',
-];
+export const FIXTURE_GROUPS: readonly FixtureGroup[] = ['normal', 'deny', 'approval', 'adversarial', 'resilience'];
 
 /** Look up one fixture by its stable id. */
 export function corpusById(id: string): FixtureCase | undefined {

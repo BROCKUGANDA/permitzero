@@ -64,7 +64,12 @@ export function zodError(message: string, err: ZodError): ValidationError {
   return new ValidationError(message, details);
 }
 
-function fastifyError(err: { code?: string; message?: string; statusCode?: number; issues?: unknown }): DomainError | null {
+function fastifyError(err: {
+  code?: string;
+  message?: string;
+  statusCode?: number;
+  issues?: unknown;
+}): DomainError | null {
   switch (err.code) {
     case 'FST_ERR_CTP_EMPTY_JSON_BODY':
     case 'FST_ERR_CTP_INVALID_MEDIA_TYPE':

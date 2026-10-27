@@ -81,7 +81,13 @@ export function createOutboxDispatcher(deps: OutboxDispatcherDeps): OutboxDispat
       if (!marked) {
         // Another dispatcher already moved it on. Not an error, not a duplicate
         // publish we can undo — report it so the operator can see the race.
-        emit({ kind: 'publish_failed', outboxId: row.id, errorClass: 'OUTBOX_ALREADY_CLAIMED', attempt: row.attemptCount + 1, retryable: false });
+        emit({
+          kind: 'publish_failed',
+          outboxId: row.id,
+          errorClass: 'OUTBOX_ALREADY_CLAIMED',
+          attempt: row.attemptCount + 1,
+          retryable: false,
+        });
         return 'failed';
       }
       emit({ kind: 'published', outboxId: row.id, queue: row.queueName });

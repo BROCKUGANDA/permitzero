@@ -40,7 +40,10 @@ export function ApprovalProgress({
 }: {
   progress: NonNullable<ActionDto['approval_progress']>;
 }): React.JSX.Element {
-  const pct = progress.required_approvals > 0 ? Math.min(100, (progress.distinct_approvers / progress.required_approvals) * 100) : 0;
+  const pct =
+    progress.required_approvals > 0
+      ? Math.min(100, (progress.distinct_approvers / progress.required_approvals) * 100)
+      : 0;
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-baseline justify-between text-sm">

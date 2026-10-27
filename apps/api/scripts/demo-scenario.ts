@@ -33,7 +33,12 @@ function check(name: string, cond: boolean, detail?: string): void {
   }
 }
 
-async function call(method: string, path: string, token: string | null, body?: unknown): Promise<{ status: number; json: unknown }> {
+async function call(
+  method: string,
+  path: string,
+  token: string | null,
+  body?: unknown,
+): Promise<{ status: number; json: unknown }> {
   const res = await fetch(`${API_URL}${path}`, {
     method,
     headers: {
@@ -100,7 +105,8 @@ async function main(): Promise<void> {
   });
   check(
     'execution returns a receipt',
-    smallExec.status === 200 && (smallExec.json as { receipt: { amount_minor: number } }).receipt?.amount_minor === 300000,
+    smallExec.status === 200 &&
+      (smallExec.json as { receipt: { amount_minor: number } }).receipt?.amount_minor === 300000,
     JSON.stringify(smallExec.json).slice(0, 200),
   );
   console.log();
@@ -160,7 +166,10 @@ async function main(): Promise<void> {
     idempotency_key: `demo-bank-${stamp}`,
     environment: 'DEMO',
   });
-  check('intake asks for two approvals', change.status === 201 && field(change.json, 'decision') === 'REQUIRE_APPROVAL');
+  check(
+    'intake asks for two approvals',
+    change.status === 201 && field(change.json, 'decision') === 'REQUIRE_APPROVAL',
+  );
   const changeBody = change.json as { action_id: string; action_hash: string; policy_revision: { id: string } };
   const approve = (token: string, reason: string, key: string) =>
     call('POST', `/v1/actions/${changeBody.action_id}/approve`, token, {

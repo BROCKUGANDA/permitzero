@@ -116,10 +116,7 @@ export function canonicalize(value: unknown, options: CanonicalizeOptions = {}):
     }
 
     if (t === 'undefined') {
-      throw new CanonicalizationError(
-        'undefined is not canonical; use explicit null',
-        path,
-      );
+      throw new CanonicalizationError('undefined is not canonical; use explicit null', path);
     }
 
     if (t === 'function' || t === 'symbol') {
@@ -156,10 +153,7 @@ export function canonicalize(value: unknown, options: CanonicalizeOptions = {}):
       }
       const child = source[key];
       if (child === undefined) {
-        throw new CanonicalizationError(
-          `property "${key}" is undefined; use explicit null`,
-          path,
-        );
+        throw new CanonicalizationError(`property "${key}" is undefined; use explicit null`, path);
       }
       out[key.normalize('NFC')] = walk(child, `${path}.${key}`, depth + 1);
     }
@@ -193,10 +187,7 @@ function stableStringify(node: Json): string {
  */
 export function canonicalHash(value: unknown, options: CanonicalizeOptions = {}): string {
   const canonical = canonicalize(value, options);
-  const digest = createHash(HASH_ALGORITHM)
-    .update(`${HASH_VERSION}\n`)
-    .update(canonical)
-    .digest('hex');
+  const digest = createHash(HASH_ALGORITHM).update(`${HASH_VERSION}\n`).update(canonical).digest('hex');
   return `${HASH_ALGORITHM}:${digest}`;
 }
 

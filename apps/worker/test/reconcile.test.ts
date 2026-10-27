@@ -78,7 +78,15 @@ describe('reconciliation handler', () => {
 
   it('sends open dispatches without a receipt to a human', async () => {
     const actionId = await makeAction(t, 'rec-manual');
-    await walkTo(t, actionId, ['VALIDATING', 'EVALUATING', 'ALLOWED', 'PERMIT_ISSUED', 'EXECUTION_PENDING', 'EXECUTING', 'UNKNOWN_OUTCOME']);
+    await walkTo(t, actionId, [
+      'VALIDATING',
+      'EVALUATING',
+      'ALLOWED',
+      'PERMIT_ISSUED',
+      'EXECUTION_PENDING',
+      'EXECUTING',
+      'UNKNOWN_OUTCOME',
+    ]);
     const connectorId = await connectorIdForTool(t);
     const execution = executionRecord(t, actionId, connectorId);
     await t.stores.executions.recordIntent(execution);
@@ -100,7 +108,15 @@ describe('reconciliation handler', () => {
 
   it('fails executions that never dispatched', async () => {
     const actionId = await makeAction(t, 'rec-never');
-    await walkTo(t, actionId, ['VALIDATING', 'EVALUATING', 'ALLOWED', 'PERMIT_ISSUED', 'EXECUTION_PENDING', 'EXECUTING', 'UNKNOWN_OUTCOME']);
+    await walkTo(t, actionId, [
+      'VALIDATING',
+      'EVALUATING',
+      'ALLOWED',
+      'PERMIT_ISSUED',
+      'EXECUTION_PENDING',
+      'EXECUTING',
+      'UNKNOWN_OUTCOME',
+    ]);
     const connectorId = await connectorIdForTool(t);
     await t.stores.executions.recordIntent(executionRecord(t, actionId, connectorId));
 

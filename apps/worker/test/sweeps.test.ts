@@ -65,7 +65,15 @@ describe('sweeps', () => {
 
   it('reconciles unknown executions past their grace period', async () => {
     const actionId = await makeAction(t, 'sweep-unknown');
-    await walkTo(t, actionId, ['VALIDATING', 'EVALUATING', 'ALLOWED', 'PERMIT_ISSUED', 'EXECUTION_PENDING', 'EXECUTING', 'UNKNOWN_OUTCOME']);
+    await walkTo(t, actionId, [
+      'VALIDATING',
+      'EVALUATING',
+      'ALLOWED',
+      'PERMIT_ISSUED',
+      'EXECUTION_PENDING',
+      'EXECUTING',
+      'UNKNOWN_OUTCOME',
+    ]);
     const connectorId = await connectorIdForTool(t);
     await t.stores.executions.recordIntent(executionRecord(t, actionId, connectorId));
     await t.stores.data.recordDispatch({

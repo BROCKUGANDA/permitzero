@@ -40,15 +40,10 @@ import type { AgentRow, DbExecutor } from '@permitzero/db';
 export const VELOCITY_WINDOW_MS = 3_600_000;
 export const BUDGET_WINDOW_MS = 86_400_000;
 
-export type PinFailureReason =
-  | 'NO_ACTIVE_POLICY'
-  | 'NO_PUBLISHED_REVISION'
-  | 'AMBIGUOUS_POLICY'
-  | 'MALFORMED_DOCUMENT';
+export type PinFailureReason = 'NO_ACTIVE_POLICY' | 'NO_PUBLISHED_REVISION' | 'AMBIGUOUS_POLICY' | 'MALFORMED_DOCUMENT';
 
 export type PinResult =
-  | { ok: true; pin: PinnedPolicyRevision }
-  | { ok: false; reason: PinFailureReason; detail: string };
+  { ok: true; pin: PinnedPolicyRevision } | { ok: false; reason: PinFailureReason; detail: string };
 
 export async function pinPublishedPolicy(ex: DbExecutor, tenantId: string): Promise<PinResult> {
   const active = (await listPolicies(ex, tenantId)).filter((p) => p.status === 'ACTIVE');

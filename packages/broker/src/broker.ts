@@ -27,12 +27,7 @@ import {
   newId,
   redact,
 } from '@permitzero/domain';
-import type {
-  ActionRecord,
-  ActionState,
-  ConnectorRecord,
-  DenyReason as DenyReasonType,
-} from '@permitzero/domain';
+import type { ActionRecord, ActionState, ConnectorRecord, DenyReason as DenyReasonType } from '@permitzero/domain';
 import { BrokerAuditEventType, systemClock } from './ports.js';
 import type {
   ActionStore,
@@ -193,7 +188,12 @@ export class Broker {
       );
     }
     if (!action.policyRevisionId) {
-      return this.reject(action, request.traceId, DenyReason.POLICY_MISSING, 'Action has no evaluated policy revision.');
+      return this.reject(
+        action,
+        request.traceId,
+        DenyReason.POLICY_MISSING,
+        'Action has no evaluated policy revision.',
+      );
     }
     const connectorKey = connectorIdempotencyKey(action.actionId, action.argumentsHash);
     if (!connectorKey) {
@@ -211,7 +211,12 @@ export class Broker {
     // at most one effect.)
     const connectorRecord = await this.resolveConnector(request.tenantId, action.toolName);
     if (!connectorRecord) {
-      return this.reject(action, request.traceId, DenyReason.CONNECTOR_UNKNOWN, `No connector serves ${action.toolName}.`);
+      return this.reject(
+        action,
+        request.traceId,
+        DenyReason.CONNECTOR_UNKNOWN,
+        `No connector serves ${action.toolName}.`,
+      );
     }
     if (connectorRecord.status === 'DISABLED') {
       return this.reject(action, request.traceId, DenyReason.CONNECTOR_DISABLED, 'The connector is disabled.');
@@ -349,7 +354,13 @@ export class Broker {
 
     const params = this.dispatchParams(current);
     if (params === null) {
-      return this.finishTerminal(current, intent, request.traceId, 'FAILED_TERMINAL', 'DISPATCH_ARGUMENTS_UNRECOVERABLE');
+      return this.finishTerminal(
+        current,
+        intent,
+        request.traceId,
+        'FAILED_TERMINAL',
+        'DISPATCH_ARGUMENTS_UNRECOVERABLE',
+      );
     }
     if (params === 'UNSUPPORTED_TOOL') {
       return this.finishTerminal(current, intent, request.traceId, 'FAILED_TERMINAL', 'UNSUPPORTED_TOOL');
@@ -634,14 +645,13 @@ export class Broker {
     }
 
     if (result === 'TIMEOUT' || result.status === 'TIMEOUT_AFTER_DISPATCH') {
-      const updated =
-        (await this.executions.markResult({
-          executionId: intent.executionId,
-          tenantId: intent.tenantId,
-          state: 'UNKNOWN_OUTCOME',
-          resultReceivedAt: this.clock(),
-          errorClass: 'TIMEOUT_AFTER_DISPATCH',
-        })) ?? { ...intent, state: 'UNKNOWN_OUTCOME' as const };
+      const updated = (await this.executions.markResult({
+        executionId: intent.executionId,
+        tenantId: intent.tenantId,
+        state: 'UNKNOWN_OUTCOME',
+        resultReceivedAt: this.clock(),
+        errorClass: 'TIMEOUT_AFTER_DISPATCH',
+      })) ?? { ...intent, state: 'UNKNOWN_OUTCOME' as const };
       await this.walkTo(action, 'UNKNOWN_OUTCOME');
       await this.emitExecutionEvent(action, traceId, BrokerAuditEventType.executionUnknownOutcome, {
         execution_id: intent.executionId,
@@ -649,22 +659,21 @@ export class Broker {
       return { outcome: 'UNKNOWN_OUTCOME', execution: updated };
     }
     if (result.status === 'SUCCEEDED') {
-      const updated =
-        (await this.executions.markResult({
-          executionId: intent.executionId,
-          tenantId: intent.tenantId,
-          state: 'SUCCEEDED',
-          resultReceivedAt: this.clock(),
-          externalReference: result.receipt.externalReference,
-          receiptHash: result.receipt.receiptHash,
-          receipt: result.receipt,
-        })) ?? {
-          ...intent,
-          state: 'SUCCEEDED' as const,
-          receipt: result.receipt,
-          externalReference: result.receipt.externalReference,
-          receiptHash: result.receipt.receiptHash,
-        };
+      const updated = (await this.executions.markResult({
+        executionId: intent.executionId,
+        tenantId: intent.tenantId,
+        state: 'SUCCEEDED',
+        resultReceivedAt: this.clock(),
+        externalReference: result.receipt.externalReference,
+        receiptHash: result.receipt.receiptHash,
+        receipt: result.receipt,
+      })) ?? {
+        ...intent,
+        state: 'SUCCEEDED' as const,
+        receipt: result.receipt,
+        externalReference: result.receipt.externalReference,
+        receiptHash: result.receipt.receiptHash,
+      };
       await this.walkTo(action, 'SUCCEEDED');
       await this.emitExecutionEvent(action, traceId, BrokerAuditEventType.executionSucceeded, {
         execution_id: intent.executionId,
@@ -688,14 +697,13 @@ export class Broker {
     state: 'FAILED_RETRYABLE' | 'FAILED_TERMINAL',
     errorClass: string,
   ): Promise<BrokerExecuteResult> {
-    const updated =
-      (await this.executions.markResult({
-        executionId: intent.executionId,
-        tenantId: intent.tenantId,
-        state,
-        resultReceivedAt: this.clock(),
-        errorClass,
-      })) ?? { ...intent, state, errorClass };
+    const updated = (await this.executions.markResult({
+      executionId: intent.executionId,
+      tenantId: intent.tenantId,
+      state,
+      resultReceivedAt: this.clock(),
+      errorClass,
+    })) ?? { ...intent, state, errorClass };
     await this.walkTo(action, state);
     await this.emitExecutionEvent(
       action,

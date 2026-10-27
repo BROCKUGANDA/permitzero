@@ -140,7 +140,11 @@ const DropdownMenuLabel = React.forwardRef<
   React.ElementRef<typeof DropdownPrimitive.Label>,
   React.ComponentPropsWithoutRef<typeof DropdownPrimitive.Label> & { inset?: boolean }
 >(({ className, inset, ...props }, ref) => (
-  <DropdownPrimitive.Label ref={ref} className={cn('px-2 py-1.5 text-xs font-semibold text-muted-foreground', inset && 'pl-8', className)} {...props} />
+  <DropdownPrimitive.Label
+    ref={ref}
+    className={cn('px-2 py-1.5 text-xs font-semibold text-muted-foreground', inset && 'pl-8', className)}
+    {...props}
+  />
 ));
 DropdownMenuLabel.displayName = 'DropdownMenuLabel';
 

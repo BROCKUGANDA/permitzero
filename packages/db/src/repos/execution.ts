@@ -154,7 +154,12 @@ export async function revokePermitsByAction(
     .update(permits)
     .set({ revokedAt: now, revocationReason: reason })
     .where(
-      and(eq(permits.tenantId, tenantId), eq(permits.actionId, actionId), isNull(permits.consumedAt), isNull(permits.revokedAt)),
+      and(
+        eq(permits.tenantId, tenantId),
+        eq(permits.actionId, actionId),
+        isNull(permits.consumedAt),
+        isNull(permits.revokedAt),
+      ),
     )
     .returning({ permitId: permits.permitId });
   return updated.length;
@@ -265,7 +270,11 @@ export async function findExecutionByConnectorKey(
   );
 }
 
-export async function listUnknownOutcomeExecutions(ex: DbExecutor, tenantId: string | null, limit = 100): Promise<ExecutionRow[]> {
+export async function listUnknownOutcomeExecutions(
+  ex: DbExecutor,
+  tenantId: string | null,
+  limit = 100,
+): Promise<ExecutionRow[]> {
   const conditions =
     tenantId === null
       ? [eq(executions.state, 'UNKNOWN_OUTCOME')]

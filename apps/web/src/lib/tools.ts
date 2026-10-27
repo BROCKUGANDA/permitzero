@@ -85,7 +85,12 @@ export const TOOL_META: Record<SupportedTool, ToolMeta> = {
     description: 'Bulk-export vendor records. Watched for exfiltration.',
     sideEffecting: true,
     fields: [
-      { name: 'vendor_id', label: 'Single vendor (optional)', kind: 'optional-text', placeholder: 'Leave blank for all' },
+      {
+        name: 'vendor_id',
+        label: 'Single vendor (optional)',
+        kind: 'optional-text',
+        placeholder: 'Leave blank for all',
+      },
       { name: 'record_limit', label: 'Record limit', kind: 'integer', placeholder: '1000' },
       { name: 'data_classification', label: 'Data classification', kind: 'text', placeholder: 'INTERNAL' },
     ],

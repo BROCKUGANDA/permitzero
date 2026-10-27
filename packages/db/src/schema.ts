@@ -76,10 +76,7 @@ export const tenants = pgTable(
   (t) => [
     unique('uq_tenants_slug').on(t.slug),
     check('chk_tenants_status', sql`${t.status} IN ('ACTIVE','SUSPENDED','ARCHIVED')`),
-    check(
-      'chk_tenants_environment',
-      sql`${t.defaultEnvironment} IN ('DEMO','STAGING','PRODUCTION')`,
-    ),
+    check('chk_tenants_environment', sql`${t.defaultEnvironment} IN ('DEMO','STAGING','PRODUCTION')`),
     check('chk_tenants_name_nonempty', sql`length(btrim(${t.name})) > 0`),
   ],
 );
@@ -151,7 +148,10 @@ export const serviceCredentials = pgTable(
     credentialRef: text('credential_ref').notNull(),
     secretHash: text('secret_hash'),
     secretPrefix: text('secret_prefix'),
-    scopesJson: jsonb('scopes_json').notNull().default(sql`'[]'::jsonb`).$type<readonly string[]>(),
+    scopesJson: jsonb('scopes_json')
+      .notNull()
+      .default(sql`'[]'::jsonb`)
+      .$type<readonly string[]>(),
     status: text('status').notNull().default('ACTIVE').$type<'ACTIVE' | 'SUSPENDED' | 'REVOKED' | 'EXPIRED'>(),
     expiresAt: ts('expires_at'),
     revokedAt: ts('revoked_at'),
@@ -167,10 +167,7 @@ export const serviceCredentials = pgTable(
       .on(t.tenantId, t.name)
       .where(sql`${t.status} = 'ACTIVE'`),
     check('chk_service_credentials_subject_type', sql`${t.subjectType} IN ('AGENT','USER','SERVICE')`),
-    check(
-      'chk_service_credentials_status',
-      sql`${t.status} IN ('ACTIVE','SUSPENDED','REVOKED','EXPIRED')`,
-    ),
+    check('chk_service_credentials_status', sql`${t.status} IN ('ACTIVE','SUSPENDED','REVOKED','EXPIRED')`),
     check(
       'chk_service_credentials_secret_prefix_length',
       sql`${t.secretPrefix} IS NULL OR length(${t.secretPrefix}) <= 12`,
@@ -191,7 +188,10 @@ export const agents = pgTable(
     status: text('status').notNull().default('ACTIVE').$type<AgentStatus>(),
     credentialId: text('credential_id').notNull(),
     credentialExpiresAt: ts('credential_expires_at'),
-    allowedToolsJson: jsonb('allowed_tools_json').notNull().default(sql`'[]'::jsonb`).$type<readonly ToolScope[]>(),
+    allowedToolsJson: jsonb('allowed_tools_json')
+      .notNull()
+      .default(sql`'[]'::jsonb`)
+      .$type<readonly ToolScope[]>(),
     description: text('description'),
     revokedAt: ts('revoked_at'),
     createdAt: tsNow('created_at'),
@@ -260,15 +260,9 @@ export const policyRevisions = pgTable(
     primaryKey({ columns: [t.revisionId, t.tenantId] }),
     unique('uq_policy_revisions_number').on(t.policyId, t.revisionNumber),
     index('idx_policy_revisions_policy_status').on(t.policyId, t.status),
-    check(
-      'chk_policy_revisions_status',
-      sql`${t.status} IN ('DRAFT','SIMULATING','READY','PUBLISHED','ROLLED_BACK')`,
-    ),
+    check('chk_policy_revisions_status', sql`${t.status} IN ('DRAFT','SIMULATING','READY','PUBLISHED','ROLLED_BACK')`),
     check('chk_policy_revisions_number_positive', sql`${t.revisionNumber} > 0`),
-    check(
-      'chk_policy_revisions_published_at',
-      sql`${t.status} <> 'PUBLISHED' OR ${t.publishedAt} IS NOT NULL`,
-    ),
+    check('chk_policy_revisions_published_at', sql`${t.status} <> 'PUBLISHED' OR ${t.publishedAt} IS NOT NULL`),
     check('chk_policy_revisions_hash_shape', sql`${t.policyHash} ~ '^sha256:[a-f0-9]{64}$'`),
   ],
 );
@@ -296,7 +290,10 @@ export const actions = pgTable(
       .$type<Record<string, unknown>>(),
     argumentsHash: text('arguments_hash').notNull(),
     hashVersion: text('hash_version').notNull().default('pz-canon-v1'),
-    evidenceRefsJson: jsonb('evidence_refs_json').notNull().default(sql`'[]'::jsonb`).$type<readonly EvidenceRef[]>(),
+    evidenceRefsJson: jsonb('evidence_refs_json')
+      .notNull()
+      .default(sql`'[]'::jsonb`)
+      .$type<readonly EvidenceRef[]>(),
     idempotencyKey: text('idempotency_key').notNull(),
     state: text('state').notNull().default('RECEIVED').$type<ActionState>(),
     decision: text('decision').$type<Decision | null>(),
@@ -305,7 +302,10 @@ export const actions = pgTable(
       .default(sql`'[]'::jsonb`)
       .$type<readonly string[]>(),
     policyRevisionId: text('policy_revision_id'),
-    riskSignalsJson: jsonb('risk_signals_json').notNull().default(sql`'[]'::jsonb`).$type<readonly RiskSignal[]>(),
+    riskSignalsJson: jsonb('risk_signals_json')
+      .notNull()
+      .default(sql`'[]'::jsonb`)
+      .$type<readonly RiskSignal[]>(),
     requiredApprovals: integer('required_approvals').notNull().default(0),
     requestedAt: tsNow('requested_at'),
     decidedAt: ts('decided_at'),
@@ -436,7 +436,10 @@ export const connectors = pgTable(
     type: text('type').notNull(),
     environment: text('environment').notNull().default('DEMO').$type<Environment>(),
     status: text('status').notNull().default('DISABLED').$type<ConnectorStatus>(),
-    allowedToolsJson: jsonb('allowed_tools_json').notNull().default(sql`'[]'::jsonb`).$type<readonly string[]>(),
+    allowedToolsJson: jsonb('allowed_tools_json')
+      .notNull()
+      .default(sql`'[]'::jsonb`)
+      .$type<readonly string[]>(),
     credentialRef: text('credential_ref').notNull(),
     credentialHash: text('credential_hash'),
     credentialPrefix: text('credential_prefix'),
@@ -576,7 +579,10 @@ export const outboxEvents = pgTable(
     aggregateId: text('aggregate_id').notNull(),
     eventType: text('event_type').notNull(),
     queueName: text('queue_name').notNull().default('pz.outbox'),
-    payloadJson: jsonb('payload_json').notNull().default(sql`'{}'::jsonb`).$type<Record<string, unknown>>(),
+    payloadJson: jsonb('payload_json')
+      .notNull()
+      .default(sql`'{}'::jsonb`)
+      .$type<Record<string, unknown>>(),
     status: text('status').notNull().default('PENDING').$type<OutboxStatus>(),
     attemptCount: integer('attempt_count').notNull().default(0),
     maxAttempts: integer('max_attempts').notNull().default(5),
@@ -624,10 +630,15 @@ export const idempotencyRecords = pgTable(
   (t) => [
     primaryKey({ columns: [t.idempotencyId, t.tenantId] }),
     unique('uq_idempotency_scope').on(t.tenantId, t.principalId, t.idempotencyKey),
-    index('idx_idempotency_expires').on(t.expiresAt).where(sql`${t.expiresAt} IS NOT NULL`),
+    index('idx_idempotency_expires')
+      .on(t.expiresAt)
+      .where(sql`${t.expiresAt} IS NOT NULL`),
     check('chk_idempotency_status', sql`${t.status} IN ('IN_PROGRESS','COMPLETED','FAILED')`),
     check('chk_idempotency_principal_type', sql`${t.principalType} IN ('USER','AGENT','SYSTEM','WORKER')`),
-    check('chk_idempotency_http_status', sql`${t.httpStatus} IS NULL OR (${t.httpStatus} >= 100 AND ${t.httpStatus} <= 599)`),
+    check(
+      'chk_idempotency_http_status',
+      sql`${t.httpStatus} IS NULL OR (${t.httpStatus} >= 100 AND ${t.httpStatus} <= 599)`,
+    ),
   ],
 );
 
@@ -645,7 +656,9 @@ export const modelEvaluations = pgTable(
     schemaVersion: text('schema_version').notNull(),
     inputHash: text('input_hash').notNull(),
     outputJsonValidated: jsonb('output_json_validated').$type<Record<string, unknown> | null>(),
-    status: text('status').notNull().$type<'OK' | 'DISABLED' | 'UNAVAILABLE' | 'INVALID_OUTPUT' | 'TIMEOUT' | 'ERROR'>(),
+    status: text('status')
+      .notNull()
+      .$type<'OK' | 'DISABLED' | 'UNAVAILABLE' | 'INVALID_OUTPUT' | 'TIMEOUT' | 'ERROR'>(),
     latencyMs: integer('latency_ms'),
     tokenUsageJson: jsonb('token_usage_json').$type<Record<string, number> | null>(),
     errorClass: text('error_class'),
@@ -673,22 +686,25 @@ export const replaySessions = pgTable(
     candidateRevisionId: text('candidate_revision_id'),
     baselineRevisionId: text('baseline_revision_id'),
     fixtureCorpusVersion: text('fixture_corpus_version').notNull(),
-    status: text('status').notNull().default('PENDING').$type<'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'>(),
+    status: text('status')
+      .notNull()
+      .default('PENDING')
+      .$type<'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'>(),
     requestedBy: text('requested_by'),
     caseCount: integer('case_count').notNull().default(0),
     startedAt: ts('started_at'),
     completedAt: ts('completed_at'),
-    summaryJson: jsonb('summary_json').notNull().default(sql`'{}'::jsonb`).$type<Record<string, unknown>>(),
+    summaryJson: jsonb('summary_json')
+      .notNull()
+      .default(sql`'{}'::jsonb`)
+      .$type<Record<string, unknown>>(),
     errorClass: text('error_class'),
     createdAt: tsNow('created_at'),
     updatedAt: tsNow('updated_at'),
   },
   (t) => [
     primaryKey({ columns: [t.replaySessionId, t.tenantId] }),
-    check(
-      'chk_replay_sessions_status',
-      sql`${t.status} IN ('PENDING','RUNNING','COMPLETED','FAILED','CANCELLED')`,
-    ),
+    check('chk_replay_sessions_status', sql`${t.status} IN ('PENDING','RUNNING','COMPLETED','FAILED','CANCELLED')`),
     check('chk_replay_sessions_case_count_nonneg', sql`${t.caseCount} >= 0`),
   ],
 );
@@ -706,9 +722,10 @@ export const replayResults = pgTable(
     baselineDecision: text('baseline_decision').$type<Decision | null>(),
     candidateDecision: text('candidate_decision').$type<Decision | null>(),
     changed: boolean('changed').notNull().default(false),
-    changeKind: text('change_kind').notNull().default('UNCHANGED').$type<
-      'UNCHANGED' | 'FALSE_ALLOW' | 'FALSE_DENY' | 'ESCALATED' | 'DEESCALATED' | 'OTHER'
-    >(),
+    changeKind: text('change_kind')
+      .notNull()
+      .default('UNCHANGED')
+      .$type<'UNCHANGED' | 'FALSE_ALLOW' | 'FALSE_DENY' | 'ESCALATED' | 'DEESCALATED' | 'OTHER'>(),
     baselineReasonCodesJson: jsonb('baseline_reason_codes_json')
       .notNull()
       .default(sql`'[]'::jsonb`)
@@ -800,10 +817,7 @@ export const vendors = pgTable(
   (t) => [
     primaryKey({ columns: [t.vendorId, t.tenantId] }),
     index('idx_vendors_tenant_status').on(t.tenantId, t.status),
-    check(
-      'chk_vendors_status',
-      sql`${t.status} IN ('VERIFIED','PENDING_VERIFICATION','UNVERIFIED','BLOCKED')`,
-    ),
+    check('chk_vendors_status', sql`${t.status} IN ('VERIFIED','PENDING_VERIFICATION','UNVERIFIED','BLOCKED')`),
     check('chk_vendors_account_age_nonneg', sql`${t.accountAgeDays} >= 0`),
     check('chk_vendors_verified_reference', sql`${t.status} <> 'VERIFIED' OR ${t.verifiedBeneficiaryRef} IS NOT NULL`),
   ],
@@ -877,7 +891,10 @@ export const connectorLedger = pgTable(
     operation: text('operation').notNull(),
     externalReference: text('external_reference').notNull(),
     receiptHash: text('receipt_hash').notNull(),
-    receiptJson: jsonb('receipt_json').notNull().default(sql`'{}'::jsonb`).$type<Record<string, unknown>>(),
+    receiptJson: jsonb('receipt_json')
+      .notNull()
+      .default(sql`'{}'::jsonb`)
+      .$type<Record<string, unknown>>(),
     amountMinor: bigint('amount_minor', { mode: 'bigint' }),
     currency: text('currency'),
     beneficiaryRef: text('beneficiary_ref'),

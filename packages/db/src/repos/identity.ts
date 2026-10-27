@@ -128,7 +128,10 @@ export async function createCredential(
 }
 
 /** Authentication lookup: exactly one row per secret hash, cross-tenant. */
-export async function findCredentialBySecretHash(ex: DbExecutor, secretHash: string): Promise<ServiceCredentialRow | null> {
+export async function findCredentialBySecretHash(
+  ex: DbExecutor,
+  secretHash: string,
+): Promise<ServiceCredentialRow | null> {
   return first(ex.select().from(serviceCredentials).where(eq(serviceCredentials.secretHash, secretHash)).limit(1));
 }
 
@@ -194,7 +197,11 @@ export async function createAgent(
 
 export async function getAgent(ex: DbExecutor, tenantId: string, agentId: string): Promise<AgentRow | null> {
   return first(
-    ex.select().from(agents).where(and(eq(agents.tenantId, tenantId), eq(agents.agentId, agentId))).limit(1),
+    ex
+      .select()
+      .from(agents)
+      .where(and(eq(agents.tenantId, tenantId), eq(agents.agentId, agentId)))
+      .limit(1),
   );
 }
 

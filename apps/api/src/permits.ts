@@ -27,11 +27,7 @@ export interface CollectDeps {
 
 const BLOCKED_MODES = ['EMERGENCY_STOP', 'DEGRADED_READ_ONLY', 'QUARANTINE'] as const;
 
-export async function collectPermit(
-  deps: CollectDeps,
-  principal: Principal,
-  actionId: string,
-): Promise<PermitDto> {
+export async function collectPermit(deps: CollectDeps, principal: Principal, actionId: string): Promise<PermitDto> {
   const now = deps.clock?.() ?? new Date();
   const tenantId = principal.tenantId;
 

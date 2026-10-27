@@ -77,7 +77,9 @@ async function cmdSeed(): Promise<void> {
       )}\n`,
       { mode: 0o600 },
     );
-    console.log(`seed: tenant ${result.tenantIds[0]} with ${Object.keys(result.userIds).length} users, 1 agent, 1 policy.`);
+    console.log(
+      `seed: tenant ${result.tenantIds[0]} with ${Object.keys(result.userIds).length} users, 1 agent, 1 policy.`,
+    );
     console.log('seed: demo bearer tokens written to storage/demo-credentials.json (gitignored, do not share).');
   } finally {
     await closeDb(db);

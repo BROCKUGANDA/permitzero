@@ -243,7 +243,8 @@ const RESOLVERS: Record<PolicyField, (ctx: ResolverContext) => InternalResolved>
 
   [PolicyField.VENDOR_BENEFICIARY_MATCHES_VERIFIED]: (ctx) => {
     const v = ctx.input.vendor;
-    if (v === undefined) return unknown(PolicyField.VENDOR_BENEFICIARY_MATCHES_VERIFIED, 'vendor lookup was not performed');
+    if (v === undefined)
+      return unknown(PolicyField.VENDOR_BENEFICIARY_MATCHES_VERIFIED, 'vendor lookup was not performed');
     if (v === null) return absent(PolicyField.VENDOR_BENEFICIARY_MATCHES_VERIFIED, 'no such vendor in this tenant');
     const proposed = argString(ctx, 'beneficiary_ref');
     const verified = v.verifiedBeneficiaryRef;
@@ -257,7 +258,9 @@ const RESOLVERS: Record<PolicyField, (ctx: ResolverContext) => InternalResolved>
     return resolved(
       PolicyField.VENDOR_BENEFICIARY_MATCHES_VERIFIED,
       match,
-      match ? 'proposed beneficiary matches the verified reference' : 'proposed beneficiary differs from the verified reference',
+      match
+        ? 'proposed beneficiary matches the verified reference'
+        : 'proposed beneficiary differs from the verified reference',
     );
   },
 
@@ -281,7 +284,11 @@ const RESOLVERS: Record<PolicyField, (ctx: ResolverContext) => InternalResolved>
     if (v === undefined) return unknown(PolicyField.VENDOR_BANKING_CHANGE_VERIFIED, 'vendor lookup was not performed');
     if (v === null) return absent(PolicyField.VENDOR_BANKING_CHANGE_VERIFIED, 'no such vendor in this tenant');
     if (v.bankingChangedAt === null) {
-      return resolved(PolicyField.VENDOR_BANKING_CHANGE_VERIFIED, true, 'no banking change on record; nothing to verify');
+      return resolved(
+        PolicyField.VENDOR_BANKING_CHANGE_VERIFIED,
+        true,
+        'no banking change on record; nothing to verify',
+      );
     }
     const verified = v.bankingChangeVerifiedAt !== null;
     return resolved(
@@ -317,7 +324,11 @@ const RESOLVERS: Record<PolicyField, (ctx: ResolverContext) => InternalResolved>
     if (typeof v.dataClassification !== 'string') {
       return unknown(PolicyField.VENDOR_DATA_CLASSIFICATION, 'vendor data classification is malformed');
     }
-    return resolved(PolicyField.VENDOR_DATA_CLASSIFICATION, v.dataClassification, `vendor data is ${v.dataClassification}`);
+    return resolved(
+      PolicyField.VENDOR_DATA_CLASSIFICATION,
+      v.dataClassification,
+      `vendor data is ${v.dataClassification}`,
+    );
   },
 
   // -- Invoice match --
@@ -346,7 +357,8 @@ const RESOLVERS: Record<PolicyField, (ctx: ResolverContext) => InternalResolved>
 
   [PolicyField.INVOICE_AMOUNT_MATCHES_ARGUMENT]: (ctx) => {
     const i = ctx.input.invoice;
-    if (i === undefined) return unknown(PolicyField.INVOICE_AMOUNT_MATCHES_ARGUMENT, 'invoice lookup was not performed');
+    if (i === undefined)
+      return unknown(PolicyField.INVOICE_AMOUNT_MATCHES_ARGUMENT, 'invoice lookup was not performed');
     if (i === null) return absent(PolicyField.INVOICE_AMOUNT_MATCHES_ARGUMENT, 'no such invoice in this tenant');
     const amount = argInt(ctx, 'amount_minor');
     if (amount === undefined) {
@@ -362,7 +374,8 @@ const RESOLVERS: Record<PolicyField, (ctx: ResolverContext) => InternalResolved>
 
   [PolicyField.INVOICE_CURRENCY_MATCHES_ARGUMENT]: (ctx) => {
     const i = ctx.input.invoice;
-    if (i === undefined) return unknown(PolicyField.INVOICE_CURRENCY_MATCHES_ARGUMENT, 'invoice lookup was not performed');
+    if (i === undefined)
+      return unknown(PolicyField.INVOICE_CURRENCY_MATCHES_ARGUMENT, 'invoice lookup was not performed');
     if (i === null) return absent(PolicyField.INVOICE_CURRENCY_MATCHES_ARGUMENT, 'no such invoice in this tenant');
     const currency = argString(ctx, 'currency');
     if (currency === undefined) {
@@ -391,8 +404,11 @@ const RESOLVERS: Record<PolicyField, (ctx: ResolverContext) => InternalResolved>
     // The payment tools carry no purchase_order_id argument; the reference
     // normally comes from the authoritative invoice the action cites.
     const invoice = ctx.input.invoice;
-    const poId = argString(ctx, 'purchase_order_id') ?? (typeof invoice === 'object' && invoice !== null ? invoice.purchaseOrderId : undefined);
-    const vendorId = argString(ctx, 'vendor_id') ?? (typeof invoice === 'object' && invoice !== null ? invoice.vendorId : undefined);
+    const poId =
+      argString(ctx, 'purchase_order_id') ??
+      (typeof invoice === 'object' && invoice !== null ? invoice.purchaseOrderId : undefined);
+    const vendorId =
+      argString(ctx, 'vendor_id') ?? (typeof invoice === 'object' && invoice !== null ? invoice.vendorId : undefined);
     if (typeof poId !== 'string') {
       return unknown(PolicyField.PURCHASE_ORDER_MATCHED, 'no purchase order reference to match against');
     }
@@ -406,7 +422,8 @@ const RESOLVERS: Record<PolicyField, (ctx: ResolverContext) => InternalResolved>
 
   [PolicyField.PURCHASE_ORDER_AMOUNT_COVERS]: (ctx) => {
     const p = ctx.input.purchaseOrder;
-    if (p === undefined) return unknown(PolicyField.PURCHASE_ORDER_AMOUNT_COVERS, 'purchase-order lookup was not performed');
+    if (p === undefined)
+      return unknown(PolicyField.PURCHASE_ORDER_AMOUNT_COVERS, 'purchase-order lookup was not performed');
     if (p === null) return absent(PolicyField.PURCHASE_ORDER_AMOUNT_COVERS, 'no such purchase order in this tenant');
     const amount = argInt(ctx, 'amount_minor');
     if (amount === undefined) {
@@ -422,7 +439,8 @@ const RESOLVERS: Record<PolicyField, (ctx: ResolverContext) => InternalResolved>
 
   [PolicyField.PURCHASE_ORDER_VENDOR_MATCHES]: (ctx) => {
     const p = ctx.input.purchaseOrder;
-    if (p === undefined) return unknown(PolicyField.PURCHASE_ORDER_VENDOR_MATCHES, 'purchase-order lookup was not performed');
+    if (p === undefined)
+      return unknown(PolicyField.PURCHASE_ORDER_VENDOR_MATCHES, 'purchase-order lookup was not performed');
     if (p === null) return absent(PolicyField.PURCHASE_ORDER_VENDOR_MATCHES, 'no such purchase order in this tenant');
     const invoice = ctx.input.invoice;
     const vendorId =
@@ -462,7 +480,9 @@ const RESOLVERS: Record<PolicyField, (ctx: ResolverContext) => InternalResolved>
     if (!Array.isArray(refs)) {
       return unknown(PolicyField.EVIDENCE_ALL_UNTRUSTED_LABELLED, 'evidence refs are malformed');
     }
-    const labelled = refs.every((r) => r !== null && typeof r === 'object' && typeof r.kind === 'string' && typeof r.trusted === 'boolean');
+    const labelled = refs.every(
+      (r) => r !== null && typeof r === 'object' && typeof r.kind === 'string' && typeof r.trusted === 'boolean',
+    );
     return resolved(
       PolicyField.EVIDENCE_ALL_UNTRUSTED_LABELLED,
       labelled,
@@ -514,12 +534,20 @@ const RESOLVERS: Record<PolicyField, (ctx: ResolverContext) => InternalResolved>
   // -- Aggregate controls --
   [PolicyField.BUDGET_SPEND_MINOR]: (ctx) =>
     Number.isSafeInteger(ctx.input.budgetSpendMinor)
-      ? resolved(PolicyField.BUDGET_SPEND_MINOR, ctx.input.budgetSpendMinor, `${ctx.input.budgetSpendMinor} minor units spent in window`)
+      ? resolved(
+          PolicyField.BUDGET_SPEND_MINOR,
+          ctx.input.budgetSpendMinor,
+          `${ctx.input.budgetSpendMinor} minor units spent in window`,
+        )
       : unknown(PolicyField.BUDGET_SPEND_MINOR, 'budget spend is not a safe integer'),
 
   [PolicyField.VELOCITY_COUNT]: (ctx) =>
     Number.isSafeInteger(ctx.input.velocityCount)
-      ? resolved(PolicyField.VELOCITY_COUNT, ctx.input.velocityCount, `${ctx.input.velocityCount} action(s) in velocity window`)
+      ? resolved(
+          PolicyField.VELOCITY_COUNT,
+          ctx.input.velocityCount,
+          `${ctx.input.velocityCount} action(s) in velocity window`,
+        )
       : unknown(PolicyField.VELOCITY_COUNT, 'velocity count is not a safe integer'),
 
   [PolicyField.TIME_HOUR_UTC]: (ctx) => {

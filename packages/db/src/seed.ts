@@ -9,14 +9,14 @@ import { createHash, randomBytes } from 'node:crypto';
 import { canonicalHash, newId } from '@permitzero/domain';
 import { policyDocumentSchema } from '@permitzero/schemas';
 import { withTransaction, type Db, type DbTransaction } from './client.js';
+import { createAgent, createCredential, createMembership, createTenant, createUser } from './repos/identity.js';
 import {
-  createAgent,
-  createCredential,
-  createMembership,
-  createTenant,
-  createUser,
-} from './repos/identity.js';
-import { createConnector, insertInvoice, insertPurchaseOrder, setEnforcementMode, upsertVendor } from './repos/catalog.js';
+  createConnector,
+  insertInvoice,
+  insertPurchaseOrder,
+  setEnforcementMode,
+  upsertVendor,
+} from './repos/catalog.js';
 import { createPolicy, createRevision, publishRevision } from './repos/policies.js';
 import type { ServiceCredentialRow } from './schema.js';
 import { buildApProtectPolicyDocument } from './seed-policy.js';
@@ -58,9 +58,24 @@ function sha256hex(value: string): string {
 
 const DEMO_USERS = [
   { label: 'owner', role: 'OWNER', email: 'synthetic-owner@example.invalid', displayName: 'SYNTHETIC Owner' },
-  { label: 'approver1', role: 'APPROVER', email: 'synthetic-approver-1@example.invalid', displayName: 'SYNTHETIC Approver One' },
-  { label: 'approver2', role: 'APPROVER', email: 'synthetic-approver-2@example.invalid', displayName: 'SYNTHETIC Approver Two' },
-  { label: 'operator', role: 'OPERATOR', email: 'synthetic-operator@example.invalid', displayName: 'SYNTHETIC Operator' },
+  {
+    label: 'approver1',
+    role: 'APPROVER',
+    email: 'synthetic-approver-1@example.invalid',
+    displayName: 'SYNTHETIC Approver One',
+  },
+  {
+    label: 'approver2',
+    role: 'APPROVER',
+    email: 'synthetic-approver-2@example.invalid',
+    displayName: 'SYNTHETIC Approver Two',
+  },
+  {
+    label: 'operator',
+    role: 'OPERATOR',
+    email: 'synthetic-operator@example.invalid',
+    displayName: 'SYNTHETIC Operator',
+  },
   { label: 'auditor', role: 'AUDITOR', email: 'synthetic-auditor@example.invalid', displayName: 'SYNTHETIC Auditor' },
 ] as const;
 
@@ -250,7 +265,8 @@ export async function seed(db: Db, opts?: SeedOptions): Promise<SeedResult> {
       amountMinor: 300000n,
       currency: 'USD',
       purchaseOrderId: 'PO-882',
-      documentText: 'SYNTHETIC invoice INV-2041 from SYNTHETIC Example Ltd. Amount $3,000.00 against PO-882. Terms Net 30.',
+      documentText:
+        'SYNTHETIC invoice INV-2041 from SYNTHETIC Example Ltd. Amount $3,000.00 against PO-882. Terms Net 30.',
     });
     await insertInvoice(tx, {
       invoiceId: 'INV-2042',

@@ -105,7 +105,8 @@ export class StaticModelAdapter implements ModelAdapter {
         instructionInjectionIndicators: indicators,
         extractedFacts: {},
         missingEvidence: [],
-        summary: indicators.length > 0 ? 'static screening flagged injection-shaped phrasing' : 'static screening clean',
+        summary:
+          indicators.length > 0 ? 'static screening flagged injection-shaped phrasing' : 'static screening clean',
       },
       modelId: 'static-v1',
       promptVersion: 'static-v1',

@@ -81,8 +81,9 @@ export function ApproveDialog({ action }: { action: ActionDto }): React.JSX.Elem
         <DialogHeader>
           <DialogTitle>Approve this action</DialogTitle>
           <DialogDescription>
-            You are approving exactly what you see: request <span className="font-mono">{shortHash(action.action_hash)}</span>{' '}
-            under policy revision {action.policy_revision_number ?? '—'}. If anything changes, your approval stops applying.
+            You are approving exactly what you see: request{' '}
+            <span className="font-mono">{shortHash(action.action_hash)}</span> under policy revision{' '}
+            {action.policy_revision_number ?? '—'}. If anything changes, your approval stops applying.
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-4">
@@ -93,13 +94,21 @@ export function ApproveDialog({ action }: { action: ActionDto }): React.JSX.Elem
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {REASONS.filter((r) => !['DUPLICATE_SUSPECTED', 'BENEFICIARY_UNVERIFIED', 'AMOUNT_UNJUSTIFIED', 'POLICY_MISCONFIGURED', 'INSUFFICIENT_EVIDENCE', 'REQUESTER_NOT_AUTHORISED'].includes(r.value)).map(
-                  (r) => (
-                    <SelectItem key={r.value} value={r.value}>
-                      {r.label}
-                    </SelectItem>
-                  ),
-                )}
+                {REASONS.filter(
+                  (r) =>
+                    ![
+                      'DUPLICATE_SUSPECTED',
+                      'BENEFICIARY_UNVERIFIED',
+                      'AMOUNT_UNJUSTIFIED',
+                      'POLICY_MISCONFIGURED',
+                      'INSUFFICIENT_EVIDENCE',
+                      'REQUESTER_NOT_AUTHORISED',
+                    ].includes(r.value),
+                ).map((r) => (
+                  <SelectItem key={r.value} value={r.value}>
+                    {r.label}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>
@@ -116,7 +125,12 @@ export function ApproveDialog({ action }: { action: ActionDto }): React.JSX.Elem
           ) : null}
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="approve-note">Note (optional)</Label>
-            <Textarea id="approve-note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Anything the record should keep" />
+            <Textarea
+              id="approve-note"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="Anything the record should keep"
+            />
           </div>
           <DecisionError error={approve.error} />
         </div>
@@ -190,7 +204,12 @@ export function RejectDialog({ action }: { action: ActionDto }): React.JSX.Eleme
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="reject-note">Note{reason === 'OTHER' ? '' : ' (optional)'}</Label>
-            <Textarea id="reject-note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="What should change before this comes back?" />
+            <Textarea
+              id="reject-note"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="What should change before this comes back?"
+            />
           </div>
           {confirmError ? <FieldError>{confirmError}</FieldError> : null}
           <DecisionError error={reject.error} />

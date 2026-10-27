@@ -26,11 +26,11 @@ services:
       POSTGRES_PASSWORD: ${PZ_PG_PASSWORD:?}
       POSTGRES_DB: ${PZ_PG_DB:?}
       # Deterministic collation so index planning does not drift between hosts.
-      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PZ_PG_USER} -d ${PZ_PG_DB}"]
+      test: ['CMD-SHELL', 'pg_isready -U ${PZ_PG_USER} -d ${PZ_PG_DB}']
       interval: 5s
       timeout: 3s
       retries: 20
@@ -46,11 +46,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory', '256mb', '--maxmemory-policy', 'noeviction']
     volumes:
       - redisdata:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
       timeout: 3s
       retries: 20
@@ -63,7 +63,7 @@ services:
       dockerfile: infra/docker/Dockerfile
       target: migrate
     image: permitzero/migrate:local
-    restart: "no"
+    restart: 'no'
     <<: *app-env
     environment:
       PZ_SEED: ${PZ_SEED:-0}
@@ -96,7 +96,13 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -142,15 +148,15 @@ services:
       dockerfile: infra/docker/Dockerfile
       target: build
     image: permitzero/verify:local
-    restart: "no"
-    profiles: ["test"]
+    restart: 'no'
+    profiles: ['test']
     <<: *app-env
     environment:
       DATABASE_URL_TEST: postgres://permitzero:${PZ_PG_PASSWORD:?}@postgres:5432/permitzero_test
     depends_on:
       postgres:
         condition: service_healthy
-    command: ["npx", "vitest", "run", "--reporter=dot"]
+    command: ['npx', 'vitest', 'run', '--reporter=dot']
 
   # Named `edge`, not `caddy`, on purpose. A leftover host cron belonging to
   # another project (`/usr/local/bin/crucible-edge-attach`) attaches every
@@ -166,8 +172,8 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     ports:
-      - "127.0.0.1:${PZ_HTTP_PORT:-8050}:80"
-      - "127.0.0.1:${PZ_HTTPS_PORT:-8450}:443"
+      - '127.0.0.1:${PZ_HTTP_PORT:-8050}:80'
+      - '127.0.0.1:${PZ_HTTPS_PORT:-8450}:443'
     environment:
       PZ_HOSTNAMES: ${PZ_HOSTNAMES:?}
       PZ_OPS_HOSTNAME: ${PZ_OPS_HOSTNAME:-}
@@ -180,11 +186,11 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
-    command: ["tunnel", "--no-autoupdate", "run", "--token", "${PZ_TUNNEL_TOKEN:-}"]
+    command: ['tunnel', '--no-autoupdate', 'run', '--token', '${PZ_TUNNEL_TOKEN:-}']
     depends_on:
       edge:
         condition: service_started
-    profiles: ["tunnel"]
+    profiles: ['tunnel']
 
 volumes:
   pgdata:

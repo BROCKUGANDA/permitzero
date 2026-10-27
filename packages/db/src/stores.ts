@@ -348,7 +348,8 @@ export function createDbStores(db: Db | DbExecutor, opts?: DbStoresOptions): DbS
     },
     claimPending: (limit: number, now: Date) => claimOutboxEvents(ex, limit, now),
     markPublished: (id: string, publishedAt: Date) => markOutboxPublished(ex, id, publishedAt),
-    markFailed: (id: string, errorClass: string, nextAttemptAt: Date) => markOutboxFailed(ex, id, errorClass, nextAttemptAt),
+    markFailed: (id: string, errorClass: string, nextAttemptAt: Date) =>
+      markOutboxFailed(ex, id, errorClass, nextAttemptAt),
     markDead: (id: string, errorClass: string) => markOutboxDead(ex, id, errorClass),
     getDeadLetter: async (id: string) => {
       const row = await getOutboxEvent(ex, id);

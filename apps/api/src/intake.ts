@@ -22,18 +22,8 @@ import {
   newId,
   redact,
 } from '@permitzero/domain';
-import type {
-  ActionState,
-  Decision as DecisionType,
-  EvidenceRef,
-  Principal,
-  RiskSignal,
-} from '@permitzero/domain';
-import {
-  SUPPORTED_TOOLS,
-  TOOL_SCHEMAS,
-  isSideEffectingTool,
-} from '@permitzero/schemas';
+import type { ActionState, Decision as DecisionType, EvidenceRef, Principal, RiskSignal } from '@permitzero/domain';
+import { SUPPORTED_TOOLS, TOOL_SCHEMAS, isSideEffectingTool } from '@permitzero/schemas';
 import type { CreateActionRequest, CreateActionResponse } from '@permitzero/schemas';
 import { evaluatePolicy } from '@permitzero/policy';
 import type { PinnedPolicyRevision } from '@permitzero/policy';
@@ -57,13 +47,7 @@ import {
   transitionAction,
   withTransaction,
 } from '@permitzero/db';
-import type {
-  ActionRow,
-  ApprovalRow,
-  Db,
-  DbTransaction,
-  IdempotencyRecordRow,
-} from '@permitzero/db';
+import type { ActionRow, ApprovalRow, Db, DbTransaction, IdempotencyRecordRow } from '@permitzero/db';
 import { DomainError, ErrorCode, IdempotencyReuseError, ValidationError } from '@permitzero/domain';
 import type { ModelAdapter, ModelAnalysisOutcome } from './model.js';
 import { approvalRequirementsFor, evaluateQuorum } from './quorum.js';
@@ -150,7 +134,7 @@ async function replayFromRecord(
       permitToken: null,
       now,
     }),
-  }
+  };
 }
 
 async function replayFromAction(
@@ -206,7 +190,7 @@ export async function buildResponseFromAction(
     const requirements =
       opts.requirements ??
       approvalRequirementsFor(
-        (revision.policyJson as PinnedPolicyRevision['document']),
+        revision.policyJson as PinnedPolicyRevision['document'],
         action.decisionReasonCodesJson,
         action.requiredApprovals,
       );
@@ -368,8 +352,7 @@ export async function intakeAction(
   }
   // Deliberately-disabled screening is an explicit deployment choice, not a
   // missing signal. Only a failed call from an enabled provider caps allows.
-  const requiredModelSignalUnavailable =
-    deps.model.enabled && analysis.status !== 'OK' && revisionUsesModel(pin.pin);
+  const requiredModelSignalUnavailable = deps.model.enabled && analysis.status !== 'OK' && revisionUsesModel(pin.pin);
 
   const evaluation = evaluatePolicy(
     { ...draftInput, riskHints: analysis.hints, requiredModelSignalUnavailable },
@@ -624,4 +607,3 @@ export async function intakeAction(
     throw err;
   }
 }
-

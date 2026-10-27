@@ -79,7 +79,9 @@ export function ActionTable({ actions }: { actions: ActionDto[] }): React.JSX.El
             <TableCell>
               <DecisionBadge decision={action.decision} />
             </TableCell>
-            <TableCell className="whitespace-nowrap text-muted-foreground">{formatDateTime(action.requested_at)}</TableCell>
+            <TableCell className="whitespace-nowrap text-muted-foreground">
+              {formatDateTime(action.requested_at)}
+            </TableCell>
           </TableRow>
         ))}
       </TableBody>

@@ -39,8 +39,7 @@ export default defineConfig({
       env: {
         PORT: String(API_PORT),
         APP_ENV: 'test',
-        DATABASE_URL:
-          process.env['E2E_DATABASE_URL'] ?? 'postgres://postgres@127.0.0.1:5432/permitzero_e2e',
+        DATABASE_URL: process.env['E2E_DATABASE_URL'] ?? 'postgres://postgres@127.0.0.1:5432/permitzero_e2e',
         PERMIT_SIGNING_KEY: process.env['E2E_PERMIT_SIGNING_KEY'] ?? 'e2e-signing-key-0123456789abcdef',
         PERMIT_SIGNING_KEY_ID: 'k-e2e',
         MODEL_PROVIDER: 'disabled',

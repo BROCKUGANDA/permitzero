@@ -3,7 +3,18 @@
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
 import { SendHorizonal } from 'lucide-react';
-import { Button, Card, CardContent, CardDescription, CardHeader, CardTitle, FieldError, Input, Label, Textarea } from '@permitzero/ui';
+import {
+  Button,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  FieldError,
+  Input,
+  Label,
+  Textarea,
+} from '@permitzero/ui';
 import { ApiError, useIntake, useMe } from '@/lib/api';
 import { RequestError } from '@/components/execution';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -34,7 +45,14 @@ function FieldInput({
     return (
       <div className="flex flex-col gap-1.5">
         <Label htmlFor={id}>{field.label}</Label>
-        <Textarea id={id} value={value} onChange={(e) => onChange(e.target.value)} placeholder={field.placeholder} rows={3} aria-invalid={invalid} />
+        <Textarea
+          id={id}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={field.placeholder}
+          rows={3}
+          aria-invalid={invalid}
+        />
         {field.help ? <p className="text-xs text-muted-foreground">{field.help}</p> : null}
         {error ? <FieldError>{error}</FieldError> : null}
       </div>
@@ -236,7 +254,9 @@ export default function NewActionPage(): React.JSX.Element {
       <Card>
         <CardHeader>
           <CardTitle>Details</CardTitle>
-          <CardDescription>Only the fields this tool accepts. Everything is checked again on the server.</CardDescription>
+          <CardDescription>
+            Only the fields this tool accepts. Everything is checked again on the server.
+          </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           {meta.fields.map((field) => (

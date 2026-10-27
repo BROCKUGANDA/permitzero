@@ -123,7 +123,16 @@ const PAYMENT_ARGS = {
 export async function walkTo(
   fixture: WorkerFixture,
   actionId: string,
-  states: Array<'VALIDATING' | 'EVALUATING' | 'ALLOWED' | 'PERMIT_ISSUED' | 'EXECUTION_PENDING' | 'EXECUTING' | 'UNKNOWN_OUTCOME' | 'APPROVAL_REQUIRED'>,
+  states: Array<
+    | 'VALIDATING'
+    | 'EVALUATING'
+    | 'ALLOWED'
+    | 'PERMIT_ISSUED'
+    | 'EXECUTION_PENDING'
+    | 'EXECUTING'
+    | 'UNKNOWN_OUTCOME'
+    | 'APPROVAL_REQUIRED'
+  >,
   now = new Date(),
 ): Promise<void> {
   for (const to of states) {
@@ -173,7 +182,10 @@ export async function makeAction(fixture: WorkerFixture, idempotencyKey: string)
 }
 
 /** An action holding a live permit, ready for broker.execute. */
-export async function permitIssuedAction(fixture: WorkerFixture, key: string): Promise<{ actionId: string; token: string }> {
+export async function permitIssuedAction(
+  fixture: WorkerFixture,
+  key: string,
+): Promise<{ actionId: string; token: string }> {
   const actionId = await makeAction(fixture, key);
   await walkTo(fixture, actionId, ['VALIDATING', 'EVALUATING', 'ALLOWED']);
   const action = await getAction(fixture.db.db, fixture.tenantId, actionId);

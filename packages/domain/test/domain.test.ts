@@ -86,9 +86,7 @@ describe('canonicalization', () => {
     for (let i = 0; i < 40; i++) deep = { next: deep };
     expect(() => canonicalize(deep)).toThrow(/max depth/);
 
-    const wide = Object.fromEntries(
-      Array.from({ length: 5000 }, (_, i) => [`k${i}`, i]),
-    );
+    const wide = Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [`k${i}`, i]));
     expect(() => canonicalize(wide)).toThrow(/nodes/);
   });
 
@@ -123,9 +121,7 @@ describe('action hashing', () => {
 
   it('changes when any authorized field changes', () => {
     const original = actionHash(base);
-    expect(actionHash({ ...base, arguments: { ...base.arguments, amount_minor: 7500000 } })).not.toBe(
-      original,
-    );
+    expect(actionHash({ ...base, arguments: { ...base.arguments, amount_minor: 7500000 } })).not.toBe(original);
     expect(actionHash({ ...base, toolName: 'vendor.export' })).not.toBe(original);
     expect(actionHash({ ...base, environment: 'PRODUCTION' })).not.toBe(original);
     expect(actionHash({ ...base, runId: 'run_2' })).not.toBe(original);
@@ -214,9 +210,7 @@ describe('state machine', () => {
   });
 
   it('throws a typed error on an illegal transition', () => {
-    expect(() => assertTransition(ActionState.DENIED, ActionState.ALLOWED)).toThrow(
-      IllegalTransitionError,
-    );
+    expect(() => assertTransition(ActionState.DENIED, ActionState.ALLOWED)).toThrow(IllegalTransitionError);
     try {
       assertTransition(ActionState.RECEIVED, ActionState.SUCCEEDED);
       expect.unreachable('should have thrown');
@@ -332,10 +326,7 @@ describe('redaction', () => {
   });
 
   it('redacts token-shaped values regardless of key name', () => {
-    const out = redact({ note: 'used Bearer eyJhbGci.eyJzdWIi.abc123 here' }) as Record<
-      string,
-      unknown
-    >;
+    const out = redact({ note: 'used Bearer eyJhbGci.eyJzdWIi.abc123 here' }) as Record<string, unknown>;
     expect(String(out.note)).not.toContain('eyJhbGci');
   });
 
@@ -358,9 +349,7 @@ describe('redaction', () => {
   });
 
   it('scrubs bearer tokens out of free-form log messages', () => {
-    expect(scrubLogMessage('call with Bearer abc123def456.789012.xyz failed')).not.toContain(
-      'abc123def456',
-    );
+    expect(scrubLogMessage('call with Bearer abc123def456.789012.xyz failed')).not.toContain('abc123def456');
   });
 
   it('bounds recursion depth', () => {
@@ -410,12 +399,7 @@ describe('fail-closed reason codes', () => {
   it('never treats a missing decision as ALLOW', () => {
     // The enum has exactly four members and INDETERMINATE is distinct from ALLOW:
     // a code path that cannot decide has somewhere to go that is not "allow".
-    expect(Object.values(Decision)).toEqual([
-      'ALLOW',
-      'DENY',
-      'REQUIRE_APPROVAL',
-      'INDETERMINATE',
-    ]);
+    expect(Object.values(Decision)).toEqual(['ALLOW', 'DENY', 'REQUIRE_APPROVAL', 'INDETERMINATE']);
     expect(Decision.INDETERMINATE).not.toBe(Decision.ALLOW);
   });
 });

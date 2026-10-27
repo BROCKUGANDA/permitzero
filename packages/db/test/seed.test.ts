@@ -77,11 +77,17 @@ describe('seed', () => {
 
     const approverId = seeded.userIds['approver1'] ?? '';
     const userToken = seeded.userTokens[approverId] ?? '';
-    const userCred = await findCredentialBySecretHash(db.db, createHash('sha256').update(userToken, 'utf8').digest('hex'));
+    const userCred = await findCredentialBySecretHash(
+      db.db,
+      createHash('sha256').update(userToken, 'utf8').digest('hex'),
+    );
     expect(userCred?.subjectType).toBe('USER');
 
     const workerToken = seeded.serviceTokens['worker'] ?? '';
-    const workerCred = await findCredentialBySecretHash(db.db, createHash('sha256').update(workerToken, 'utf8').digest('hex'));
+    const workerCred = await findCredentialBySecretHash(
+      db.db,
+      createHash('sha256').update(workerToken, 'utf8').digest('hex'),
+    );
     expect(workerCred?.subjectType).toBe('SERVICE');
     expect(workerCred?.scopesJson).toContain('action:execute');
 

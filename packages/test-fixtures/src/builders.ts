@@ -301,9 +301,7 @@ export function baseReadInput(
   });
 }
 
-export function baseBankUpdateInput(
-  overrides: Partial<PolicyEvaluationInput> = {},
-): PolicyEvaluationInput {
+export function baseBankUpdateInput(overrides: Partial<PolicyEvaluationInput> = {}): PolicyEvaluationInput {
   return basePaymentInput({
     toolName: 'vendor.update_bank_details',
     operation: 'update',

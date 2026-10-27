@@ -28,7 +28,12 @@ function EmptyState({
   className?: string;
 }): React.JSX.Element {
   return (
-    <div className={cn('flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-6 py-12 text-center', className)}>
+    <div
+      className={cn(
+        'flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border px-6 py-12 text-center',
+        className,
+      )}
+    >
       <span className="flex size-10 items-center justify-center rounded-full bg-muted">
         <Icon className="size-5 text-muted-foreground" aria-hidden />
       </span>

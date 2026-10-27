@@ -9,11 +9,7 @@
  */
 import { RiskSignalKind } from '@permitzero/domain/reason-codes';
 import type { RiskHints } from '@permitzero/domain/types';
-import {
-  RISK_HINTS_SCHEMA_VERSION,
-  riskHintsSchema,
-  validateRiskHintsSemantics,
-} from '@permitzero/schemas';
+import { RISK_HINTS_SCHEMA_VERSION, riskHintsSchema, validateRiskHintsSemantics } from '@permitzero/schemas';
 import type { MetaProviderConfig } from './config.js';
 import { boundScreeningInput, buildScreeningPrompt, riskHintsJsonSchema } from './prompt.js';
 import type { ScreeningInput } from './prompt.js';
@@ -325,7 +321,10 @@ export class MetaProviderClient {
     const dto = shaped.data;
     const issues = validateRiskHintsSemantics(dto, knownRefs);
     if (issues.length > 0) {
-      throw new MetaProviderError('SEMANTICS_INVALID', `Provider output failed semantic checks at ${issues[0]?.path ?? 'body'}.`);
+      throw new MetaProviderError(
+        'SEMANTICS_INVALID',
+        `Provider output failed semantic checks at ${issues[0]?.path ?? 'body'}.`,
+      );
     }
     return {
       schemaVersion: RISK_HINTS_SCHEMA_VERSION,

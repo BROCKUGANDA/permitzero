@@ -168,7 +168,12 @@ describe('policy repositories', () => {
 
     // Stale pointer: someone else published first.
     await expect(
-      publishRevision(db.db, { tenantId: tenantId(), policyId, revisionId: rev2.revisionId, expectedCurrentRevisionId: 'polrev_stale' }),
+      publishRevision(db.db, {
+        tenantId: tenantId(),
+        policyId,
+        revisionId: rev2.revisionId,
+        expectedCurrentRevisionId: 'polrev_stale',
+      }),
     ).rejects.toThrow('changed underneath');
     const head = await getPublishedRevision(db.db, tenantId(), policyId);
     const published = await publishRevision(db.db, {
@@ -194,7 +199,10 @@ describe('policy repositories', () => {
 
 describe('action repositories', () => {
   it('creates, loads and pages actions with filters', async () => {
-    const a = await makeAction({ toolName: 'payment.execute', argumentsRedacted: { amount_minor: 5000, vendor_id: 'VEN-017' } });
+    const a = await makeAction({
+      toolName: 'payment.execute',
+      argumentsRedacted: { amount_minor: 5000, vendor_id: 'VEN-017' },
+    });
     await makeAction({ toolName: 'invoice.read', argumentsRedacted: { invoice_id: 'INV-1' } });
     expect((await getAction(db.db, tenantId(), a.actionId))?.state).toBe('RECEIVED');
     expect(await getActionByIdempotency(db.db, tenantId(), agentId(), 'nope')).toBeNull();
@@ -218,12 +226,24 @@ describe('action repositories', () => {
 
   it('transitions with compare-and-swap and typed conflicts', async () => {
     const a = await makeAction();
-    const moved = await transitionAction(db.db, { tenantId: tenantId(), actionId: a.actionId, to: 'VALIDATING', expectedVersion: 0, now: NOW });
+    const moved = await transitionAction(db.db, {
+      tenantId: tenantId(),
+      actionId: a.actionId,
+      to: 'VALIDATING',
+      expectedVersion: 0,
+      now: NOW,
+    });
     expect(moved.ok).toBe(true);
     if (!moved.ok) return;
     expect(moved.action.version).toBe(1);
 
-    const stale = await transitionAction(db.db, { tenantId: tenantId(), actionId: a.actionId, to: 'EVALUATING', expectedVersion: 0, now: NOW });
+    const stale = await transitionAction(db.db, {
+      tenantId: tenantId(),
+      actionId: a.actionId,
+      to: 'EVALUATING',
+      expectedVersion: 0,
+      now: NOW,
+    });
     expect(stale).toMatchObject({ ok: false, reason: 'VERSION_CONFLICT', expectedVersion: 0, actualVersion: 1 });
 
     const mismatch = await transitionAction(db.db, {
@@ -236,11 +256,23 @@ describe('action repositories', () => {
     });
     expect(mismatch).toMatchObject({ ok: false, reason: 'STATE_MISMATCH' });
 
-    const missing = await transitionAction(db.db, { tenantId: tenantId(), actionId: newId('action'), to: 'VALIDATING', expectedVersion: 0, now: NOW });
+    const missing = await transitionAction(db.db, {
+      tenantId: tenantId(),
+      actionId: newId('action'),
+      to: 'VALIDATING',
+      expectedVersion: 0,
+      now: NOW,
+    });
     expect(missing).toMatchObject({ ok: false, reason: 'NOT_FOUND' });
 
     await expect(
-      transitionAction(db.db, { tenantId: tenantId(), actionId: a.actionId, to: 'SUCCEEDED', expectedVersion: 1, now: NOW }),
+      transitionAction(db.db, {
+        tenantId: tenantId(),
+        actionId: a.actionId,
+        to: 'SUCCEEDED',
+        expectedVersion: 1,
+        now: NOW,
+      }),
     ).rejects.toBeInstanceOf(IllegalTransitionError);
   });
 
@@ -299,7 +331,15 @@ describe('action repositories', () => {
     const a = await makeAction({ argumentsRedacted: { amount_minor: 150000, currency: 'USD' } });
     expect(await countActionsInRun(db.db, tenantId(), 'run_test_1')).toBe(1);
     expect(await sumSucceededPaymentsSince(db.db, tenantId(), new Date('2026-10-26T00:00:00Z'))).toBe(0);
-    await walkAction(a.actionId, ['VALIDATING', 'EVALUATING', 'ALLOWED', 'PERMIT_ISSUED', 'EXECUTION_PENDING', 'EXECUTING', 'SUCCEEDED']);
+    await walkAction(a.actionId, [
+      'VALIDATING',
+      'EVALUATING',
+      'ALLOWED',
+      'PERMIT_ISSUED',
+      'EXECUTION_PENDING',
+      'EXECUTING',
+      'SUCCEEDED',
+    ]);
     expect(await sumSucceededPaymentsSince(db.db, tenantId(), new Date('2026-10-26T00:00:00Z'))).toBe(150000);
   });
 

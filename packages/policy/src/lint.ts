@@ -8,18 +8,8 @@
  * the linter, proves what a policy does.
  */
 import { canonicalize } from '@permitzero/domain';
-import {
-  PolicyLintCode,
-  PolicyLintSeverity,
-  SIDE_EFFECTING_TOOLS,
-  SUPPORTED_TOOLS,
-} from '@permitzero/schemas';
-import type {
-  Condition,
-  PolicyDocument,
-  PolicyLintFinding,
-  PolicyRule,
-} from '@permitzero/schemas';
+import { PolicyLintCode, PolicyLintSeverity, SIDE_EFFECTING_TOOLS, SUPPORTED_TOOLS } from '@permitzero/schemas';
+import type { Condition, PolicyDocument, PolicyLintFinding, PolicyRule } from '@permitzero/schemas';
 import { eachCondition, ruleReferencesModel } from './match.js';
 
 const SUPPORTED_TOOL_SET = new Set<string>(SUPPORTED_TOOLS);

@@ -86,11 +86,19 @@ function connectorRecord(overrides: Partial<ConnectorRecord> = {}): ConnectorRec
   };
 }
 
-async function setup(actionOverrides: Partial<ActionRecord> = {}, connector: ConnectorRecord | null = connectorRecord()) {
+async function setup(
+  actionOverrides: Partial<ActionRecord> = {},
+  connector: ConnectorRecord | null = connectorRecord(),
+) {
   const now = { t: new Date('2026-10-26T12:00:00Z').getTime() };
   const clock = () => new Date(now.t);
   const stores: MemoryStores = createMemoryStores({ clock });
-  const permits = new PermitService({ signingKey: SIGNING_KEY, signingKeyId: 'test-key-v1', store: stores.permits, clock });
+  const permits = new PermitService({
+    signingKey: SIGNING_KEY,
+    signingKeyId: 'test-key-v1',
+    store: stores.permits,
+    clock,
+  });
   await stores.data.putVendor(vendorRecord());
   stagingFor(stores.data).putInvoice({
     invoiceId: 'INV-2041',
@@ -113,7 +121,12 @@ async function setup(actionOverrides: Partial<ActionRecord> = {}, connector: Con
     audit: stores.audit,
     resolveConnector: async () => (connector ? { ...connector } : null),
     getConnector: (record) =>
-      new SimulatedFinanceConnector({ connectorId: record.connectorId, credentialRef: record.credentialRef, data: stores.data, clock }),
+      new SimulatedFinanceConnector({
+        connectorId: record.connectorId,
+        credentialRef: record.credentialRef,
+        data: stores.data,
+        clock,
+      }),
     clock,
   });
   const issue = (hash = act.argumentsHash) =>
@@ -126,7 +139,17 @@ async function setup(actionOverrides: Partial<ActionRecord> = {}, connector: Con
       audienceTool: act.toolName,
       ttlSeconds: 60,
     });
-  return { stores, permits, broker, act, issue, clock, advance: (ms: number) => { now.t += ms; } };
+  return {
+    stores,
+    permits,
+    broker,
+    act,
+    issue,
+    clock,
+    advance: (ms: number) => {
+      now.t += ms;
+    },
+  };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -177,8 +200,20 @@ describe('Broker.execute', () => {
     const a = await issue();
     const b = await issue();
     const [ra, rb] = await Promise.all([
-      broker.execute({ tenantId: TENANT, actionId: act.actionId, permitToken: a.token, actorId: 'w1', traceId: act.traceId }),
-      broker.execute({ tenantId: TENANT, actionId: act.actionId, permitToken: b.token, actorId: 'w2', traceId: act.traceId }),
+      broker.execute({
+        tenantId: TENANT,
+        actionId: act.actionId,
+        permitToken: a.token,
+        actorId: 'w1',
+        traceId: act.traceId,
+      }),
+      broker.execute({
+        tenantId: TENANT,
+        actionId: act.actionId,
+        permitToken: b.token,
+        actorId: 'w2',
+        traceId: act.traceId,
+      }),
     ]);
     const outcomes = [ra.outcome, rb.outcome].sort();
     expect(outcomes).toEqual(['REJECTED', 'SUCCEEDED']);
@@ -394,7 +429,12 @@ describe('Broker.execute', () => {
       audit: ctx.stores.audit,
       resolveConnector: async () => connectorRecord(),
       getConnector: (record) =>
-        new SimulatedFinanceConnector({ connectorId: record.connectorId, credentialRef: record.credentialRef, data: ctx.stores.data, clock: ctx.clock }),
+        new SimulatedFinanceConnector({
+          connectorId: record.connectorId,
+          credentialRef: record.credentialRef,
+          data: ctx.stores.data,
+          clock: ctx.clock,
+        }),
       clock: ctx.clock,
     });
     const permit = await ctx.issue();
@@ -504,7 +544,13 @@ describe('Broker.reconcile', () => {
     const { broker, act, issue } = await setup();
     setConnectorFaultProfile({ timeoutAfterDispatch: true });
     const permit = await issue();
-    await broker.execute({ tenantId: TENANT, actionId: act.actionId, permitToken: permit.token, actorId: 'w', traceId: act.traceId });
+    await broker.execute({
+      tenantId: TENANT,
+      actionId: act.actionId,
+      permitToken: permit.token,
+      actorId: 'w',
+      traceId: act.traceId,
+    });
     clearConnectorFaultProfile();
     const first = await broker.reconcile(act.actionId, TENANT);
     const second = await broker.reconcile(act.actionId, TENANT);

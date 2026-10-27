@@ -62,7 +62,9 @@ export function loadMetaConfig(env: NodeJS.ProcessEnv = process.env): MetaProvid
   }
   const schemaVersion = raw(env, 'MODEL_SCHEMA_VERSION') ?? RISK_HINTS_SCHEMA_VERSION;
   if (schemaVersion !== RISK_HINTS_SCHEMA_VERSION) {
-    throw new Error(`MODEL_SCHEMA_VERSION ${schemaVersion} is not supported; this client speaks ${RISK_HINTS_SCHEMA_VERSION}.`);
+    throw new Error(
+      `MODEL_SCHEMA_VERSION ${schemaVersion} is not supported; this client speaks ${RISK_HINTS_SCHEMA_VERSION}.`,
+    );
   }
   return {
     apiKey,

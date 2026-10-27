@@ -47,7 +47,9 @@ export default function ActionsPage(): React.JSX.Element {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Actions</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Every request agents and operators have made, newest activity first.</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Every request agents and operators have made, newest activity first.
+          </p>
         </div>
         <Link href="/actions/new" className={buttonVariants()}>
           <PlusCircle aria-hidden /> New request
@@ -117,7 +119,12 @@ export default function ActionsPage(): React.JSX.Element {
           {page ? `Showing ${page.data.length} request${page.data.length === 1 ? '' : 's'}` : ''}
         </p>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" disabled={cursors.length <= 1} onClick={() => setCursors((c) => c.slice(0, -1))}>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={cursors.length <= 1}
+            onClick={() => setCursors((c) => c.slice(0, -1))}
+          >
             Back
           </Button>
           <Button

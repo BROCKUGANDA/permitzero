@@ -35,10 +35,7 @@ export interface AuditHashInput {
   previousHash: string | null;
 }
 
-export function computeAuditHash(
-  input: AuditHashInput,
-  hmacKey?: string | null,
-): { hash: string; version: string } {
+export function computeAuditHash(input: AuditHashInput, hmacKey?: string | null): { hash: string; version: string } {
   const version = hmacKey ? AUDIT_HASH_VERSION_HMAC : AUDIT_HASH_VERSION_PLAIN;
   const canonical = canonicalize({
     v: version,
@@ -150,7 +147,10 @@ export async function appendAuditEvent(
   throw lastError instanceof Error ? lastError : new Error('audit append collided repeatedly');
 }
 
-export async function getAuditHead(ex: DbExecutor, tenantId: string): Promise<{ sequence: number; eventHash: string } | null> {
+export async function getAuditHead(
+  ex: DbExecutor,
+  tenantId: string,
+): Promise<{ sequence: number; eventHash: string } | null> {
   const [row] = await ex
     .select({ sequence: auditEvents.sequence, eventHash: auditEvents.eventHash })
     .from(auditEvents)
@@ -257,7 +257,9 @@ export async function verifyAuditChain(
       breaks.push({ sequence, eventId: row.eventId, reason: 'keyed hash but no key provided for verification' });
     } else {
       const payload =
-        typeof row.payloadRedactedJson === 'object' && row.payloadRedactedJson !== null && !Array.isArray(row.payloadRedactedJson)
+        typeof row.payloadRedactedJson === 'object' &&
+        row.payloadRedactedJson !== null &&
+        !Array.isArray(row.payloadRedactedJson)
           ? (row.payloadRedactedJson as Record<string, unknown>)
           : {};
       const { hash } = computeAuditHash(

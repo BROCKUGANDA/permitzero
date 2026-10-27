@@ -5,7 +5,15 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { DomainError, ErrorCode } from '@permitzero/domain';
-import { QUEUE_NAMES, createOutboxDispatcher, type DispatcherEvent, type OutboxRow, type OutboxStore, type QueueFactory, type QueueLike } from '../src/index.js';
+import {
+  QUEUE_NAMES,
+  createOutboxDispatcher,
+  type DispatcherEvent,
+  type OutboxRow,
+  type OutboxStore,
+  type QueueFactory,
+  type QueueLike,
+} from '../src/index.js';
 
 function row(overrides: Partial<OutboxRow> = {}): OutboxRow {
   return {

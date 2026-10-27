@@ -91,7 +91,11 @@ describe('worker lifecycle', () => {
     const built = buildWorker({
       db: t.db,
       config: testWorkerConfig(),
-      queues: { factory: queues.factory, workerFactory: workers.factory, redis: { status: 'ready', ping: async () => 'PONG' } },
+      queues: {
+        factory: queues.factory,
+        workerFactory: workers.factory,
+        redis: { status: 'ready', ping: async () => 'PONG' },
+      },
     });
     const row = await insertOutboxEvent(t.db.db, {
       tenantId: t.tenantId,
@@ -119,14 +123,26 @@ describe('worker lifecycle', () => {
     const built = buildWorker({
       db: t.db,
       config: testWorkerConfig(),
-      queues: { factory: queues.factory, workerFactory: workers.factory, redis: { status: 'ready', ping: async () => 'PONG' } },
+      queues: {
+        factory: queues.factory,
+        workerFactory: workers.factory,
+        redis: { status: 'ready', ping: async () => 'PONG' },
+      },
     });
     built.start();
     expect(workers.started).toContain('pz.outbox');
     expect(workers.started).toContain('pz.reconciliation');
 
     const actionId = await makeAction(t, 'life-reconcile');
-    await walkTo(t, actionId, ['VALIDATING', 'EVALUATING', 'ALLOWED', 'PERMIT_ISSUED', 'EXECUTION_PENDING', 'EXECUTING', 'UNKNOWN_OUTCOME']);
+    await walkTo(t, actionId, [
+      'VALIDATING',
+      'EVALUATING',
+      'ALLOWED',
+      'PERMIT_ISSUED',
+      'EXECUTION_PENDING',
+      'EXECUTING',
+      'UNKNOWN_OUTCOME',
+    ]);
     const connectorId = await connectorIdForTool(t);
     await t.stores.executions.recordIntent(executionRecord(t, actionId, connectorId));
     const row = await insertOutboxEvent(t.db.db, {

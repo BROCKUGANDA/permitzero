@@ -12,12 +12,7 @@
  */
 import { NotFoundError } from '@permitzero/domain';
 import type { Broker } from '@permitzero/broker';
-import {
-  getAction,
-  insertOutboxEvent,
-  listExpiredApprovalActions,
-  transitionAction,
-} from '@permitzero/db';
+import { getAction, insertOutboxEvent, listExpiredApprovalActions, transitionAction } from '@permitzero/db';
 import type { Db, DbStores } from '@permitzero/db';
 
 export interface SweepDeps {
@@ -104,7 +99,14 @@ export async function sweepUnknownOutcomes(
   const now = opts?.now ?? deps.clock?.() ?? new Date();
   const graceMs = opts?.graceMs ?? 30_000;
   const rows = await deps.stores.executions.listUnknownOutcomes(null, opts?.limit ?? 100);
-  const result: ReconcileSweepResult = { checked: rows.length, succeeded: 0, failed: 0, manual: 0, skipped: 0, errors: 0 };
+  const result: ReconcileSweepResult = {
+    checked: rows.length,
+    succeeded: 0,
+    failed: 0,
+    manual: 0,
+    skipped: 0,
+    errors: 0,
+  };
   for (const execution of rows) {
     if (execution.updatedAt.getTime() > now.getTime() - graceMs) {
       result.skipped += 1; // in flight; the caller may still be waiting on it

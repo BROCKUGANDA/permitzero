@@ -15,13 +15,7 @@
  * It reads no clock except `input.requestedAt`, so results are deterministic
  * for a fixed input.
  */
-import {
-  ApprovalReason,
-  DenyReason,
-  EnforcementMode,
-  IndeterminateReason,
-  hashEquals,
-} from '@permitzero/domain';
+import { ApprovalReason, DenyReason, EnforcementMode, IndeterminateReason, hashEquals } from '@permitzero/domain';
 import type {
   ApprovalReason as ApprovalReasonType,
   Decision,
@@ -121,16 +115,11 @@ function buildResult(
   };
 }
 
-export function evaluatePolicy(
-  input: PolicyEvaluationInput,
-  revision: PinnedPolicyRevision,
-): PolicyEvaluationResult {
+export function evaluatePolicy(input: PolicyEvaluationInput, revision: PinnedPolicyRevision): PolicyEvaluationResult {
   // Gate 1: the policy store could not be read authoritatively. Nothing about
   // the action can be decided, so block without pretending a rule fired.
   if (input.policyStoreAvailable === false) {
-    return buildResult(input, revision, 'INDETERMINATE', [
-      IndeterminateReason.POLICY_EVALUATOR_UNAVAILABLE,
-    ]);
+    return buildResult(input, revision, 'INDETERMINATE', [IndeterminateReason.POLICY_EVALUATOR_UNAVAILABLE]);
   }
 
   // Gate 2: the pinned revision must be self-consistent — the right document
@@ -248,9 +237,9 @@ export function evaluatePolicy(
   // No allow path, but an allow rule could not be fully evaluated: report the
   // gap instead of a clean deny, and never allow.
   if (unknownAllow) {
-    return buildResult(input, revision, 'INDETERMINATE', [
-      IndeterminateReason.AUTHORITATIVE_STATE_UNAVAILABLE,
-    ], { rulesEvaluated: evaluated });
+    return buildResult(input, revision, 'INDETERMINATE', [IndeterminateReason.AUTHORITATIVE_STATE_UNAVAILABLE], {
+      rulesEvaluated: evaluated,
+    });
   }
 
   return buildResult(input, revision, 'DENY', [DenyReason.NO_EXPLICIT_ALLOW], {

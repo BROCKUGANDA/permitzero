@@ -97,59 +97,58 @@ export const POLICY_FIELDS = Object.values(PolicyField) as readonly PolicyField[
 
 /** Field → value type, so the linter can reject a string comparison against an
  * integer threshold (PRD §7.3.D: "invalid amount units"). */
-export const FIELD_VALUE_TYPE: Readonly<Record<PolicyField, 'string' | 'number' | 'boolean' | 'enum'>> =
-  {
-    'tool.name': 'string',
-    'tool.operation': 'string',
-    environment: 'enum',
-    'agent.id': 'string',
-    'agent.framework': 'string',
-    'agent.status': 'enum',
-    'principal.role': 'enum',
-    'run.action_count': 'number',
-    'task.purpose': 'string',
-    'arguments.amount_minor': 'number',
-    'arguments.currency': 'string',
-    'arguments.vendor_id': 'string',
-    'arguments.beneficiary_ref': 'string',
-    'arguments.invoice_id': 'string',
-    'arguments.purchase_order_id': 'string',
-    'arguments.destination_ref': 'string',
-    'arguments.target_table': 'string',
-    'arguments.record_count': 'number',
-    'arguments.data_classification': 'string',
-    'vendor.exists': 'boolean',
-    'vendor.status': 'enum',
-    'vendor.account_age_days': 'number',
-    'vendor.beneficiary_matches_verified': 'boolean',
-    'vendor.banking_change_hours_ago': 'number',
-    'vendor.banking_change_verified': 'boolean',
-    'vendor.destination_allowed': 'boolean',
-    'vendor.data_classification': 'string',
-    'invoice.exists': 'boolean',
-    'invoice.vendor_matches': 'boolean',
-    'invoice.amount_matches_argument': 'boolean',
-    'invoice.currency_matches_argument': 'boolean',
-    'purchase_order.exists': 'boolean',
-    'purchase_order.matched': 'boolean',
-    'purchase_order.amount_covers': 'boolean',
-    'purchase_order.vendor_matches': 'boolean',
-    'evidence.has_kind': 'string',
-    'evidence.count': 'number',
-    'evidence.all_untrusted_labelled': 'boolean',
-    'connector.exists': 'boolean',
-    'connector.status': 'enum',
-    'connector.simulated': 'boolean',
-    'connector.tool_allowed': 'boolean',
-    'budget.spend_minor': 'number',
-    'velocity.count': 'number',
-    'time.hour_utc': 'number',
-    'time.day_of_week_utc': 'number',
-    'model.enabled': 'boolean',
-    'model.signal_present': 'string',
-    'model.max_injection_confidence': 'number',
-    'model.missing_evidence_count': 'number',
-  };
+export const FIELD_VALUE_TYPE: Readonly<Record<PolicyField, 'string' | 'number' | 'boolean' | 'enum'>> = {
+  'tool.name': 'string',
+  'tool.operation': 'string',
+  environment: 'enum',
+  'agent.id': 'string',
+  'agent.framework': 'string',
+  'agent.status': 'enum',
+  'principal.role': 'enum',
+  'run.action_count': 'number',
+  'task.purpose': 'string',
+  'arguments.amount_minor': 'number',
+  'arguments.currency': 'string',
+  'arguments.vendor_id': 'string',
+  'arguments.beneficiary_ref': 'string',
+  'arguments.invoice_id': 'string',
+  'arguments.purchase_order_id': 'string',
+  'arguments.destination_ref': 'string',
+  'arguments.target_table': 'string',
+  'arguments.record_count': 'number',
+  'arguments.data_classification': 'string',
+  'vendor.exists': 'boolean',
+  'vendor.status': 'enum',
+  'vendor.account_age_days': 'number',
+  'vendor.beneficiary_matches_verified': 'boolean',
+  'vendor.banking_change_hours_ago': 'number',
+  'vendor.banking_change_verified': 'boolean',
+  'vendor.destination_allowed': 'boolean',
+  'vendor.data_classification': 'string',
+  'invoice.exists': 'boolean',
+  'invoice.vendor_matches': 'boolean',
+  'invoice.amount_matches_argument': 'boolean',
+  'invoice.currency_matches_argument': 'boolean',
+  'purchase_order.exists': 'boolean',
+  'purchase_order.matched': 'boolean',
+  'purchase_order.amount_covers': 'boolean',
+  'purchase_order.vendor_matches': 'boolean',
+  'evidence.has_kind': 'string',
+  'evidence.count': 'number',
+  'evidence.all_untrusted_labelled': 'boolean',
+  'connector.exists': 'boolean',
+  'connector.status': 'enum',
+  'connector.simulated': 'boolean',
+  'connector.tool_allowed': 'boolean',
+  'budget.spend_minor': 'number',
+  'velocity.count': 'number',
+  'time.hour_utc': 'number',
+  'time.day_of_week_utc': 'number',
+  'model.enabled': 'boolean',
+  'model.signal_present': 'string',
+  'model.max_injection_confidence': 'number',
+  'model.missing_evidence_count': 'number',
+};
 
 export const PolicyOperator = {
   EQUALS: 'equals',
@@ -178,10 +177,7 @@ export const VALUELESS_OPERATORS: readonly PolicyOperator[] = [
 ];
 
 /** Operators whose value must be an array. */
-export const LIST_OPERATORS: readonly PolicyOperator[] = [
-  PolicyOperator.IN,
-  PolicyOperator.NOT_IN,
-];
+export const LIST_OPERATORS: readonly PolicyOperator[] = [PolicyOperator.IN, PolicyOperator.NOT_IN];
 
 export const RuleEffect = {
   ALLOW: 'ALLOW',
@@ -286,15 +282,23 @@ export type Condition = z.infer<typeof conditionSchema>;
 export const conditionGroupSchema: z.ZodType<ConditionGroup> = z.lazy(() =>
   z
     .object({
-      all: z.array(z.union([conditionSchema, conditionGroupSchema])).max(32).optional(),
-      any: z.array(z.union([conditionSchema, conditionGroupSchema])).max(32).optional(),
-      none: z.array(z.union([conditionSchema, conditionGroupSchema])).max(32).optional(),
+      all: z
+        .array(z.union([conditionSchema, conditionGroupSchema]))
+        .max(32)
+        .optional(),
+      any: z
+        .array(z.union([conditionSchema, conditionGroupSchema]))
+        .max(32)
+        .optional(),
+      none: z
+        .array(z.union([conditionSchema, conditionGroupSchema]))
+        .max(32)
+        .optional(),
     })
     .strict()
-    .refine(
-      (g) => g.all !== undefined || g.any !== undefined || g.none !== undefined,
-      { message: 'a condition group requires at least one of all/any/none' },
-    ),
+    .refine((g) => g.all !== undefined || g.any !== undefined || g.none !== undefined, {
+      message: 'a condition group requires at least one of all/any/none',
+    }),
 );
 export interface ConditionGroup {
   all?: ReadonlyArray<Condition | ConditionGroup>;

@@ -5,11 +5,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { VendorRecord } from '@permitzero/domain';
 import { createMemoryStores, stagingFor } from '../src/memory-stores.js';
-import {
-  SimulatedFinanceConnector,
-  clearConnectorFaultProfile,
-  setConnectorFaultProfile,
-} from '../src/connector.js';
+import { SimulatedFinanceConnector, clearConnectorFaultProfile, setConnectorFaultProfile } from '../src/connector.js';
 
 const TENANT = 'ten_test';
 

@@ -99,9 +99,7 @@ export function createWorkers(deps: WorkerDeps): Workers {
       } catch (err) {
         const { errorClass } = classifyQueueError(err);
         emit({ kind: 'handler_error', queue, jobId: job.id, errorClass });
-        result = job.attempt >= maxAttempts
-          ? { outcome: 'FAILED', errorClass }
-          : { outcome: 'RETRY', errorClass };
+        result = job.attempt >= maxAttempts ? { outcome: 'FAILED', errorClass } : { outcome: 'RETRY', errorClass };
       }
 
       switch (result.outcome) {
@@ -242,8 +240,12 @@ export async function redriveFromDlq(deps: {
   const added = await deps.target.add(deps.job.jobName, deps.job.data, {
     jobId: `redrive:${deps.job.sourceJobId}:${Date.now()}`,
   });
-  await deps.dlq.add('redriven', { ...deps.job, redrivenBy: deps.operatorId }, {
-    jobId: `dlq-redriven:${deps.job.sourceJobId}:${Date.now()}`,
-  });
+  await deps.dlq.add(
+    'redriven',
+    { ...deps.job, redrivenBy: deps.operatorId },
+    {
+      jobId: `dlq-redriven:${deps.job.sourceJobId}:${Date.now()}`,
+    },
+  );
   return { redriven: true, jobId: added.id };
 }

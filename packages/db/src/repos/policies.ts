@@ -18,7 +18,14 @@ async function first<T>(rows: Promise<T[]>): Promise<T | null> {
 
 export async function createPolicy(
   ex: DbExecutor,
-  input: { id: string; tenantId: string; name: string; code: string; description?: string | null; createdBy?: string | null },
+  input: {
+    id: string;
+    tenantId: string;
+    name: string;
+    code: string;
+    description?: string | null;
+    createdBy?: string | null;
+  },
 ): Promise<PolicyRow> {
   const [row] = await ex
     .insert(policies)
@@ -37,13 +44,21 @@ export async function createPolicy(
 
 export async function getPolicyById(ex: DbExecutor, tenantId: string, id: string): Promise<PolicyRow | null> {
   return first(
-    ex.select().from(policies).where(and(eq(policies.tenantId, tenantId), eq(policies.policyId, id))).limit(1),
+    ex
+      .select()
+      .from(policies)
+      .where(and(eq(policies.tenantId, tenantId), eq(policies.policyId, id)))
+      .limit(1),
   );
 }
 
 export async function getPolicyByCode(ex: DbExecutor, tenantId: string, code: string): Promise<PolicyRow | null> {
   return first(
-    ex.select().from(policies).where(and(eq(policies.tenantId, tenantId), eq(policies.code, code))).limit(1),
+    ex
+      .select()
+      .from(policies)
+      .where(and(eq(policies.tenantId, tenantId), eq(policies.code, code)))
+      .limit(1),
   );
 }
 

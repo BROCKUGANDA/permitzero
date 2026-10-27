@@ -100,10 +100,7 @@ export class BadRequestError extends DomainError {
 }
 
 export class ValidationError extends DomainError {
-  constructor(
-    message = 'Request validation failed.',
-    details?: DomainErrorOptions['details'],
-  ) {
+  constructor(message = 'Request validation failed.', details?: DomainErrorOptions['details']) {
     super(message, { code: ErrorCode.VALIDATION_FAILED, httpStatus: 422, details });
     this.name = 'ValidationError';
   }
@@ -247,15 +244,12 @@ export class PermitInvalidError extends DomainError {
 
 export class UnknownOutcomeError extends DomainError {
   constructor(actionId: string, executionId: string) {
-    super(
-      'The connector may have completed this action. Reconcile before retrying.',
-      {
-        code: 'UNKNOWN_OUTCOME',
-        httpStatus: 409,
-        retryable: false,
-        details: { action_id: actionId, execution_id: executionId },
-      },
-    );
+    super('The connector may have completed this action. Reconcile before retrying.', {
+      code: 'UNKNOWN_OUTCOME',
+      httpStatus: 409,
+      retryable: false,
+      details: { action_id: actionId, execution_id: executionId },
+    });
     this.name = 'UnknownOutcomeError';
   }
 }

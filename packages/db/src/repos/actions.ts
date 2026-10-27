@@ -72,7 +72,11 @@ export async function createAction(ex: DbExecutor, input: CreateActionInput): Pr
 
 export async function getAction(ex: DbExecutor, tenantId: string, actionId: string): Promise<ActionRow | null> {
   return first(
-    ex.select().from(actions).where(and(eq(actions.tenantId, tenantId), eq(actions.actionId, actionId))).limit(1),
+    ex
+      .select()
+      .from(actions)
+      .where(and(eq(actions.tenantId, tenantId), eq(actions.actionId, actionId)))
+      .limit(1),
   );
 }
 
@@ -87,11 +91,7 @@ export async function getActionByIdempotency(
       .select()
       .from(actions)
       .where(
-        and(
-          eq(actions.tenantId, tenantId),
-          eq(actions.agentId, agentId),
-          eq(actions.idempotencyKey, idempotencyKey),
-        ),
+        and(eq(actions.tenantId, tenantId), eq(actions.agentId, agentId), eq(actions.idempotencyKey, idempotencyKey)),
       )
       .limit(1),
   );
@@ -124,7 +124,11 @@ export async function transitionAction(ex: DbExecutor, input: ActionTransitionIn
       ...(patch.expiresAt !== undefined ? { expiresAt: patch.expiresAt } : {}),
     })
     .where(
-      and(eq(actions.tenantId, input.tenantId), eq(actions.actionId, input.actionId), eq(actions.version, input.expectedVersion)),
+      and(
+        eq(actions.tenantId, input.tenantId),
+        eq(actions.actionId, input.actionId),
+        eq(actions.version, input.expectedVersion),
+      ),
     )
     .returning();
   const next = updated[0];
@@ -250,7 +254,13 @@ export async function countAgentActionsSince(
   const rows = await ex
     .select({ n: sql<number>`count(*)` })
     .from(actions)
-    .where(and(eq(actions.tenantId, tenantId), eq(actions.agentId, agentId), sql`${actions.requestedAt} >= ${since.toISOString()}`));
+    .where(
+      and(
+        eq(actions.tenantId, tenantId),
+        eq(actions.agentId, agentId),
+        sql`${actions.requestedAt} >= ${since.toISOString()}`,
+      ),
+    );
   return Number(rows[0]?.n ?? 0);
 }
 
@@ -265,7 +275,9 @@ export async function countActionsInRun(ex: DbExecutor, tenantId: string, runId:
 /** Budget: sum of succeeded payment amounts since `since`, in minor units. */
 export async function sumSucceededPaymentsSince(ex: DbExecutor, tenantId: string, since: Date): Promise<number> {
   const rows = await ex
-    .select({ total: sql<bigint | null>`COALESCE(SUM((${actions.argumentsJsonRedacted}->>'amount_minor')::bigint), 0)` })
+    .select({
+      total: sql<bigint | null>`COALESCE(SUM((${actions.argumentsJsonRedacted}->>'amount_minor')::bigint), 0)`,
+    })
     .from(actions)
     .where(
       and(
@@ -326,7 +338,11 @@ export async function createApproval(ex: DbExecutor, input: CreateApprovalInput)
   return row;
 }
 
-export async function listApprovalsByAction(ex: DbExecutor, tenantId: string, actionId: string): Promise<ApprovalRow[]> {
+export async function listApprovalsByAction(
+  ex: DbExecutor,
+  tenantId: string,
+  actionId: string,
+): Promise<ApprovalRow[]> {
   return ex
     .select()
     .from(approvals)
@@ -388,7 +404,13 @@ export async function createIdempotencyRecord(
 
 export async function completeIdempotencyRecord(
   ex: DbExecutor,
-  input: { id: string; tenantId: string; responseSnapshot: Record<string, unknown>; httpStatus: number; resourceId?: string | null },
+  input: {
+    id: string;
+    tenantId: string;
+    responseSnapshot: Record<string, unknown>;
+    httpStatus: number;
+    resourceId?: string | null;
+  },
 ): Promise<void> {
   await ex
     .update(idempotencyRecords)

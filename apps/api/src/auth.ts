@@ -42,9 +42,13 @@ export async function authenticateToken(ex: DbExecutor, header: string | undefin
   }
 
   // Usage accounting must never fail the request it describes.
-  const touched = touchCredentialLastUsed(ex, credential.tenantId, credential.credentialId, now).catch((err: unknown) => {
-    console.error(`credential usage update failed for ${credential.credentialId}: ${err instanceof Error ? err.message : String(err)}`);
-  });
+  const touched = touchCredentialLastUsed(ex, credential.tenantId, credential.credentialId, now).catch(
+    (err: unknown) => {
+      console.error(
+        `credential usage update failed for ${credential.credentialId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    },
+  );
 
   try {
     switch (credential.subjectType) {
@@ -118,10 +122,7 @@ export function requireRoles(principal: Principal, ...roles: (typeof Role)[keyof
 
 /** Humans who may approve: owners and approvers, never agents or services. */
 export function canApprove(principal: Principal): boolean {
-  return (
-    principal.actorType === 'USER' &&
-    principal.roles.some((r) => r === Role.OWNER || r === Role.APPROVER)
-  );
+  return principal.actorType === 'USER' && principal.roles.some((r) => r === Role.OWNER || r === Role.APPROVER);
 }
 
 export function requireApprover(principal: Principal): void {

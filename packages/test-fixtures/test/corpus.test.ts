@@ -8,13 +8,7 @@
  * expectation has to be justified by the engine's actual decision order.
  */
 import { describe, expect, it } from 'vitest';
-import {
-  AllowReason,
-  ApprovalReason,
-  Decision,
-  DenyReason,
-  IndeterminateReason,
-} from '@permitzero/domain';
+import { AllowReason, ApprovalReason, Decision, DenyReason, IndeterminateReason } from '@permitzero/domain';
 import type { PolicyEvaluationResult } from '@permitzero/domain';
 import type { PolicyDocument } from '@permitzero/schemas';
 import { buildApProtectPolicyDocument } from '@permitzero/db/seed-policy';
@@ -138,9 +132,7 @@ describe('corpus structure', () => {
 
   it('never reads a live clock: requestedAt is the anchored corpus instant', () => {
     for (const f of fixtures) {
-      expect(f.input.requestedAt.getTime(), `${f.id} must anchor requestedAt to CORPUS_NOW`).toBe(
-        CORPUS_NOW.getTime(),
-      );
+      expect(f.input.requestedAt.getTime(), `${f.id} must anchor requestedAt to CORPUS_NOW`).toBe(CORPUS_NOW.getTime());
     }
   });
 
@@ -209,9 +201,7 @@ describe('corpus behaviour against the seeded AP-PROTECT-01 policy', () => {
       }
       const escalated = f.input.riskHints.instructionInjectionIndicators.some((i) => i.confidence > 0.7);
       if (escalated) {
-        expect(result.decision, `${f.id} crossed the escalation threshold yet ended as ALLOW`).not.toBe(
-          Decision.ALLOW,
-        );
+        expect(result.decision, `${f.id} crossed the escalation threshold yet ended as ALLOW`).not.toBe(Decision.ALLOW);
       }
     }
   });
@@ -273,11 +263,25 @@ describe('determinism', () => {
   it('produces identical decisions, reason codes and hashes over the whole corpus twice', () => {
     const first = corpus().map((f) => {
       const r = decide(f);
-      return { id: f.id, decision: r.decision, codes: r.reasonCodes.join(','), hash: r.policyHash, approvals: r.requiredApprovals, at: r.evaluatedAt.getTime() };
+      return {
+        id: f.id,
+        decision: r.decision,
+        codes: r.reasonCodes.join(','),
+        hash: r.policyHash,
+        approvals: r.requiredApprovals,
+        at: r.evaluatedAt.getTime(),
+      };
     });
     const second = corpus().map((f) => {
       const r = decide(f);
-      return { id: f.id, decision: r.decision, codes: r.reasonCodes.join(','), hash: r.policyHash, approvals: r.requiredApprovals, at: r.evaluatedAt.getTime() };
+      return {
+        id: f.id,
+        decision: r.decision,
+        codes: r.reasonCodes.join(','),
+        hash: r.policyHash,
+        approvals: r.requiredApprovals,
+        at: r.evaluatedAt.getTime(),
+      };
     });
     expect(second).toEqual(first);
     expect(first).toHaveLength(corpus().length);
@@ -289,7 +293,11 @@ describe('determinism', () => {
 
   it('rebuilds the same corpus hash from a fresh module-level evaluation', () => {
     const rebuilt = corpus().map((f) => `${f.id}:${decide(f).decision}:${f.unsafe}`);
-    expect(rebuilt.join('|')).toBe(corpus().map((f) => `${f.id}:${decide(f).decision}:${f.unsafe}`).join('|'));
+    expect(rebuilt.join('|')).toBe(
+      corpus()
+        .map((f) => `${f.id}:${decide(f).decision}:${f.unsafe}`)
+        .join('|'),
+    );
     expect(corpusHash()).toMatch(/^sha256:/);
   });
 });

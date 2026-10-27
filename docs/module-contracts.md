@@ -27,12 +27,12 @@ Pure deterministic evaluation. No I/O, no clock reads except from the input.
 
 ```ts
 export interface PinnedPolicyRevision {
-  revisionId: string;        // polrev_…
-  policyId: string;          // pol_…
+  revisionId: string; // polrev_…
+  policyId: string; // pol_…
   tenantId: string;
   revisionNumber: number;
-  document: PolicyDocument;  // from @permitzero/schemas
-  policyHash: string;        // sha256:… over the canonical document
+  document: PolicyDocument; // from @permitzero/schemas
+  policyHash: string; // sha256:… over the canonical document
   status: PolicyRevisionStatus;
   publishedAt: Date | null;
 }
@@ -46,9 +46,9 @@ export function hashPolicyDocument(document: PolicyDocument): string;
  * reason code instead. Only a programming error may throw.
  */
 export function evaluatePolicy(
-  input: PolicyEvaluationInput,   // @permitzero/domain
+  input: PolicyEvaluationInput, // @permitzero/domain
   revision: PinnedPolicyRevision,
-): PolicyEvaluationResult;        // @permitzero/domain
+): PolicyEvaluationResult; // @permitzero/domain
 
 /** Every field the engine knows how to resolve, with its resolved value. Used by
  * the decision drawer and the Replay Lab to explain a decision. */
@@ -104,18 +104,28 @@ Hard requirements:
 Drizzle + `postgres` (postgres.js). PostgreSQL is the system of record.
 
 ```ts
-export * as schema from './schema.js';   // all tables
-export interface Db { sql: postgres.Sql; /* drizzle instance */ }
+export * as schema from './schema.js'; // all tables
+export interface Db {
+  sql: postgres.Sql; /* drizzle instance */
+}
 export function createDb(url: string): Db;
 export async function migrate(db: Db): Promise<void>;
 export async function resetDb(db: Db): Promise<void>;
 export async function seed(db: Db, options?: SeedOptions): Promise<SeedResult>;
 export async function healthCheck(db: Db): Promise<boolean>;
-export interface SeedOptions { tenants?: number; synthetic?: boolean; }
+export interface SeedOptions {
+  tenants?: number;
+  synthetic?: boolean;
+}
 export interface SeedResult {
-  tenantIds: string[]; userIds: Record<string, string>; agentIds: string[];
-  policyIds: string[]; connectorIds: string[]; vendorIds: string[];
-  invoiceIds: string[]; purchaseOrderIds: string[];
+  tenantIds: string[];
+  userIds: Record<string, string>;
+  agentIds: string[];
+  policyIds: string[];
+  connectorIds: string[];
+  vendorIds: string[];
+  invoiceIds: string[];
+  purchaseOrderIds: string[];
 }
 ```
 
@@ -154,12 +164,21 @@ Requirements:
 
 ```ts
 export interface PermitIssueInput {
-  tenantId: string; agentId: string; actionId: string; actionHash: string;
-  policyRevisionId: string; audienceTool: string; ttlSeconds: number;
+  tenantId: string;
+  agentId: string;
+  actionId: string;
+  actionHash: string;
+  policyRevisionId: string;
+  audienceTool: string;
+  ttlSeconds: number;
 }
 export interface IssuedPermit {
-  permitId: string; token: string; nonceHash: string;
-  issuedAt: Date; expiresAt: Date; signatureKeyId: string;
+  permitId: string;
+  token: string;
+  nonceHash: string;
+  issuedAt: Date;
+  expiresAt: Date;
+  signatureKeyId: string;
 }
 export class PermitService {
   constructor(config: { signingKey: string; signingKeyId: string; store: PermitStore });
@@ -171,12 +190,15 @@ export class PermitService {
   revokeByAction(actionId: string, tenantId: string, reason: string): Promise<void>;
 }
 export interface PermitVerifyContext {
-  tenantId: string; actionId: string; actionHash: string;
-  policyRevisionId: string; audienceTool: string; now: Date;
+  tenantId: string;
+  actionId: string;
+  actionHash: string;
+  policyRevisionId: string;
+  audienceTool: string;
+  now: Date;
 }
 export type PermitVerification =
-  | { ok: true; permit: PermitRecord; nonce: string }
-  | { ok: false; reason: DenyReason; detail: string };
+  { ok: true; permit: PermitRecord; nonce: string } | { ok: false; reason: DenyReason; detail: string };
 
 /** The only code path that can reach a side-effecting connector. */
 export class Broker {
@@ -184,8 +206,11 @@ export class Broker {
   reconcile(actionId: string, tenantId: string): Promise<ReconciliationResult>;
 }
 export interface BrokerExecuteRequest {
-  tenantId: string; actionId: string; permitToken: string;
-  actorId: string; traceId: string;
+  tenantId: string;
+  actionId: string;
+  permitToken: string;
+  actorId: string;
+  traceId: string;
   /** Caller deadline. On elapse *after* dispatch the broker records
    * UNKNOWN_OUTCOME instead of assuming failure. */
   deadlineMs?: number;
@@ -197,8 +222,13 @@ export type BrokerExecuteResult =
   | { outcome: 'REJECTED'; reason: DenyReason; detail: string };
 
 export interface ConnectorReceipt {
-  externalReference: string; receiptHash: string; amountMinor: number;
-  currency: string; beneficiaryRef: string; completedAt: Date; simulated: true;
+  externalReference: string;
+  receiptHash: string;
+  amountMinor: number;
+  currency: string;
+  beneficiaryRef: string;
+  completedAt: Date;
+  simulated: true;
 }
 
 /** Simulated finance connector. Deterministic; ledger keyed by the connector
@@ -222,8 +252,11 @@ export type ConnectorCallResult =
 
 /** Fault injection, driven by tests and the demo. Never enabled in production. */
 export interface ConnectorFaultProfile {
-  timeoutAfterDispatch: boolean; failRetryable: boolean; failTerminal: boolean;
-  latencyMs: number; duplicateDelivery: boolean;
+  timeoutAfterDispatch: boolean;
+  failRetryable: boolean;
+  failTerminal: boolean;
+  latencyMs: number;
+  duplicateDelivery: boolean;
 }
 export function setConnectorFaultProfile(profile: Partial<ConnectorFaultProfile>): void;
 export function clearConnectorFaultProfile(): void;
@@ -231,7 +264,7 @@ export function clearConnectorFaultProfile(): void;
 
 Requirements:
 
-1. A durable **execution-intent** row is committed *before* dispatch (FR-035).
+1. A durable **execution-intent** row is committed _before_ dispatch (FR-035).
 2. Permit consumption is atomic (single SQL statement with a `consumed_at IS NULL`
    predicate). Two concurrent workers consuming the same permit ⇒ exactly one
    succeeds (acceptance criterion 7).
@@ -248,10 +281,17 @@ Requirements:
 
 ```ts
 export interface ModelAdapterConfig {
-  enabled: boolean; apiKey: string | null; baseUrl: string; modelId: string | null;
-  timeoutMs: number; maxAttempts: number; maxConcurrency: number;
-  retryBaseMs: number; retryCapMs: number;
-  promptVersion: string; schemaVersion: string;
+  enabled: boolean;
+  apiKey: string | null;
+  baseUrl: string;
+  modelId: string | null;
+  timeoutMs: number;
+  maxAttempts: number;
+  maxConcurrency: number;
+  retryBaseMs: number;
+  retryCapMs: number;
+  promptVersion: string;
+  schemaVersion: string;
 }
 export function createModelAdapter(config: ModelAdapterConfig): ModelAdapter;
 export interface ModelAdapter {
@@ -268,7 +308,9 @@ export type ModelAnalysisOutcome =
   | { status: 'UNAVAILABLE'; errorClass: string; evaluation: ModelEvaluationRecord }
   | { status: 'INVALID_OUTPUT'; issues: string[]; evaluation: ModelEvaluationRecord };
 
-export class CircuitBreaker { /* closed → open → half-open, bounded probes */ }
+export class CircuitBreaker {
+  /* closed → open → half-open, bounded probes */
+}
 export function withRetry<T>(fn: () => Promise<T>, options: RetryOptions): Promise<T>;
 export function classifyError(error: unknown): { retryable: boolean; retryAfterMs?: number; errorClass: string };
 ```
@@ -281,7 +323,7 @@ Requirements:
 3. Never wrap a non-idempotent external finance write in this loop.
 4. Bounded concurrency (bulkhead) so a slow provider cannot exhaust policy or
    broker capacity.
-5. Validate output against `riskHintsSchema` *and* `validateRiskHintsSemantics`.
+5. Validate output against `riskHintsSchema` _and_ `validateRiskHintsSemantics`.
    Schema-valid-but-nonsense ⇒ `INVALID_OUTPUT`, treated as unavailable.
 6. Redact before sending: no credentials, no full bank details, no unnecessary
    PII. Record `model_evaluations` with model id, prompt/schema version, input
@@ -295,16 +337,20 @@ Requirements:
 
 ```ts
 export const QUEUE_NAMES = {
-  outbox: 'pz.outbox', modelAnalysis: 'pz.model-analysis',
-  reconciliation: 'pz.reconciliation', replay: 'pz.replay',
+  outbox: 'pz.outbox',
+  modelAnalysis: 'pz.model-analysis',
+  reconciliation: 'pz.reconciliation',
+  replay: 'pz.replay',
   deadLetter: 'pz.dlq',
 } as const;
 export function createOutboxDispatcher(deps: OutboxDispatcherDeps): OutboxDispatcher;
 export function createWorkers(deps: WorkerDeps): Workers;
 export interface QueueHealth {
   status: 'ok' | 'degraded' | 'down' | 'disabled';
-  depth: number; oldestJobAgeMs: number | null;
-  outboxPending: number; outboxDead: number;
+  depth: number;
+  oldestJobAgeMs: number | null;
+  outboxPending: number;
+  outboxDead: number;
 }
 export function queueHealth(redis: Redis | null, db: Db): Promise<QueueHealth>;
 ```

@@ -3,7 +3,16 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
-import { Alert, buttonVariants, Card, CardContent, CardDescription, CardHeader, CardTitle, Skeleton } from '@permitzero/ui';
+import {
+  Alert,
+  buttonVariants,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  Skeleton,
+} from '@permitzero/ui';
 import { useAction, useMe } from '@/lib/api';
 import { DecisionBadge, StateBadge, ToolBadge } from '@/components/badges';
 import { ApprovalProgress, RiskSignalList } from '@/components/decision-evidence';
@@ -22,7 +31,10 @@ function RedactedArguments({ action }: { action: ActionDto }): React.JSX.Element
       {entries.map(([key, value]) => {
         let display = typeof value === 'string' ? value : JSON.stringify(value);
         if (key === 'amount_minor' && typeof value === 'number') {
-          const currency = typeof action.arguments_redacted['currency'] === 'string' ? String(action.arguments_redacted['currency']) : 'USD';
+          const currency =
+            typeof action.arguments_redacted['currency'] === 'string'
+              ? String(action.arguments_redacted['currency'])
+              : 'USD';
           display = formatMoney(value, currency);
         }
         return (
@@ -81,9 +93,7 @@ function YourMove({ action }: { action: ActionDto }): React.JSX.Element {
         )
       ) : null}
 
-      {collectible ? (
-        <CollectPanel action={action} onCollected={(fresh) => setPermit(fresh)} />
-      ) : null}
+      {collectible ? <CollectPanel action={action} onCollected={(fresh) => setPermit(fresh)} /> : null}
 
       {!collectible && executable ? (
         <ExecutePanel action={action} presetToken={null} onExecuted={(res) => setReceipt(res)} />
@@ -106,8 +116,12 @@ function YourMove({ action }: { action: ActionDto }): React.JSX.Element {
         <p className="text-sm text-muted-foreground">Nothing to do here — this request is settled.</p>
       ) : null}
 
-      {action.state !== 'APPROVAL_REQUIRED' && (action.state === 'APPROVED' || action.state === 'PERMIT_ISSUED') && !spendable ? (
-        <p className="text-sm text-muted-foreground">Approved. Only the owning agent or an operator can spend the permit.</p>
+      {action.state !== 'APPROVAL_REQUIRED' &&
+      (action.state === 'APPROVED' || action.state === 'PERMIT_ISSUED') &&
+      !spendable ? (
+        <p className="text-sm text-muted-foreground">
+          Approved. Only the owning agent or an operator can spend the permit.
+        </p>
       ) : null}
     </div>
   );
@@ -161,9 +175,7 @@ export default function ActionDetailPage({ params }: { params: Promise<{ actionI
           <Card>
             <CardHeader>
               <CardTitle>Request</CardTitle>
-              <CardDescription>
-                What was asked, word for word. Sensitive values stay masked here.
-              </CardDescription>
+              <CardDescription>What was asked, word for word. Sensitive values stay masked here.</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-4">
               <RedactedArguments action={action} />
@@ -185,7 +197,9 @@ export default function ActionDetailPage({ params }: { params: Promise<{ actionI
                 <div>
                   <dt className="text-xs text-muted-foreground">Policy</dt>
                   <dd className="text-xs">
-                    {action.policy_revision_number !== null ? `revision ${action.policy_revision_number}` : 'no published policy yet'}
+                    {action.policy_revision_number !== null
+                      ? `revision ${action.policy_revision_number}`
+                      : 'no published policy yet'}
                   </dd>
                 </div>
               </dl>
@@ -239,7 +253,9 @@ export default function ActionDetailPage({ params }: { params: Promise<{ actionI
                   <div>
                     <dt className="text-xs text-muted-foreground">Receipt</dt>
                     <dd className="font-mono text-xs">
-                      {action.execution.receipt_hash ? truncateMiddle(action.execution.receipt_hash, 18, 8) : 'none yet'}
+                      {action.execution.receipt_hash
+                        ? truncateMiddle(action.execution.receipt_hash, 18, 8)
+                        : 'none yet'}
                     </dd>
                   </div>
                 </dl>

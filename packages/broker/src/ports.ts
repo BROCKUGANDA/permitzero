@@ -93,11 +93,7 @@ export interface PermitStore {
    *
    * `consumed` is false when zero rows came back.
    */
-  consumeIfUnused(
-    permitId: string,
-    tenantId: string,
-    now: Date,
-  ): Promise<PermitConsumeResult>;
+  consumeIfUnused(permitId: string, tenantId: string, now: Date): Promise<PermitConsumeResult>;
   /**
    * Locate a permit by token HMAC inside one tenant. Implementations MUST scope
    * by `tenant_id` (row-level security); the permit service performs the
@@ -156,17 +152,10 @@ export interface ExecutionStore {
    */
   recordIntent(execution: PersistedExecution): Promise<void>;
   /** Intent is durable and the request is about to leave the process. */
-  markDispatched(
-    executionId: string,
-    tenantId: string,
-    dispatchStartedAt: Date,
-  ): Promise<PersistedExecution | null>;
+  markDispatched(executionId: string, tenantId: string, dispatchStartedAt: Date): Promise<PersistedExecution | null>;
   markResult(update: ExecutionResultUpdate): Promise<PersistedExecution | null>;
   findLatestByAction(actionId: string, tenantId: string): Promise<PersistedExecution | null>;
-  findByIdempotencyKey(
-    connectorIdempotencyKey: string,
-    tenantId: string,
-  ): Promise<PersistedExecution | null>;
+  findByIdempotencyKey(connectorIdempotencyKey: string, tenantId: string): Promise<PersistedExecution | null>;
   /** Reconciliation sweep. `null` tenant means "all tenants" (service role). */
   listUnknownOutcomes(tenantId: string | null, limit?: number): Promise<PersistedExecution[]>;
 }
@@ -175,10 +164,7 @@ export interface ExecutionStore {
 // actions
 // ---------------------------------------------------------------------------
 
-export type ActionTransitionFailureReason =
-  | 'NOT_FOUND'
-  | 'STATE_MISMATCH'
-  | 'VERSION_CONFLICT';
+export type ActionTransitionFailureReason = 'NOT_FOUND' | 'STATE_MISMATCH' | 'VERSION_CONFLICT';
 
 export type ActionTransitionResult =
   | { ok: true; action: ActionRecord }
@@ -201,9 +187,7 @@ export interface ActionTransitionInput {
   /** Optional compare-and-swap on state as well as version. */
   expectedFrom?: ActionState;
   /** Non-state fields the transition legitimately updates. */
-  patch?: Partial<
-    Pick<ActionRecord, 'decision' | 'decisionReasonCodes' | 'policyRevisionId' | 'expiresAt'>
-  >;
+  patch?: Partial<Pick<ActionRecord, 'decision' | 'decisionReasonCodes' | 'policyRevisionId' | 'expiresAt'>>;
 }
 
 export interface ActionStore {
@@ -342,5 +326,4 @@ export const BrokerAuditEventType = {
   reconciliationResolved: 'reconciliation.resolved',
   reconciliationManualReview: 'reconciliation.manual_review',
 } as const;
-export type BrokerAuditEventType =
-  (typeof BrokerAuditEventType)[keyof typeof BrokerAuditEventType];
+export type BrokerAuditEventType = (typeof BrokerAuditEventType)[keyof typeof BrokerAuditEventType];

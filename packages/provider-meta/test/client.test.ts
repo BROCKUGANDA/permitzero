@@ -110,7 +110,8 @@ describe('meta provider client', () => {
     expect(calls).toHaveBeenCalledTimes(1);
 
     const wrongVersion = vi.fn(
-      async () => new Response(JSON.stringify(completion(JSON.stringify(hintsBody({ schema_version: 'v9' })))), { status: 200 }),
+      async () =>
+        new Response(JSON.stringify(completion(JSON.stringify(hintsBody({ schema_version: 'v9' })))), { status: 200 }),
     );
     const versioned = new MetaProviderClient(config(), { fetchFn: wrongVersion as unknown as typeof fetch });
     await expect(versioned.analyze(input())).rejects.toMatchObject({ errorClass: 'SCHEMA_INVALID' });

@@ -5,20 +5,8 @@
  */
 import { createBroker } from '@permitzero/db';
 import type { Db } from '@permitzero/db';
-import {
-  QUEUE_NAMES,
-  adaptDbAudit,
-  adaptDbOutbox,
-  createOutboxDispatcher,
-  createWorkers,
-} from '@permitzero/queue';
-import type {
-  OutboxDispatcher,
-  QueueFactory,
-  RedisLike,
-  WorkerFactory,
-  Workers,
-} from '@permitzero/queue';
+import { QUEUE_NAMES, adaptDbAudit, adaptDbOutbox, createOutboxDispatcher, createWorkers } from '@permitzero/queue';
+import type { OutboxDispatcher, QueueFactory, RedisLike, WorkerFactory, Workers } from '@permitzero/queue';
 import type { WorkerConfig } from './config.js';
 import { createOutboxRouter } from './handlers/outbox-events.js';
 import { createReconciliationHandler } from './handlers/reconcile.js';
@@ -107,7 +95,11 @@ export function buildWorker(deps: BuildWorkerDeps): BuiltWorker {
       { db: deps.db, stores, broker, clock },
       { limit: deps.config.sweepBatchSize, graceMs: deps.config.reconcileGraceMs },
     );
-    if (expiry.expired > 0 || reconcile.succeeded + reconcile.failed + reconcile.manual > 0 || expiry.errors + reconcile.errors > 0) {
+    if (
+      expiry.expired > 0 ||
+      reconcile.succeeded + reconcile.failed + reconcile.manual > 0 ||
+      expiry.errors + reconcile.errors > 0
+    ) {
       console.log(`[worker:sweep] ${JSON.stringify({ expiry, reconcile })}`);
     }
     return { expiry, reconcile };

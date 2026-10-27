@@ -8,12 +8,7 @@ import { ID_PREFIX, type IdKind } from '@permitzero/domain/id-prefixes';
 /** A prefixed ULID, validated for both prefix and body shape. */
 export function idSchema(kind: IdKind) {
   const prefix = ID_PREFIX[kind];
-  return z
-    .string()
-    .regex(
-      new RegExp(`^${prefix}_[0-9A-HJKMNP-TV-Z]{26}$`),
-      `expected a ${prefix}_ prefixed ULID`,
-    );
+  return z.string().regex(new RegExp(`^${prefix}_[0-9A-HJKMNP-TV-Z]{26}$`), `expected a ${prefix}_ prefixed ULID`);
 }
 
 export const tenantIdSchema = idSchema('tenant');
@@ -40,9 +35,7 @@ export const amountMinorSchema = z
 
 export const currencySchema = z.enum(SUPPORTED_CURRENCIES as [string, ...string[]]);
 
-export const actionHashSchema = z
-  .string()
-  .regex(/^sha256:[a-f0-9]{64}$/, 'expected a sha256:<hex> action hash');
+export const actionHashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/, 'expected a sha256:<hex> action hash');
 
 /** Evidence references are `kind:identifier`. Everything behind one is untrusted
  * content (PRD FR-014); the ref itself is what a policy can require. */
@@ -50,10 +43,7 @@ export const evidenceRefSchema = z
   .string()
   .min(3)
   .max(256)
-  .regex(
-    /^[a-z][a-z0-9-]{1,32}:[A-Za-z0-9._\-:/]{1,200}$/,
-    'evidence refs must be kind:identifier',
-  );
+  .regex(/^[a-z][a-z0-9-]{1,32}:[A-Za-z0-9._\-:/]{1,200}$/, 'evidence refs must be kind:identifier');
 
 export const toolNameSchema = z
   .string()

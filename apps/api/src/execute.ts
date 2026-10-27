@@ -23,13 +23,7 @@ import type { Principal } from '@permitzero/domain';
 import type { ExecuteActionRequest, ExecuteActionResponse } from '@permitzero/schemas';
 import { executeActionResponseSchema } from '@permitzero/schemas';
 import { Broker } from '@permitzero/broker';
-import {
-  findConnectorForTool,
-  getAction,
-  getEnforcementMode,
-  insertOutboxEvent,
-  toActionRecord,
-} from '@permitzero/db';
+import { findConnectorForTool, getAction, getEnforcementMode, insertOutboxEvent, toActionRecord } from '@permitzero/db';
 import type { Db } from '@permitzero/db';
 import { requireExecute } from './auth.js';
 
@@ -54,9 +48,7 @@ export async function executeApprovedAction(
   if (!action) throw new NotFoundError();
   requireExecute(principal, toActionRecord(action));
   if (action.state !== 'PERMIT_ISSUED') {
-    throw new ConflictError(
-      `This action is ${action.state}; only actions with a live permit can execute.`,
-    );
+    throw new ConflictError(`This action is ${action.state}; only actions with a live permit can execute.`);
   }
 
   const mode = (await getEnforcementMode(deps.db.db, tenantId))?.mode ?? 'ENFORCED';

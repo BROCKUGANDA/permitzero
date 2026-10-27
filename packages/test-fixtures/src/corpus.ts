@@ -11,13 +11,7 @@
  * label says so explicitly (and `unsafe` stays false, because the fixture does
  * end as ALLOW); those fixtures are the documented gaps the corpus exposes.
  */
-import {
-  AllowReason,
-  ApprovalReason,
-  Decision,
-  DenyReason,
-  IndeterminateReason,
-} from '@permitzero/domain';
+import { AllowReason, ApprovalReason, Decision, DenyReason, IndeterminateReason } from '@permitzero/domain';
 import type { PolicyEvaluationInput } from '@permitzero/domain';
 import {
   ATTACKER_BENEFICIARY_REF,
@@ -108,12 +102,7 @@ function deny(id: string, label: string, reason: DenyReason, input: PolicyEvalua
   return fixture(id, 'deny', label, Decision.DENY, reason, input);
 }
 
-function approval(
-  id: string,
-  label: string,
-  reason: ApprovalReason,
-  input: PolicyEvaluationInput,
-): FixtureCase {
+function approval(id: string, label: string, reason: ApprovalReason, input: PolicyEvaluationInput): FixtureCase {
   return fixture(id, 'approval', label, Decision.REQUIRE_APPROVAL, reason, input);
 }
 
@@ -167,7 +156,12 @@ const normalCases: FixtureCase[] = [
     paymentOf(500000),
     AllowReason.WITHIN_LIMIT,
   ),
-  allow('N-04', 'Payment of one minor unit ($0.01) with fully matched evidence.', paymentOf(1), AllowReason.WITHIN_LIMIT),
+  allow(
+    'N-04',
+    'Payment of one minor unit ($0.01) with fully matched evidence.',
+    paymentOf(1),
+    AllowReason.WITHIN_LIMIT,
+  ),
   allow('N-05', 'Payment of 5000 minor units ($50).', paymentOf(5000), AllowReason.WITHIN_LIMIT),
   allow('N-06', 'Payment of 100000 minor units ($1,000).', paymentOf(100000), AllowReason.WITHIN_LIMIT),
   allow('N-07', 'Payment of 200000 minor units ($2,000).', paymentOf(200000), AllowReason.WITHIN_LIMIT),
@@ -180,9 +174,19 @@ const normalCases: FixtureCase[] = [
     AllowReason.WITHIN_LIMIT,
   ),
   allow('N-11', 'Payment of 50000 EUR with invoice and PO in EUR.', paymentOf(50000, 'EUR'), AllowReason.WITHIN_LIMIT),
-  allow('N-12', 'Payment of 123456 GBP with invoice and PO in GBP.', paymentOf(123456, 'GBP'), AllowReason.WITHIN_LIMIT),
+  allow(
+    'N-12',
+    'Payment of 123456 GBP with invoice and PO in GBP.',
+    paymentOf(123456, 'GBP'),
+    AllowReason.WITHIN_LIMIT,
+  ),
   allow('N-13', 'Payment of 45000 JPY with invoice and PO in JPY.', paymentOf(45000, 'JPY'), AllowReason.WITHIN_LIMIT),
-  allow('N-14', 'Payment of 250000 CHF with invoice and PO in CHF.', paymentOf(250000, 'CHF'), AllowReason.WITHIN_LIMIT),
+  allow(
+    'N-14',
+    'Payment of 250000 CHF with invoice and PO in CHF.',
+    paymentOf(250000, 'CHF'),
+    AllowReason.WITHIN_LIMIT,
+  ),
   allow(
     'N-15',
     'Payment that cites the purchase order directly in its arguments.',
@@ -211,13 +215,17 @@ const normalCases: FixtureCase[] = [
     'D-43',
     'Payment 200h after a bank change that was never verified — an unverified change blocks payment at any age.',
     DenyReason.BENEFICIARY_CHANGE_UNVERIFIED,
-    basePaymentInput({ vendor: baseVendor({ bankingChangedAt: hoursBeforeCorpus(200), bankingChangeVerifiedAt: null }) }),
+    basePaymentInput({
+      vendor: baseVendor({ bankingChangedAt: hoursBeforeCorpus(200), bankingChangeVerifiedAt: null }),
+    }),
   ),
   deny(
     'D-44',
     'Payment exactly 168h after an unverified bank change — elapsed cooling does not substitute for verification.',
     DenyReason.BENEFICIARY_CHANGE_UNVERIFIED,
-    basePaymentInput({ vendor: baseVendor({ bankingChangedAt: hoursBeforeCorpus(168), bankingChangeVerifiedAt: null }) }),
+    basePaymentInput({
+      vendor: baseVendor({ bankingChangedAt: hoursBeforeCorpus(168), bankingChangeVerifiedAt: null }),
+    }),
   ),
   allow(
     'N-20',
@@ -299,7 +307,13 @@ const normalCases: FixtureCase[] = [
     'Vendor read of an UNVERIFIED vendor — visibility is preserved for unhealthy records.',
     baseReadInput('vendor.read', {
       arguments: { vendor_id: UNVERIFIED_VENDOR_ID },
-      vendor: baseVendor({ vendorId: UNVERIFIED_VENDOR_ID, name: 'SYNTHETIC Acme Parts', status: 'UNVERIFIED', accountAgeDays: 12, allowedDestinationRefs: [] }),
+      vendor: baseVendor({
+        vendorId: UNVERIFIED_VENDOR_ID,
+        name: 'SYNTHETIC Acme Parts',
+        status: 'UNVERIFIED',
+        accountAgeDays: 12,
+        allowedDestinationRefs: [],
+      }),
     }),
     AllowReason.TOOL_ALLOWED,
   ),
@@ -395,14 +409,24 @@ const denyCases: FixtureCase[] = [
     DenyReason.VENDOR_BLOCKED,
     paymentOf(7500000, 'USD', { vendor: baseVendor({ status: 'BLOCKED' }) }),
   ),
-  deny('D-07', 'Payment proposed by a REVOKED agent.', DenyReason.AGENT_REVOKED, basePaymentInput({ agent: baseAgent({ status: 'REVOKED', revokedAt: hoursBeforeCorpus(48) }) })),
+  deny(
+    'D-07',
+    'Payment proposed by a REVOKED agent.',
+    DenyReason.AGENT_REVOKED,
+    basePaymentInput({ agent: baseAgent({ status: 'REVOKED', revokedAt: hoursBeforeCorpus(48) }) }),
+  ),
   deny(
     'D-08',
     'Invoice read by a REVOKED agent — revocation stops every tool, not only writes.',
     DenyReason.AGENT_REVOKED,
     baseReadInput('invoice.read', { agent: baseAgent({ status: 'REVOKED', revokedAt: hoursBeforeCorpus(48) }) }),
   ),
-  deny('D-09', 'Payment proposed by a SUSPENDED agent.', DenyReason.AGENT_SUSPENDED, basePaymentInput({ agent: baseAgent({ status: 'SUSPENDED' }) })),
+  deny(
+    'D-09',
+    'Payment proposed by a SUSPENDED agent.',
+    DenyReason.AGENT_SUSPENDED,
+    basePaymentInput({ agent: baseAgent({ status: 'SUSPENDED' }) }),
+  ),
   deny(
     'D-10',
     'Bank-detail change proposed by a SUSPENDED agent.',
@@ -415,9 +439,24 @@ const denyCases: FixtureCase[] = [
     DenyReason.AGENT_SUSPENDED,
     baseReadInput('vendor.read', { agent: baseAgent({ status: 'SUSPENDED' }) }),
   ),
-  deny('D-12', 'Payment through a DISABLED connector.', DenyReason.CONNECTOR_DISABLED, basePaymentInput({ connector: baseConnector({ status: 'DISABLED' }) })),
-  deny('D-13', 'Payment through a DEGRADED connector — only ENABLED connectors move money.', DenyReason.CONNECTOR_DISABLED, basePaymentInput({ connector: baseConnector({ status: 'DEGRADED' }) })),
-  deny('D-14', 'Payment through a QUARANTINED connector.', DenyReason.CONNECTOR_DISABLED, basePaymentInput({ connector: baseConnector({ status: 'QUARANTINED' }) })),
+  deny(
+    'D-12',
+    'Payment through a DISABLED connector.',
+    DenyReason.CONNECTOR_DISABLED,
+    basePaymentInput({ connector: baseConnector({ status: 'DISABLED' }) }),
+  ),
+  deny(
+    'D-13',
+    'Payment through a DEGRADED connector — only ENABLED connectors move money.',
+    DenyReason.CONNECTOR_DISABLED,
+    basePaymentInput({ connector: baseConnector({ status: 'DEGRADED' }) }),
+  ),
+  deny(
+    'D-14',
+    'Payment through a QUARANTINED connector.',
+    DenyReason.CONNECTOR_DISABLED,
+    basePaymentInput({ connector: baseConnector({ status: 'QUARANTINED' }) }),
+  ),
   deny(
     'D-15',
     'Invoice read through a DEGRADED connector — unhealthy connector blocks reads too.',
@@ -468,7 +507,9 @@ const denyCases: FixtureCase[] = [
     'D-22',
     'Payment 167h after an unverified bank change — one hour short of the cooling period.',
     DenyReason.BENEFICIARY_CHANGE_WITHIN_COOLING_PERIOD,
-    basePaymentInput({ vendor: baseVendor({ bankingChangedAt: hoursBeforeCorpus(167), bankingChangeVerifiedAt: null }) }),
+    basePaymentInput({
+      vendor: baseVendor({ bankingChangedAt: hoursBeforeCorpus(167), bankingChangeVerifiedAt: null }),
+    }),
   ),
   deny(
     'D-23',
@@ -482,7 +523,9 @@ const denyCases: FixtureCase[] = [
     'D-24',
     'Payment whose bank change is timestamped in the future (clock skew) — treated as inside the cooling period.',
     DenyReason.BENEFICIARY_CHANGE_WITHIN_COOLING_PERIOD,
-    basePaymentInput({ vendor: baseVendor({ bankingChangedAt: hoursBeforeCorpus(-2), bankingChangeVerifiedAt: null }) }),
+    basePaymentInput({
+      vendor: baseVendor({ bankingChangedAt: hoursBeforeCorpus(-2), bankingChangeVerifiedAt: null }),
+    }),
   ),
   deny(
     'D-25',
@@ -511,26 +554,66 @@ const denyCases: FixtureCase[] = [
     DenyReason.NO_EXPLICIT_ALLOW,
     basePaymentInput({ purchaseOrder: null }),
   ),
-  deny('D-29', 'Payment of 5000001 minor units — one cent above the $50,000 hard ceiling.', DenyReason.AMOUNT_OVER_LIMIT, paymentOf(5000001)),
-  deny('D-30', 'Payment of $75,000 (the seeded malicious invoice INV-2042).', DenyReason.AMOUNT_OVER_LIMIT, paymentOf(7500000)),
-  deny('D-31', 'Payment at the intake maximum 999999999999 minor units.', DenyReason.AMOUNT_OVER_LIMIT, paymentOf(999999999999)),
+  deny(
+    'D-29',
+    'Payment of 5000001 minor units — one cent above the $50,000 hard ceiling.',
+    DenyReason.AMOUNT_OVER_LIMIT,
+    paymentOf(5000001),
+  ),
+  deny(
+    'D-30',
+    'Payment of $75,000 (the seeded malicious invoice INV-2042).',
+    DenyReason.AMOUNT_OVER_LIMIT,
+    paymentOf(7500000),
+  ),
+  deny(
+    'D-31',
+    'Payment at the intake maximum 999999999999 minor units.',
+    DenyReason.AMOUNT_OVER_LIMIT,
+    paymentOf(999999999999),
+  ),
   deny(
     'D-32',
     'Payment proposal that omits amount_minor entirely — default deny, never an allow on missing money.',
     DenyReason.NO_EXPLICIT_ALLOW,
     basePaymentInput({ arguments: omitArgs(paymentArguments(), 'amount_minor') }),
   ),
-  deny('D-33', 'Payment while EMERGENCY_STOP is active.', DenyReason.EMERGENCY_STOP_ACTIVE, basePaymentInput({ enforcementMode: 'EMERGENCY_STOP' })),
-  deny('D-34', 'Payment while the plane is DEGRADED_READ_ONLY.', DenyReason.WRITE_DISABLED_DEGRADED_MODE, basePaymentInput({ enforcementMode: 'DEGRADED_READ_ONLY' })),
-  deny('D-35', 'Payment while the tenant is QUARANTINED.', DenyReason.QUARANTINE_ACTIVE, basePaymentInput({ enforcementMode: 'QUARANTINE' })),
-  deny('D-36', 'Bank-detail change while the tenant is QUARANTINED.', DenyReason.QUARANTINE_ACTIVE, baseBankUpdateInput({ enforcementMode: 'QUARANTINE' })),
+  deny(
+    'D-33',
+    'Payment while EMERGENCY_STOP is active.',
+    DenyReason.EMERGENCY_STOP_ACTIVE,
+    basePaymentInput({ enforcementMode: 'EMERGENCY_STOP' }),
+  ),
+  deny(
+    'D-34',
+    'Payment while the plane is DEGRADED_READ_ONLY.',
+    DenyReason.WRITE_DISABLED_DEGRADED_MODE,
+    basePaymentInput({ enforcementMode: 'DEGRADED_READ_ONLY' }),
+  ),
+  deny(
+    'D-35',
+    'Payment while the tenant is QUARANTINED.',
+    DenyReason.QUARANTINE_ACTIVE,
+    basePaymentInput({ enforcementMode: 'QUARANTINE' }),
+  ),
+  deny(
+    'D-36',
+    'Bank-detail change while the tenant is QUARANTINED.',
+    DenyReason.QUARANTINE_ACTIVE,
+    baseBankUpdateInput({ enforcementMode: 'QUARANTINE' }),
+  ),
   deny(
     'D-37',
     'Cross-tenant proposal: the action belongs to ten_other but the pinned revision is ten_demo.',
     DenyReason.TENANT_MISMATCH,
     basePaymentInput({ tenantId: CORPUS_OTHER_TENANT }),
   ),
-  deny('D-38', 'Vendor export of INTERNAL records — no allow rule covers vendor.export.', DenyReason.NO_EXPLICIT_ALLOW, baseExportInput()),
+  deny(
+    'D-38',
+    'Vendor export of INTERNAL records — no allow rule covers vendor.export.',
+    DenyReason.NO_EXPLICIT_ALLOW,
+    baseExportInput(),
+  ),
   deny(
     'D-39',
     'Vendor export of 5000 RESTRICTED records — bulk exfiltration stays default-denied.',
@@ -566,15 +649,60 @@ const denyCases: FixtureCase[] = [
 // ---------------------------------------------------------------------------
 
 const approvalCases: FixtureCase[] = [
-  approval('AP-01', 'Payment of 500001 minor units — one cent above the $5,000 approval threshold.', ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD, paymentOf(500001)),
-  approval('AP-02', 'Payment of 700000 minor units ($7,000).', ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD, paymentOf(700000)),
-  approval('AP-03', 'Payment of 1000000 minor units ($10,000).', ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD, paymentOf(1000000)),
-  approval('AP-04', 'Payment of 2500000 minor units ($25,000).', ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD, paymentOf(2500000)),
-  approval('AP-05', 'Payment of 4999999 minor units — one cent below the $50,000 hard ceiling.', ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD, paymentOf(4999999)),
-  approval('AP-06', 'Payment of exactly 5000000 minor units — the hard ceiling is strictly greater than, so this reaches a human instead of denying.', ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD, paymentOf(5000000)),
-  approval('AP-07', 'Payment of 500001 EUR above the threshold.', ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD, paymentOf(500001, 'EUR')),
-  approval('AP-08', 'Payment of 1500000 JPY minor units above the threshold.', ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD, paymentOf(1500000, 'JPY')),
-  approval('AP-09', 'Bank-detail change for a verified vendor needs two humans.', ApprovalReason.DUAL_APPROVAL_REQUIRED, baseBankUpdateInput()),
+  approval(
+    'AP-01',
+    'Payment of 500001 minor units — one cent above the $5,000 approval threshold.',
+    ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD,
+    paymentOf(500001),
+  ),
+  approval(
+    'AP-02',
+    'Payment of 700000 minor units ($7,000).',
+    ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD,
+    paymentOf(700000),
+  ),
+  approval(
+    'AP-03',
+    'Payment of 1000000 minor units ($10,000).',
+    ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD,
+    paymentOf(1000000),
+  ),
+  approval(
+    'AP-04',
+    'Payment of 2500000 minor units ($25,000).',
+    ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD,
+    paymentOf(2500000),
+  ),
+  approval(
+    'AP-05',
+    'Payment of 4999999 minor units — one cent below the $50,000 hard ceiling.',
+    ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD,
+    paymentOf(4999999),
+  ),
+  approval(
+    'AP-06',
+    'Payment of exactly 5000000 minor units — the hard ceiling is strictly greater than, so this reaches a human instead of denying.',
+    ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD,
+    paymentOf(5000000),
+  ),
+  approval(
+    'AP-07',
+    'Payment of 500001 EUR above the threshold.',
+    ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD,
+    paymentOf(500001, 'EUR'),
+  ),
+  approval(
+    'AP-08',
+    'Payment of 1500000 JPY minor units above the threshold.',
+    ApprovalReason.AMOUNT_OVER_APPROVAL_THRESHOLD,
+    paymentOf(1500000, 'JPY'),
+  ),
+  approval(
+    'AP-09',
+    'Bank-detail change for a verified vendor needs two humans.',
+    ApprovalReason.DUAL_APPROVAL_REQUIRED,
+    baseBankUpdateInput(),
+  ),
   approval(
     'AP-10',
     'Bank-detail change for a PENDING_VERIFICATION vendor still routes to dual approval (the unverified-vendor deny is payment-only).',
@@ -853,7 +981,10 @@ const adversarialCases: FixtureCase[] = [
     basePaymentInput({
       evidenceRefs: Array.from({ length: 48 }, (_, i) =>
         i % 4 === 0
-          ? ({ ref: `invoice:${CORPUS_INVOICE_ID}`, kind: 'invoice' } as unknown as PolicyEvaluationInput['evidenceRefs'][number])
+          ? ({
+              ref: `invoice:${CORPUS_INVOICE_ID}`,
+              kind: 'invoice',
+            } as unknown as PolicyEvaluationInput['evidenceRefs'][number])
           : { ref: `invoice:${CORPUS_INVOICE_ID}`, kind: 'invoice', trusted: false },
       ),
     }),
@@ -1297,7 +1428,13 @@ function duplicateForbiddenPayment(): PolicyEvaluationInput {
   });
 }
 
-const allCases: FixtureCase[] = [...normalCases, ...denyCases, ...approvalCases, ...adversarialCases, ...resilienceCases];
+const allCases: FixtureCase[] = [
+  ...normalCases,
+  ...denyCases,
+  ...approvalCases,
+  ...adversarialCases,
+  ...resilienceCases,
+];
 
 Object.freeze(allCases);
 

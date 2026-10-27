@@ -186,7 +186,9 @@ export function ReceiptView({ response }: { response: ExecuteActionResponse }): 
           <dd>{formatDateTime(receipt.completed_at)}</dd>
         </div>
       </dl>
-      <p className="font-mono text-[11px] text-muted-foreground">receipt {truncateMiddle(receipt.receipt_hash, 18, 8)}</p>
+      <p className="font-mono text-[11px] text-muted-foreground">
+        receipt {truncateMiddle(receipt.receipt_hash, 18, 8)}
+      </p>
     </div>
   );
 }

@@ -4,7 +4,10 @@ import { Badge } from '@permitzero/ui';
 import { TOOL_META } from '@/lib/tools';
 import type { SupportedTool } from '@permitzero/schemas';
 
-const DECISIONS: Record<string, { label: string; variant: 'success' | 'destructive' | 'warning' | 'info' | 'secondary' }> = {
+const DECISIONS: Record<
+  string,
+  { label: string; variant: 'success' | 'destructive' | 'warning' | 'info' | 'secondary' }
+> = {
   ALLOW: { label: 'Allowed', variant: 'success' },
   DENY: { label: 'Denied', variant: 'destructive' },
   REQUIRE_APPROVAL: { label: 'Needs approval', variant: 'warning' },
@@ -17,7 +20,10 @@ export function DecisionBadge({ decision }: { decision: string | null }): React.
   return <Badge variant={known.variant}>{known.label}</Badge>;
 }
 
-const STATES: Record<string, { label: string; variant: 'success' | 'destructive' | 'warning' | 'info' | 'secondary' | 'outline' }> = {
+const STATES: Record<
+  string,
+  { label: string; variant: 'success' | 'destructive' | 'warning' | 'info' | 'secondary' | 'outline' }
+> = {
   RECEIVED: { label: 'Received', variant: 'secondary' },
   VALIDATING: { label: 'Validating', variant: 'info' },
   EVALUATING: { label: 'Deciding', variant: 'info' },
@@ -54,14 +60,15 @@ export function ToolBadge({ tool }: { tool: string }): React.JSX.Element {
   );
 }
 
-const MODES: Record<string, { label: string; variant: 'success' | 'destructive' | 'warning' | 'info' | 'secondary' }> = {
-  ENFORCED: { label: 'Enforcing', variant: 'success' },
-  OBSERVE_ONLY: { label: 'Observe only', variant: 'info' },
-  SIMULATION: { label: 'Simulation', variant: 'info' },
-  DEGRADED_READ_ONLY: { label: 'Degraded — reads only', variant: 'warning' },
-  QUARANTINE: { label: 'Quarantine', variant: 'destructive' },
-  EMERGENCY_STOP: { label: 'Emergency stop', variant: 'destructive' },
-};
+const MODES: Record<string, { label: string; variant: 'success' | 'destructive' | 'warning' | 'info' | 'secondary' }> =
+  {
+    ENFORCED: { label: 'Enforcing', variant: 'success' },
+    OBSERVE_ONLY: { label: 'Observe only', variant: 'info' },
+    SIMULATION: { label: 'Simulation', variant: 'info' },
+    DEGRADED_READ_ONLY: { label: 'Degraded — reads only', variant: 'warning' },
+    QUARANTINE: { label: 'Quarantine', variant: 'destructive' },
+    EMERGENCY_STOP: { label: 'Emergency stop', variant: 'destructive' },
+  };
 
 export function ModeBadge({ mode }: { mode: string }): React.JSX.Element {
   const known = MODES[mode] ?? { label: mode, variant: 'secondary' as const };

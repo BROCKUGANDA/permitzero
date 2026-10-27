@@ -13,9 +13,11 @@ export interface QueueLike {
   name: string;
   add(jobName: string, data: unknown, opts?: Record<string, unknown>): Promise<{ id?: string }>;
   getJobCounts(): Promise<Record<string, number>>;
-  getJobs(status: ('waiting' | 'delayed' | 'active')[], start?: number, end?: number): Promise<
-    { timestamp?: number; addedOn?: number }[]
-  >;
+  getJobs(
+    status: ('waiting' | 'delayed' | 'active')[],
+    start?: number,
+    end?: number,
+  ): Promise<{ timestamp?: number; addedOn?: number }[]>;
   close(): Promise<void>;
 }
 

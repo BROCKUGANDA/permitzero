@@ -54,13 +54,7 @@ export const RISK_HINTS_JSON_SCHEMA = {
   $schema: 'https://json-schema.org/draft/2020-12/schema',
   type: 'object',
   additionalProperties: false,
-  required: [
-    'schema_version',
-    'instruction_injection_indicators',
-    'extracted_facts',
-    'missing_evidence',
-    'summary',
-  ],
+  required: ['schema_version', 'instruction_injection_indicators', 'extracted_facts', 'missing_evidence', 'summary'],
   properties: {
     schema_version: { type: 'string', const: RISK_HINTS_SCHEMA_VERSION },
     instruction_injection_indicators: {

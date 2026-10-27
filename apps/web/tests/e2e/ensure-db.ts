@@ -4,8 +4,7 @@
  */
 import { closeDb, createDb, ensureDatabaseExists } from '@permitzero/db';
 
-const DATABASE_URL =
-  process.env['DATABASE_URL'] ?? 'postgres://postgres@127.0.0.1:5432/permitzero_e2e';
+const DATABASE_URL = process.env['DATABASE_URL'] ?? 'postgres://postgres@127.0.0.1:5432/permitzero_e2e';
 
 if (!/e2e|test/i.test(new URL(DATABASE_URL).pathname)) {
   throw new Error(`refusing to touch non-test database ${DATABASE_URL}`);

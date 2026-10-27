@@ -18,7 +18,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }):
             __html: `try{if(matchMedia('(prefers-color-scheme: dark)').matches)document.documentElement.classList.add('dark')}catch(e){}`,
           }}
         />
-        <style>{':root{--font-sans:"Inter Variable",ui-sans-serif,system-ui,sans-serif;--font-mono:"JetBrains Mono Variable",ui-monospace,monospace}'}</style>
+        <style>
+          {
+            ':root{--font-sans:"Inter Variable",ui-sans-serif,system-ui,sans-serif;--font-mono:"JetBrains Mono Variable",ui-monospace,monospace}'
+          }
+        </style>
       </head>
       <body>
         <Providers>{children}</Providers>

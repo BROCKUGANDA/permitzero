@@ -51,8 +51,7 @@ export interface PermitVerifyContext {
 }
 
 export type PermitVerification =
-  | { ok: true; permit: PermitRecord; nonce: string }
-  | { ok: false; reason: DenyReasonType; detail: string };
+  { ok: true; permit: PermitRecord; nonce: string } | { ok: false; reason: DenyReasonType; detail: string };
 
 const TOKEN_PREFIX = 'pzpt_';
 const NONCE_BYTES = 32;
@@ -167,11 +166,17 @@ export class PermitService {
     if (nonceB64 === null) {
       // Deliberately the same reason as "unknown token": the format is opaque
       // and callers must not learn which half was wrong.
-      return fail(DenyReason.PERMIT_MISSING, 'This permit was not recognized. It may be mistyped or from another system.');
+      return fail(
+        DenyReason.PERMIT_MISSING,
+        'This permit was not recognized. It may be mistyped or from another system.',
+      );
     }
     const nonce = Buffer.from(nonceB64, 'base64url');
     if (nonce.length !== NONCE_BYTES) {
-      return fail(DenyReason.PERMIT_MISSING, 'This permit was not recognized. It may be mistyped or from another system.');
+      return fail(
+        DenyReason.PERMIT_MISSING,
+        'This permit was not recognized. It may be mistyped or from another system.',
+      );
     }
 
     const tokenHash = hmacHex(this.signingKey, token);
@@ -186,12 +191,18 @@ export class PermitService {
           );
         }
       }
-      return fail(DenyReason.PERMIT_MISSING, 'No such permit exists in this tenant. It may have expired or never been issued.');
+      return fail(
+        DenyReason.PERMIT_MISSING,
+        'No such permit exists in this tenant. It may have expired or never been issued.',
+      );
     }
 
     if (row.revokedAt !== null) return fail(DenyReason.PERMIT_REVOKED, 'This permit was revoked by an operator.');
     if (row.consumedAt !== null) {
-      return fail(DenyReason.PERMIT_CONSUMED, 'This permit was already used. Permits are single-use; request a fresh evaluation.');
+      return fail(
+        DenyReason.PERMIT_CONSUMED,
+        'This permit was already used. Permits are single-use; request a fresh evaluation.',
+      );
     }
     if (context.now.getTime() >= row.expiresAt.getTime()) {
       return fail(DenyReason.PERMIT_EXPIRED, 'This permit has expired. Request a fresh evaluation.');
@@ -223,7 +234,10 @@ export class PermitService {
 
     const consumed = await this.store.consumeIfUnused(row.permitId, context.tenantId, context.now);
     if (!consumed.consumed || consumed.row === null) {
-      return fail(DenyReason.PERMIT_CONSUMED, 'This permit was already used. Permits are single-use; request a fresh evaluation.');
+      return fail(
+        DenyReason.PERMIT_CONSUMED,
+        'This permit was already used. Permits are single-use; request a fresh evaluation.',
+      );
     }
     return { ok: true, permit: toPermitRecord(consumed.row), nonce: nonceB64 };
   }

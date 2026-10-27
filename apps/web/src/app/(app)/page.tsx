@@ -9,7 +9,11 @@ import { ModeBadge, StateBadge, ToolBadge } from '@/components/badges';
 import { RequestError } from '@/components/execution';
 import type { StatusResponse } from '@permitzero/schemas';
 
-function StatusDot({ value }: { value: 'up' | 'down' | 'disabled' | 'ok' | 'degraded' | 'down' | 'disabled' }): React.JSX.Element {
+function StatusDot({
+  value,
+}: {
+  value: 'up' | 'down' | 'disabled' | 'ok' | 'degraded' | 'down' | 'disabled';
+}): React.JSX.Element {
   const color =
     value === 'up' || value === 'ok'
       ? 'bg-emerald-500'
@@ -96,13 +100,18 @@ function DecisionQueue(): React.JSX.Element {
               <li key={action.action_id}>
                 <Link href={`/actions/${action.action_id}`} className="group flex items-center gap-3 py-2.5">
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium group-hover:underline">{action.task_purpose}</span>
+                    <span className="block truncate text-sm font-medium group-hover:underline">
+                      {action.task_purpose}
+                    </span>
                     <span className="mt-1 flex flex-wrap items-center gap-2">
                       <ToolBadge tool={action.tool_name} />
                       <StateBadge state={action.state} />
                     </span>
                   </span>
-                  <ArrowRight className="size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" aria-hidden />
+                  <ArrowRight
+                    className="size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5"
+                    aria-hidden
+                  />
                 </Link>
               </li>
             ))}

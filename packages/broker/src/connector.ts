@@ -386,10 +386,7 @@ export class SimulatedFinanceConnector {
     };
   }
 
-  private async complete(
-    request: { tenantId: string; idempotencyKey: string },
-    outcome: string,
-  ): Promise<void> {
+  private async complete(request: { tenantId: string; idempotencyKey: string }, outcome: string): Promise<void> {
     await this.data.completeDispatch(request.tenantId, request.idempotencyKey, outcome, this.clock());
   }
 }

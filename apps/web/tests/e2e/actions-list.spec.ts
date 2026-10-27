@@ -23,7 +23,10 @@ test.describe('actions list', () => {
     await page.goto('/actions');
     await expect(page.getByRole('heading', { name: 'Actions' })).toBeVisible();
     await expect(page.getByRole('link', { name: /List probe authorized payment/ }).first()).toBeVisible();
-    await page.getByRole('link', { name: /List probe authorized payment/ }).first().click();
+    await page
+      .getByRole('link', { name: /List probe authorized payment/ })
+      .first()
+      .click();
     await page.waitForURL(/\/actions\/act_/);
     await expect(page.getByRole('heading', { name: 'List probe authorized payment' })).toBeVisible();
   });

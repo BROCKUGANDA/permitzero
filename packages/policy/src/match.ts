@@ -98,9 +98,7 @@ function compareScalars(actual: string | number | boolean, op: PolicyOperator, e
     case PolicyOperator.IS_FALSE:
       return actual === false ? 'TRUE' : 'FALSE';
     case PolicyOperator.CONTAINS:
-      return typeof actual === 'string' && typeof expected === 'string' && actual.includes(expected)
-        ? 'TRUE'
-        : 'FALSE';
+      return typeof actual === 'string' && typeof expected === 'string' && actual.includes(expected) ? 'TRUE' : 'FALSE';
     case PolicyOperator.MATCHES_REGEX: {
       if (typeof actual !== 'string' || typeof expected !== 'string') return 'FALSE';
       try {
@@ -133,11 +131,7 @@ function lessThan(a: ConditionValue, b: ConditionValue): boolean | null {
   return null;
 }
 
-function compareSet(
-  members: readonly string[],
-  op: PolicyOperator,
-  expected: ConditionValue,
-): Verdict {
+function compareSet(members: readonly string[], op: PolicyOperator, expected: ConditionValue): Verdict {
   switch (op) {
     case PolicyOperator.EQUALS:
       return typeof expected === 'string' && members.includes(expected) ? 'TRUE' : 'FALSE';

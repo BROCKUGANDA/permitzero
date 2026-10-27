@@ -58,12 +58,7 @@ export const TERMINAL_STATES: readonly ActionState[] = [
 const TRANSITIONS: Readonly<Record<ActionState, readonly ActionState[]>> = {
   RECEIVED: [ActionState.VALIDATING, ActionState.QUARANTINED],
   VALIDATING: [ActionState.EVALUATING, ActionState.DENIED, ActionState.QUARANTINED],
-  EVALUATING: [
-    ActionState.DENIED,
-    ActionState.APPROVAL_REQUIRED,
-    ActionState.ALLOWED,
-    ActionState.QUARANTINED,
-  ],
+  EVALUATING: [ActionState.DENIED, ActionState.APPROVAL_REQUIRED, ActionState.ALLOWED, ActionState.QUARANTINED],
   DENIED: [],
   APPROVAL_REQUIRED: [
     ActionState.APPROVED,
@@ -77,12 +72,7 @@ const TRANSITIONS: Readonly<Record<ActionState, readonly ActionState[]>> = {
   REJECTED: [],
   EXPIRED: [],
   REVOKED: [],
-  PERMIT_ISSUED: [
-    ActionState.EXECUTION_PENDING,
-    ActionState.REVOKED,
-    ActionState.EXPIRED,
-    ActionState.QUARANTINED,
-  ],
+  PERMIT_ISSUED: [ActionState.EXECUTION_PENDING, ActionState.REVOKED, ActionState.EXPIRED, ActionState.QUARANTINED],
   EXECUTION_PENDING: [ActionState.EXECUTING, ActionState.REVOKED, ActionState.QUARANTINED],
   EXECUTING: [
     ActionState.SUCCEEDED,
@@ -100,12 +90,7 @@ const TRANSITIONS: Readonly<Record<ActionState, readonly ActionState[]>> = {
   ],
   FAILED_TERMINAL: [],
   UNKNOWN_OUTCOME: [ActionState.RECONCILING, ActionState.MANUAL_REVIEW, ActionState.QUARANTINED],
-  RECONCILING: [
-    ActionState.SUCCEEDED,
-    ActionState.FAILED_TERMINAL,
-    ActionState.MANUAL_REVIEW,
-    ActionState.QUARANTINED,
-  ],
+  RECONCILING: [ActionState.SUCCEEDED, ActionState.FAILED_TERMINAL, ActionState.MANUAL_REVIEW, ActionState.QUARANTINED],
   MANUAL_REVIEW: [],
   // Quarantine is released by an authorized operator back into reconciliation or
   // a terminal state — never straight back into EXECUTING.

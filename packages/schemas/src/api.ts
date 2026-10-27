@@ -56,9 +56,7 @@ export const TOOL_SCHEMAS = {
     })
     .strict(),
   'invoice.read': z.object({ invoice_id: z.string().min(1).max(64) }).strict(),
-  'purchase_order.read': z
-    .object({ purchase_order_id: z.string().min(1).max(64) })
-    .strict(),
+  'purchase_order.read': z.object({ purchase_order_id: z.string().min(1).max(64) }).strict(),
   'vendor.read': z.object({ vendor_id: z.string().min(1).max(64) }).strict(),
   'vendor.update_bank_details': z
     .object({

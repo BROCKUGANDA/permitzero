@@ -32,12 +32,18 @@ export class ApiError extends Error {
   readonly traceId: string | null;
   readonly retryable: boolean;
 
-  constructor(status: number, code: string, message: string, opts?: { details?: unknown; traceId?: unknown; retryable?: unknown }) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    opts?: { details?: unknown; traceId?: unknown; retryable?: unknown },
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
-    this.details = typeof opts?.details === 'object' && opts.details !== null ? (opts.details as Record<string, unknown>) : null;
+    this.details =
+      typeof opts?.details === 'object' && opts.details !== null ? (opts.details as Record<string, unknown>) : null;
     this.traceId = typeof opts?.traceId === 'string' ? opts.traceId : null;
     this.retryable = opts?.retryable === true;
   }
@@ -96,7 +102,11 @@ export async function apiFetch<T>(path: string, schema: z.ZodType<T>, opts: Fetc
   });
   const json: unknown = await res.json().catch(() => null);
   if (!res.ok) {
-    const envelope = (json as { error?: { code?: unknown; message?: unknown; details?: unknown; trace_id?: unknown; retryable?: unknown } } | null)?.error;
+    const envelope = (
+      json as {
+        error?: { code?: unknown; message?: unknown; details?: unknown; trace_id?: unknown; retryable?: unknown };
+      } | null
+    )?.error;
     throw new ApiError(
       res.status,
       typeof envelope?.code === 'string' ? envelope.code : 'UNKNOWN',
@@ -159,7 +169,12 @@ const TERMINAL_STATES = new Set([
   'QUARANTINED',
 ]);
 
-export function useAction(id: string): { action: ActionDto | undefined; error: unknown; isLoading: boolean; refetch: () => void } {
+export function useAction(id: string): {
+  action: ActionDto | undefined;
+  error: unknown;
+  isLoading: boolean;
+  refetch: () => void;
+} {
   const { token } = useAuth();
   const query = useQuery({
     queryKey: queryKeys.action(id),
