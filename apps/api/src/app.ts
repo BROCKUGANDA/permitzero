@@ -161,12 +161,26 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
 
   const app = Fastify({
     bodyLimit: deps.config.maxBodyBytes,
-    trustProxy: false,
+    // Which hops may be believed for the client address. `false` was the original
+    // setting, and behind Caddy it silently collapses every customer into a single
+    // rate-limit bucket keyed on the proxy's IP — so one tenant can exhaust the
+    // allowance for all the others, which is an availability hole wearing the
+    // clothes of a security control. Naming only the loopback hop means a caller
+    // that is not the proxy cannot forge `X-Forwarded-For` to get a fresh bucket
+    // or to frame another tenant.
+    trustProxy: deps.config.trustedProxies.length > 0 ? [...deps.config.trustedProxies] : false,
   }).withTypeProvider<ZodTypeProvider>();
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
 
-  await app.register(cors, { origin: true });
+  // `origin: true` reflects whatever the caller sent, so it is not a policy —
+  // `.env.example` already named CORS_ORIGINS as the allowlist, and nothing read
+  // it. An empty list now means "no cross-origin caller", which is the correct
+  // default rather than a gap: the console reaches this API same-origin through
+  // the edge rewrite, so the browser never needs a CORS grant in production.
+  await app.register(cors, {
+    origin: buildCorsOriginCheck(deps.config.corsOrigins),
+  });
   await app.register(helmet, {
     contentSecurityPolicy: {
       directives: {
@@ -183,6 +197,14 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
       },
     },
     hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
+    // helmet's default is SAMEORIGIN, which still lets a page on this origin
+    // frame the console. `frame-ancestors 'none'` in the CSP is the modern
+    // control and is set below; this is aligned with it rather than being a
+    // weaker second opinion, so a browser that honours only X-Frame-Options gets
+    // the same policy. A clickjacked console can approve a payment.
+    frameguard: { action: 'deny' },
+    noSniff: true,
+    hidePoweredBy: true,
     referrerPolicy: { policy: 'no-referrer' },
   });
   await app.register(sensible);
@@ -245,6 +267,38 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
   );
 
   return { app, ctx };
+}
+
+/**
+ * Fastify's `origin` option as a function: return true to allow (and echo) the
+ * caller's origin, false to withhold the header so the browser blocks the read.
+ *
+ * Exact-match only. A prefix or wildcard match on `http://localhost` would also
+ * accept `http://localhost.evil.example`, which is the classic way an allowlist
+ * becomes a bypass.
+ */
+export function buildCorsOriginCheck(
+  allowed: readonly string[],
+): (origin: string | undefined, callback: (err: Error | null, allow: boolean) => void) => void {
+  const set = new Set(allowed);
+  return (origin, callback) => {
+    if (!origin) return callback(null, false); // same-origin / non-browser: no CORS grant needed
+    callback(null, set.has(origin));
+  };
+}
+
+/**
+ * Per-route rate-limit presets. Fastify applies `config.rateLimit` on top of the
+ * global ceiling, so a route that declares a tighter budget gets it.
+ */
+export function rateLimitPresets(config: ApiConfig): {
+  mutation: { max: number; timeWindow: number };
+  auth: { max: number; timeWindow: number };
+} {
+  return {
+    mutation: { max: config.rateLimitMutations, timeWindow: 60_000 },
+    auth: { max: config.rateLimitAuth, timeWindow: 60_000 },
+  };
 }
 
 class NotFoundRouteError extends NotFoundError {

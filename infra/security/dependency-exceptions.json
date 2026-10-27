@@ -1,0 +1,78 @@
+{
+  "$comment": [
+    "Reviewed exceptions to `npm audit --omit=dev --audit-level=high`.",
+    "",
+    "A dependency audit gate that is set to a level the current tree already",
+    "fails is not a control, it is theatre: either CI is red on the day it is",
+    "added, so people ignore it, or it is quietly tuned until it passes, so it",
+    "reports safety it is not checking. This file is the alternative — every",
+    "accepted advisory is named, with the reason it is accepted, what actually",
+    "mitigates it here, who decided, and when it must be looked at again. Anything",
+    "NOT listed fails the gate, so a new advisory cannot be absorbed silently and",
+    "an accepted one cannot outlive its justification.",
+    "",
+    "Source of truth: `npm audit --omit=dev --json`. See scripts/audit-gate.mjs."
+  ],
+  "exceptions": [
+    {
+      "package": "zod",
+      "severity": "high",
+      "advisory": "memory exhaustion while validating oversized constrained collections",
+      "vulnerableRange": "<4.6.6",
+      "acceptedBecause": [
+        "The fix is a Zod 3 -> 4 major, which changes the API used across 94 call sites in packages/schemas and the Fastify type provider alongside it. That is a migration, not a bump, and it is not something to absorb while the product is being hardened.",
+        "The affected path is unbounded collection validation. Every request collection in this API is explicitly bounded: `evidence_refs` max 20, `action_ids` max 500, policy rule and condition arrays capped in `policySchema`, and `MAX_BODY_BYTES` (1 MiB default, 413 before parsing) limits the whole document. The parser cannot be handed an oversized structure by the network.",
+        "The request body is parsed once by the validator compiler and again by the serializer's schema, both against those bounded schemas."
+      ],
+      "residualRisk": "A caller that can raise MAX_BODY_BYTES substantially and target a bounded-but-large array of deeply nested objects could cost more memory than its bytes warrant. The body limit is the controlling mitigation; it is a configuration value, so the deployment owner has to keep it honest.",
+      "compensatingControl": "MAX_BODY_BYTES enforced by Fastify before validation (tested in apps/api/test/security.test.ts), and bounded collection schemas (packages/schemas).",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-28",
+      "reviewBy": "2027-01-28"
+    },
+    {
+      "package": "fastify-type-provider-zod",
+      "severity": "high",
+      "advisory": "inherits the advisory of its zod peer dependency",
+      "vulnerableRange": "<=4.0.2",
+      "acceptedBecause": [
+        "It has no independent fix: the advisory is the transitive zod one above, and the version that resolves it requires the same Zod 4 migration."
+      ],
+      "residualRisk": "Same as the zod entry.",
+      "compensatingControl": "Same as the zod entry.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-28",
+      "reviewBy": "2027-01-28"
+    },
+    {
+      "package": "postcss",
+      "severity": "high",
+      "advisory": "XSS / arbitrary file read via CSS stringification and source-map paths",
+      "vulnerableRange": "transitive via next",
+      "acceptedBecause": [
+        "Not reachable at runtime here. postcss is pulled in by the Next.js build pipeline and never executes in the served process: the deployed console is the standalone output, and the API container does not build CSS at all.",
+        "The advisories concern generated CSS/map handling during a build, which in this project runs on this repository's own committed styles, not on user input."
+      ],
+      "residualRisk": "A build system that processed attacker-controlled CSS would be exposed. This project's styles are committed source; no user-controlled stylesheet reaches a postcss pass.",
+      "compensatingControl": "User input never becomes CSS. The console renders data through React with escaped text and the CSP blocks inline script execution.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-28",
+      "reviewBy": "2027-01-28"
+    },
+    {
+      "package": "next",
+      "severity": "moderate",
+      "advisory": "ranges that include the installed version, resolvable only past a 16.x major",
+      "vulnerableRange": "9.3.4-canary.0 - 16.3.0-preview.10",
+      "acceptedBecause": [
+        "The console is a Next 15 App-Router application; the resolution is a Next 16 major affecting routing, image and metadata behaviour plus the Playwright suite. Deferred as a migration with its own test pass, not folded into a hardening slice.",
+        "The exposed surface is the operator console behind an authenticated session and a TLS edge, not a public endpoint."
+      ],
+      "residualRisk": "A console visitor in a position to exploit the framework advisory could reach authenticated screens. Mitigated by the credential being short-lived and every privileged read/write being tenant-scoped and audited.",
+      "compensatingControl": "Security headers set at both the edge and the application, authentication required on every console data path, and a strict CSP.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-28",
+      "reviewBy": "2027-01-28"
+    }
+  ]
+}

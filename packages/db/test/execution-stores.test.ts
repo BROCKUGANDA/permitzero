@@ -43,6 +43,7 @@ import {
   type SeedResult,
 } from '../src/index.js';
 import { closeTestDb, resetTestDb, testDb } from './db-test.js';
+import { isSqlstate } from './sqlstate.js';
 
 let db: Db;
 let seeded: SeedResult;
@@ -239,7 +240,7 @@ describe('durable execution store', () => {
       updatedAt: new Date('2026-10-26T12:00:00Z'),
     };
     await stores.executions.recordIntent(intent);
-    await expect(stores.executions.recordIntent(intent)).rejects.toMatchObject({ code: '23505' });
+    await expect(stores.executions.recordIntent(intent)).rejects.toSatisfy(isSqlstate('23505'));
     const dispatched = await stores.executions.markDispatched(
       intent.executionId,
       tenantId(),
@@ -328,8 +329,8 @@ describe('audit hash chain', () => {
 
   it('refuses updates and deletes via trigger', async () => {
     await appendAuditEvent(db.db, event(1));
-    await expect(db.sql`UPDATE audit_events SET event_type = 'x'`).rejects.toMatchObject({ code: '0A000' });
-    await expect(db.sql`DELETE FROM audit_events`).rejects.toMatchObject({ code: '0A000' });
+    await expect(db.sql`UPDATE audit_events SET event_type = 'x'`).rejects.toSatisfy(isSqlstate('0A000'));
+    await expect(db.sql`DELETE FROM audit_events`).rejects.toSatisfy(isSqlstate('0A000'));
   });
 });
 
@@ -437,9 +438,9 @@ describe('ledger, dispatches and catalog', () => {
     expect((await getEnforcementMode(db.db, tenantId()))?.mode).toBe('ENFORCED');
     const degraded = await setEnforcementMode(db.db, { tenantId: tenantId(), mode: 'EMERGENCY_STOP', reason: 'drill' });
     expect(degraded.protectedWritesAllowed).toBe(false);
-    await expect(
-      setEnforcementMode(db.db, { tenantId: tenantId(), mode: 'BOGUS' as 'ENFORCED' }),
-    ).rejects.toMatchObject({ code: '23514' });
+    await expect(setEnforcementMode(db.db, { tenantId: tenantId(), mode: 'BOGUS' as 'ENFORCED' })).rejects.toSatisfy(
+      isSqlstate('23514'),
+    );
   });
 
   it('records model evaluations', async () => {
@@ -473,9 +474,9 @@ describe('ledger, dispatches and catalog', () => {
 describe('database triggers', () => {
   it('freezes published policy revisions', async () => {
     // Content is immutable …
-    await expect(
-      db.sql`UPDATE policy_revisions SET policy_json = '{}' WHERE status = 'PUBLISHED'`,
-    ).rejects.toMatchObject({ code: '0A000' });
+    await expect(db.sql`UPDATE policy_revisions SET policy_json = '{}' WHERE status = 'PUBLISHED'`).rejects.toSatisfy(
+      isSqlstate('0A000'),
+    );
     // … while status notes stay editable, by design (0002 §1).
     const noted = await db.sql`UPDATE policy_revisions SET change_reason = 'reviewed' WHERE status = 'PUBLISHED'`;
     expect(noted.count).toBe(1);
@@ -491,7 +492,7 @@ describe('database triggers', () => {
       payload: {},
     });
     await markOutboxPublished(db.db, row.outboxEventId, new Date());
-    await expect(markOutboxFailed(db.db, row.outboxEventId, 'X', new Date())).rejects.toMatchObject({ code: '0A000' });
+    await expect(markOutboxFailed(db.db, row.outboxEventId, 'X', new Date())).rejects.toSatisfy(isSqlstate('0A000'));
   });
 
   it('keeps action updated_at fresh via trigger', async () => {

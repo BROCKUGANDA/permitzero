@@ -29,6 +29,7 @@ import {
   type SeedResult,
 } from '../src/index.js';
 import { closeTestDb, testAppDb, testDb } from './db-test.js';
+import { expectSqlstate } from './sqlstate.js';
 
 let admin: Db;
 let app: Db;
@@ -187,11 +188,12 @@ describe('rls: the headline property', () => {
   });
 
   it('a cross-tenant INSERT is rejected by the policy', async () => {
-    await expect(
+    await expectSqlstate(
       withTenantTransaction(app, tenantA, (tx) =>
         q(tx, `INSERT INTO ${PROBE} (probe_id, tenant_id, note) VALUES ('steal', '${tenantB}', 'no')`),
       ),
-    ).rejects.toThrow(/row-level security/);
+      '42501',
+    );
 
     const leaked = await admin.sql.unsafe<{ n: string }[]>(
       `SELECT count(*)::text AS n FROM public.${PROBE} WHERE probe_id = 'steal'`,
@@ -202,14 +204,17 @@ describe('rls: the headline property', () => {
   it('tenant_id cannot be changed by an UPDATE, even in a context that can see the row', async () => {
     // Both GUCs at once, because otherwise RLS hides the row first, the trigger
     // never runs, and the test would be asserting the wrong guard.
-    await expect(
+    // 23514 (check_violation) is what the trigger raises; asserting the message
+    // text would pin the test to whichever library last wrapped the error.
+    await expectSqlstate(
       app.db.transaction(async (tx) => {
         await tx.execute(
           sql`SELECT set_config('app.tenant_id', ${tenantA}, true), set_config('pz.tenant_blind', 'on', true)`,
         );
         await tx.execute(sql.raw(`UPDATE ${PROBE} SET tenant_id = '${tenantB}' WHERE probe_id = 'p-${tenantA}'`));
       }),
-    ).rejects.toThrow(/tenant_id is immutable/);
+      '23514',
+    );
   });
 });
 
@@ -278,11 +283,12 @@ describe('rls: enforcement cannot fall behind the schema', () => {
     await withTenantTransaction(app, tenantA, (tx) =>
       q(tx, `INSERT INTO rls_later_probe (probe_id, tenant_id) VALUES ('ok-a', '${tenantA}')`),
     );
-    await expect(
+    await expectSqlstate(
       withTenantTransaction(app, tenantA, (tx) =>
         q(tx, `INSERT INTO rls_later_probe (probe_id, tenant_id) VALUES ('bad-b', '${tenantB}')`),
       ),
-    ).rejects.toThrow(/row-level security/);
+      '42501',
+    );
 
     await admin.sql.unsafe(`DROP TABLE IF EXISTS public.rls_later_probe`);
   });

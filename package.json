@@ -41,7 +41,8 @@
     "model:check": "npm run model:check -w @permitzero/provider-meta",
     "slo:report": "tsx scripts/slo-report.mjs",
     "slo:report:strict": "tsx scripts/slo-report.mjs --strict",
-    "drill:resilience": "tsx scripts/resilience-drill.ts"
+    "drill:resilience": "tsx scripts/resilience-drill.ts",
+    "audit:gate": "node scripts/audit-gate.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

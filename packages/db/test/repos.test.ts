@@ -41,6 +41,7 @@ import {
   type SeedResult,
 } from '../src/index.js';
 import { closeTestDb, resetTestDb, testDb } from './db-test.js';
+import { isSqlstate } from './sqlstate.js';
 
 let db: Db;
 let seeded: SeedResult;
@@ -144,7 +145,7 @@ describe('identity repositories', () => {
         secretPrefix: 'pz_test',
         scopes: [],
       }),
-    ).rejects.toMatchObject({ code: '23505' });
+    ).rejects.toSatisfy(isSqlstate('23505'));
   });
 });
 
@@ -345,7 +346,7 @@ describe('action repositories', () => {
 
   it('rejects duplicate idempotency keys per agent', async () => {
     await makeAction({ idempotencyKey: 'dup-key' });
-    await expect(makeAction({ idempotencyKey: 'dup-key' })).rejects.toMatchObject({ code: '23505' });
+    await expect(makeAction({ idempotencyKey: 'dup-key' })).rejects.toSatisfy(isSqlstate('23505'));
   });
 });
 
@@ -374,7 +375,7 @@ describe('approval and idempotency repositories', () => {
         decision: 'APPROVE',
         reasonCode: 'MANUAL_REVIEW_PASSED',
       }),
-    ).rejects.toMatchObject({ code: '23505' });
+    ).rejects.toSatisfy(isSqlstate('23505'));
     expect(await listApprovalsByAction(db.db, tenantId(), a.actionId)).toHaveLength(1);
   });
 

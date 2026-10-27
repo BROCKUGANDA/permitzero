@@ -25,6 +25,7 @@ import {
   type SeedResult,
 } from '../src/index.js';
 import { closeTestDb, resetTestDb, testDb } from './db-test.js';
+import { isSqlstate } from './sqlstate.js';
 
 let db: Db;
 
@@ -138,7 +139,7 @@ describe('seed', () => {
     expect(fixed.agentTokens[agentId]).toBe('pz_fixed_agent_token_for_tests_only_001');
     expect(fixed.userTokens[fixed.userIds['owner'] ?? '']).toBe('pz_fixed_owner_token_for_tests_only_01');
     expect(fixed.serviceTokens['worker']).toBe('pz_fixed_worker_token_for_tests_only_01');
-    await expect(seed(db)).rejects.toMatchObject({ code: '23505' });
+    await expect(seed(db)).rejects.toSatisfy(isSqlstate('23505'));
   });
 
   it('creates extra empty tenants on request', async () => {

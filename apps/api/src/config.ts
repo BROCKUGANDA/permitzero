@@ -27,6 +27,29 @@ export interface ApiConfig {
   auditHmacKey: string | null;
   rateLimitMax: number;
   rateLimitWindowMs: number;
+  /**
+   * Budget for state-changing calls (intake, approvals, permit collection), per
+   * window. Declared in `.env.example` as RATE_LIMIT_MUTATIONS_PER_MIN long before
+   * anything read it; a limit that is configured but not applied is worse than no
+   * limit, because it is the kind of control an auditor marks as present.
+   */
+  rateLimitMutations: number;
+  /** Budget for credential-bearing requests, the brute-force surface. */
+  rateLimitAuth: number;
+  /**
+   * Browser origins allowed to call this API. Empty means no cross-origin access
+   * at all: the console reaches the API same-origin through the edge rewrite, so
+   * an empty list is the correct default rather than a misconfiguration, and
+   * `origin: true` — which reflects whatever the caller sent — is not a policy.
+   */
+  corsOrigins: readonly string[];
+  /**
+   * Proxy hops whose `X-Forwarded-For` may be believed. Behind Caddy this must
+   * name the loopback address, because with `trustProxy: false` every request
+   * presents the proxy's IP and the rate limiter shares one bucket across all
+   * customers — one noisy tenant exhausts the allowance for everyone.
+   */
+  trustedProxies: readonly string[];
   maxBodyBytes: number;
   /**
    * Bearer token for `GET /metrics`. Unset means the endpoint is not registered
@@ -48,6 +71,15 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
     throw new Error(`Missing required environment variable ${name}.`);
   }
   return value;
+}
+
+/** Comma-separated list, trimmed, blanks dropped. */
+function csvList(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
 }
 
 function intIn(env: NodeJS.ProcessEnv, name: string, def: number, min: number, max: number): number {
@@ -92,6 +124,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     auditHmacKey: env['AUDIT_HMAC_KEY'] ?? null,
     rateLimitMax: intIn(env, 'RATE_LIMIT_MAX', 500, 1, 100000),
     rateLimitWindowMs: intIn(env, 'RATE_LIMIT_WINDOW_MS', 60_000, 1000, 3_600_000),
+    rateLimitMutations: intIn(env, 'RATE_LIMIT_MUTATIONS_PER_MIN', 120, 1, 100000),
+    rateLimitAuth: intIn(env, 'RATE_LIMIT_AUTH_PER_MIN', 20, 1, 100000),
+    corsOrigins: csvList(env['CORS_ORIGINS']),
+    trustedProxies: csvList(env['TRUSTED_PROXIES']).length ? csvList(env['TRUSTED_PROXIES']) : ['127.0.0.1', '::1'],
     maxBodyBytes: intIn(env, 'MAX_BODY_BYTES', 1_048_576, 1024, 50_000_000),
     metricsToken: env['METRICS_TOKEN']?.trim() ? env['METRICS_TOKEN'].trim() : null,
     shutdownGraceMs: intIn(env, 'SHUTDOWN_GRACE_MS', 10_000, 100, 120_000),

@@ -14,17 +14,22 @@ import {
 } from '@permitzero/domain';
 import type { ErrorEnvelope } from '@permitzero/domain';
 import { ZodError } from 'zod';
+import { dbErrorCode } from '@permitzero/db';
 
 export interface HttpError {
   status: number;
   envelope: ErrorEnvelope;
 }
 
-/** True for postgres driver errors (both `postgres` and `pg` shape this way). */
+/**
+ * The SQLSTATE on a storage error, through any wrapper. Delegates to
+ * `@permitzero/db`'s unwalker so the API and the repositories cannot disagree
+ * about what a duplicate key looks like — drizzle 0.45 moved the code onto
+ * `.cause`, and a local copy of this function that only read `.code` would keep
+ * compiling while quietly answering 500 to every idempotency race.
+ */
 export function pgCode(err: unknown): string | null {
-  if (typeof err !== 'object' || err === null) return null;
-  const code = (err as { code?: unknown }).code;
-  return typeof code === 'string' ? code : null;
+  return dbErrorCode(err);
 }
 
 /**
@@ -108,6 +113,42 @@ function zodIssues(err: { issues?: unknown }): Record<string, string> | null {
   return details;
 }
 
+/**
+ * Errors that carry an HTTP status but no Fastify `code`.
+ *
+ * `@fastify/rate-limit` rejects an over-budget request by throwing
+ * `errorResponseBuilder(req, { statusCode: 429, ... })` — an HttpError with a
+ * `statusCode` and no `code` string. Neither `fastifyError()` (which switches on
+ * `err.code`) nor `mapStorageError()` recognised it, so it fell through to
+ * `toDomainError` and answered **500 INTERNAL with `retryable: false`**.
+ *
+ * That is a control working and presenting as a server defect. Three things break
+ * at once: an agent told `retryable: false` stops retrying a request that was
+ * never processed; the operator's error budget is charged 5xx for what is normal
+ * load-shedding (with the availability SLO this repo now computes, a busy tenant
+ * could page the team with its own traffic); and `Retry-After` is discarded.
+ */
+function statusBearingError(err: unknown): DomainError | null {
+  if (typeof err !== 'object' || err === null) return null;
+  const statusCode = (err as { statusCode?: unknown }).statusCode;
+  if (typeof statusCode !== 'number') return null;
+  if (statusCode === 429) {
+    const retryAfter = (err as { after?: unknown }).after;
+    return new RateLimitedError(typeof retryAfter === 'string' ? Number.parseInt(retryAfter, 10) : undefined);
+  }
+  // Any other status-bearing error keeps its status rather than being inflated to
+  // a 500, but gets a generic code: echoing an upstream library's message verbatim
+  // is how internals reach clients.
+  if (statusCode >= 400 && statusCode < 600) {
+    return new DomainError('The request could not be completed.', {
+      code: ErrorCode.INTERNAL,
+      httpStatus: statusCode,
+      retryable: statusCode >= 500,
+    });
+  }
+  return null;
+}
+
 export function toHttpError(err: unknown, traceId: string | null): HttpError {
   if (err instanceof ZodError) {
     const mapped = zodError('Request validation failed.', err);
@@ -122,6 +163,10 @@ export function toHttpError(err: unknown, traceId: string | null): HttpError {
   const storageMapped = mapStorageError(err);
   if (storageMapped) {
     return { status: storageMapped.httpStatus, envelope: storageMapped.toEnvelope(traceId) };
+  }
+  const statusMapped = statusBearingError(err);
+  if (statusMapped) {
+    return { status: statusMapped.httpStatus, envelope: statusMapped.toEnvelope(traceId) };
   }
   const domain = toDomainError(err);
   return { status: domain.httpStatus, envelope: domain.toEnvelope(traceId) };

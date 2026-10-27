@@ -57,7 +57,7 @@ export async function ensureDatabaseExists(adminDb: Db, name: string): Promise<v
   try {
     await adminDb.sql.unsafe(`CREATE DATABASE "${name}"`);
   } catch (err) {
-    if ((err as { code?: string }).code === '42P04') return; // already exists
+    if (dbErrorCode(err) === '42P04') return; // already exists
     throw err;
   }
 }
@@ -141,8 +141,36 @@ export async function resetDb(db: Db): Promise<void> {
   await db.sql.unsafe(`TRUNCATE ${names} RESTART IDENTITY CASCADE`);
 }
 
+/**
+ * The SQLSTATE behind an error, however many layers wrapped it.
+ *
+ * Drizzle 0.45 began reporting query failures as `DrizzleQueryError`, which puts
+ * the driver's `code` on `.cause` instead of on the error the caller catches.
+ * Every duplicate-key and constraint check in this repository reads that code, so
+ * a naive `err.code` does not fail loudly — it returns `undefined`, which matches
+ * no code, and the retry paths simply stop retrying:
+ *
+ *   · `intake.ts` stops recognising the idempotency race, so a concurrent
+ *     duplicate submission answers 500 instead of replaying the winner;
+ *   · `approvals.ts` stops turning a double-decision into 409;
+ *   · `repos/audit.ts` stops retrying an audit append that lost the chain-head
+ *     race, turning a transient collision into a failed request.
+ *
+ * Walking `cause` is therefore not a convenience, it is what keeps those three
+ * behaviours intact. The depth limit bounds a pathological cycle.
+ */
+export function dbErrorCode(err: unknown): string | null {
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && current !== null && typeof current === 'object'; depth++) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string') return code;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
 /** True when `err` is a PostgreSQL error with one of the given SQLSTATE codes. */
 export function isDbError(err: unknown, ...codes: string[]): boolean {
-  const code = (err as { code?: string } | null)?.code;
-  return typeof code === 'string' && codes.includes(code);
+  const code = dbErrorCode(err);
+  return code !== null && codes.includes(code);
 }

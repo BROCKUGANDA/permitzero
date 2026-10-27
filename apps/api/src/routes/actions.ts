@@ -20,6 +20,7 @@ import { getAction, listActions, tenantScope } from '@permitzero/db';
 import { NotFoundError } from '@permitzero/domain';
 import type { ActionState } from '@permitzero/domain';
 import type { AppContext, ZodFastifyInstance } from '../app.js';
+import { rateLimitPresets } from '../app.js';
 import { authenticateToken } from '../auth.js';
 import { intakeAction } from '../intake.js';
 import { decideApproval } from '../approvals.js';
@@ -46,6 +47,12 @@ async function authHook(app: ZodFastifyInstance, ctx: AppContext): Promise<void>
 
 export async function actionRoutes(app: ZodFastifyInstance, ctx: AppContext): Promise<void> {
   await authHook(app, ctx);
+  // Every route below changes state or spends a credential, so each gets the
+  // mutation budget from config rather than the global ceiling. The global number
+  // is a read-path allowance: applying it to intake means an agent can queue
+  // hundreds of proposals per minute against a human approval queue that can only
+  // be worked one at a time.
+  const { mutation } = rateLimitPresets(ctx.config);
 
   app.post(
     '/actions',
@@ -54,6 +61,7 @@ export async function actionRoutes(app: ZodFastifyInstance, ctx: AppContext): Pr
         body: createActionRequestSchema,
         response: { 200: createActionResponseSchema, 201: createActionResponseSchema },
       },
+      config: { rateLimit: mutation },
     },
     async (request, reply) => {
       const result = await intakeAction(ctx.intake, request.principal, request.body, request.traceId);
@@ -134,6 +142,7 @@ export async function actionRoutes(app: ZodFastifyInstance, ctx: AppContext): Pr
         body: approveActionRequestSchema,
         response: { 200: actionDtoSchema },
       },
+      config: { rateLimit: mutation },
     },
     async (request) => decideApproval(ctx.approvals, request.principal, request.params.id, request.body),
   );
@@ -146,6 +155,7 @@ export async function actionRoutes(app: ZodFastifyInstance, ctx: AppContext): Pr
         body: rejectActionRequestSchema,
         response: { 200: actionDtoSchema },
       },
+      config: { rateLimit: mutation },
     },
     async (request) => decideApproval(ctx.approvals, request.principal, request.params.id, request.body),
   );
@@ -158,6 +168,7 @@ export async function actionRoutes(app: ZodFastifyInstance, ctx: AppContext): Pr
         body: z.object({}).strict(),
         response: { 201: permitDtoSchema },
       },
+      config: { rateLimit: mutation },
     },
     async (request, reply) =>
       reply.status(201).send(await collectPermit(ctx.collect, request.principal, request.params.id)),
@@ -171,6 +182,7 @@ export async function actionRoutes(app: ZodFastifyInstance, ctx: AppContext): Pr
         body: executeActionRequestSchema,
         response: { 200: executeActionResponseSchema },
       },
+      config: { rateLimit: mutation },
     },
     async (request) => executeApprovedAction(ctx.execute, request.principal, request.params.id, request.body),
   );
