@@ -46,3 +46,6 @@ Thumbs.db
 
 # Docker volumes mounted locally
 infra/data/
+
+# Scratch / working notes
+.scratch/

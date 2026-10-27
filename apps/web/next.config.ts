@@ -2,6 +2,9 @@ import path from 'node:path';
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
+  // Containers run `node server.js` from the traced standalone bundle, so the
+  // web image carries no dev dependencies.
+  output: 'standalone',
   // Monorepo: the lockfile lives at the repository root.
   outputFileTracingRoot: path.join(process.cwd(), '..', '..'),
   // E2E drives the dev server over 127.0.0.1 rather than localhost.

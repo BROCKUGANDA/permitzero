@@ -1,0 +1,193 @@
+# PermitZero — full stack.
+#
+# One file, two uses:
+#   · local development  → `docker compose -f infra/docker-compose.yml up -d postgres redis`
+#   · the VPS deployment → `docker compose --env-file deploy/permitzero.env -f docker-compose.yml up -d`
+#
+# Every long-running service publishes NOTHING on the host. Only Caddy answers
+# on loopback ports, and only the shared L4 front door reaches those. That is
+# the whole network boundary: nothing behind Caddy is reachable from outside.
+#
+# Secrets come from deploy/permitzero.env (gitignored). Nothing here carries a
+# value, and a missing one fails the parse rather than silently defaulting.
+
+name: permitzero
+
+x-app-env: &app-env
+  env_file:
+    - deploy/permitzero.env
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PZ_PG_USER:?}
+      POSTGRES_PASSWORD: ${PZ_PG_PASSWORD:?}
+      POSTGRES_DB: ${PZ_PG_DB:?}
+      # Deterministic collation so index planning does not drift between hosts.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PZ_PG_USER} -d ${PZ_PG_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - max_connections=80
+      - -c
+      - log_min_duration_statement=250
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-shot. Seeds synthetic demo data only when PZ_SEED=1; refuses in
+  # production, which is why the demo runs with APP_ENV=staging.
+  migrate:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile
+      target: migrate
+    image: permitzero/migrate:local
+    restart: "no"
+    <<: *app-env
+    environment:
+      PZ_SEED: ${PZ_SEED:-0}
+    volumes:
+      # The seed writes storage/demo-credentials.json. Without a bind mount
+      # those tokens exist only inside the one-shot container's layer and are
+      # gone when it exits — so the demo scenario and the console sign-in
+      # would have nothing to read.
+      - ../storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile
+      target: api
+    image: permitzero/api:local
+    restart: unless-stopped
+    <<: *app-env
+    # No storage mount on purpose: the running API never needs the demo
+    # bearer tokens. Only the one-shot scenario harness reads them, and it
+    # reads them as an operator action.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile
+      target: worker
+    image: permitzero/worker:local
+    restart: unless-stopped
+    <<: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile
+      target: web
+    image: permitzero/web:local
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://api:3000
+      NODE_ENV: production
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # One-shot release gate. `build` carries dev dependencies and the source, so
+  # this is the only place the full suite can run: unit + integration + the
+  # corpus release gate, against a real PostgreSQL test database rather than a
+  # mock. Compose never starts it; `docker compose run --rm verify` does.
+  verify:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile
+      target: build
+    image: permitzero/verify:local
+    restart: "no"
+    profiles: ["test"]
+    <<: *app-env
+    environment:
+      DATABASE_URL_TEST: postgres://permitzero:${PZ_PG_PASSWORD:?}@postgres:5432/permitzero_test
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["npx", "vitest", "run", "--reporter=dot"]
+
+  # Named `edge`, not `caddy`, on purpose. A leftover host cron belonging to
+  # another project (`/usr/local/bin/crucible-edge-attach`) attaches every
+  # running container whose name matches /caddy/i to `crucible_default`. That
+  # makes crucible's own `web` and `api` services resolve instead of ours, and
+  # this site then answers 502/503 while every container here reports healthy —
+  # the exact failure mode the ASTROLABE edge documents and moved away from.
+  edge:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "127.0.0.1:${PZ_HTTP_PORT:-8050}:80"
+      - "127.0.0.1:${PZ_HTTPS_PORT:-8450}:443"
+    environment:
+      PZ_HOSTNAMES: ${PZ_HOSTNAMES:?}
+      PZ_OPS_HOSTNAME: ${PZ_OPS_HOSTNAME:-}
+      PZ_ACME_EMAIL: ${PZ_ACME_EMAIL:?}
+    depends_on:
+      web:
+        condition: service_started
+
+  # Origin transport. The connector dials out; nothing dials in.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "run", "--token", "${PZ_TUNNEL_TOKEN:-}"]
+    depends_on:
+      edge:
+        condition: service_started
+    profiles: ["tunnel"]
+
+volumes:
+  pgdata:
+  redisdata:
+  caddy_data:
+  caddy_config:

@@ -7,7 +7,7 @@
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { ExecutionResultUpdate, PersistedExecution, PersistedPermit } from '@permitzero/broker';
 import type { DbExecutor } from '../client.js';
-import { toPersistedExecution, toPersistedPermit } from '../mappers.js';
+import { toPersistedPermit } from '../mappers.js';
 import { executions, permits } from '../schema.js';
 import type { ExecutionRow, PermitRow } from '../schema.js';
 

@@ -112,18 +112,19 @@ async function main(): Promise<void> {
     task_purpose: 'Demo: large payment needing review',
     tool_name: 'payment.execute',
     arguments: {
-      invoice_id: 'INV-2041',
+      invoice_id: 'INV-2043',
       vendor_id: 'VEN-017',
       amount_minor: 3000000,
       currency: 'USD',
       beneficiary_ref: 'BEN-017-VERIFIED',
     },
-    evidence_refs: [],
+    evidence_refs: ['invoice:INV-2043', 'purchase-order:PO-883'],
     idempotency_key: `demo-large-${stamp}`,
     environment: 'DEMO',
   });
-  // INV-2041 is a $3,000 invoice; citing it for $30,000 still routes to a
-  // human (over the approval threshold) rather than allowing silently.
+  // INV-2043 is a real $30,000 invoice matched to PO-883, so every deterministic
+  // check passes — and the amount threshold still routes it to a human instead
+  // of allowing it silently. The hold is the point, not a data defect.
   check('intake asks for approval', large.status === 201 && field(large.json, 'decision') === 'REQUIRE_APPROVAL');
   const largeBody = large.json as { action_id: string; action_hash: string; policy_revision: { id: string } };
   const approved = await call('POST', `/v1/actions/${largeBody.action_id}/approve`, approver1, {

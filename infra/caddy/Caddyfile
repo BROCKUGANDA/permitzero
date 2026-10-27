@@ -1,0 +1,135 @@
+# ---------------------------------------------------------------------------
+# PermitZero — this project's own edge.
+#
+# It is a separate container on this project's own Docker network, reachable
+# from the host only on loopback. Three deliberate choices:
+#
+#   1. OWN EDGE, NOT THE SHARED ONE. Another project's edge has already taken
+#      a site down once on this box: several products shared one Caddy, and a
+#      recreate on that side silently dropped the network attachment that let
+#      it reach these containers by service name. The site answered 502 while
+#      the application reported itself healthy. One edge per project means one
+#      project's release cannot be another project's outage.
+#   2. OWN CERTIFICATE. TLS terminates here, for this name, with this file.
+#      Nothing else on the box can serve this host's traffic or read its key.
+#   3. LOOPBACK ONLY. No port is published beyond 127.0.0.1. The L4 front door
+#      forwards into these ports; nothing behind Caddy is reachable directly,
+#      so the API, the worker and the database have no path in from the network.
+#
+# The dashboard talks to the API same-origin under /api/*, which Caddy rewrites
+# straight to the API container. A browser therefore never needs a second
+# origin, and CORS never enters the picture.
+# ---------------------------------------------------------------------------
+
+{
+	email {$PZ_ACME_EMAIL}
+	# The admin API stays off: a live reload endpoint on a shared box is a
+	# second control plane nobody owns. Config changes go through
+	# `docker compose restart caddy`, which is auditable and reproducible.
+	admin off
+	skip_install_trust
+}
+
+# Permissive-enough CSP for a Next.js App-Router bundle: the inline bootstrap
+# script and style tags are how Next ships first paint, so both carry
+# 'unsafe-inline'. Everything else is locked to this origin.
+(pz_security_headers) {
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		-X-Powered-By
+	}
+}
+
+(pz_body_limit) {
+	# Mirrors MAX_BODY_BYTES in the API: an oversized proposal is rejected
+	# before it reaches the validator, let alone the policy engine.
+	request_body {
+		max_size 262144
+	}
+}
+
+# Two names, one site block, one certificate with two SANs:
+#
+#   · the hostname the product is asked to serve, and
+#   · a hostname that sits behind Cloudflare's proxy, which is the only way on
+#     this zone set to get a request that has actually passed WAF and the
+#     rate-limit rules.
+#
+# The list comes from the environment so adding a name is a config change, not
+# an edit to security-relevant file.
+{$PZ_HOSTNAMES} {
+	import pz_security_headers
+	import pz_body_limit
+	encode zstd gzip
+
+	# JSON access log. Headers are not part of the default field set, so a
+	# bearer token cannot leak into the log by configuration drift.
+	log {
+		format json
+		output file /data/access.log {
+			roll_size 20MiB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+	}
+
+	# Agent-facing API. /api/v1/actions -> the Fastify service at /v1/actions.
+	handle /api/* {
+		uri strip_prefix /api
+		reverse_proxy api:3000 {
+			health_uri /health/live
+			health_interval 10s
+			health_timeout 2s
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	# Liveness/readiness for the front door and for the demo harness.
+	handle /health/* {
+		reverse_proxy api:3000
+	}
+
+	# Everything else is the console.
+	handle {
+		reverse_proxy web:3000 {
+			health_uri /login
+			health_interval 15s
+			health_timeout 3s
+		}
+	}
+}
+
+# ---------------------------------------------------------------------------
+# The operator surface, on its own name.
+#
+# Why a second hostname instead of an Access rule on the console: Cloudflare
+# Access applications cover a whole hostname, and the console has to stay
+# readable by a reviewer without an identity prompt. Putting Access on the
+# console hostname locked every route, including /login. Splitting the trust
+# zones keeps the guarantee honest — the operator name has no unauthenticated
+# path at all, and the console keeps its WAF, rate and bot protections.
+#
+# This name serves only the dependency probes. Everything else is refused here
+# rather than forwarded, so an origin-level route can never be reached by
+# guessing a path on the gated name.
+# ---------------------------------------------------------------------------
+# The default binds a loopback address inside the container that nothing can
+# reach, so an unset PZ_OPS_HOSTNAME yields an inert site block instead of a
+# keyless block that fails the whole Caddyfile at adapt time.
+{$PZ_OPS_HOSTNAME:127.0.0.1:9000} {
+	import pz_security_headers
+
+	handle /health/* {
+		reverse_proxy api:3000
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}

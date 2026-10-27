@@ -19,7 +19,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@permitzero/db": "*",
     "@permitzero/domain": "*",
+    "@permitzero/policy": "*",
     "@permitzero/schemas": "*"
   }
 }

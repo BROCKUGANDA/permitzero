@@ -288,7 +288,7 @@ export class Broker {
 
     const prior = await this.executions.findByIdempotencyKey(connectorKey, request.tenantId);
     if (prior) {
-      const terminal = await this.shortCircuitPrior(current, prior, request.traceId);
+      const terminal = await this.shortCircuitPrior(current, prior);
       // Only FAILED_RETRYABLE falls through to a fresh attempt below.
       if (terminal) return terminal;
     }
@@ -476,7 +476,6 @@ export class Broker {
   private async shortCircuitPrior(
     action: ActionRecord,
     prior: PersistedExecution,
-    traceId: string,
   ): Promise<BrokerExecuteResult | null> {
     switch (prior.state) {
       case 'SUCCEEDED':

@@ -1,0 +1,27 @@
+# Build context hygiene for infra/docker/Dockerfile. The context is the repo
+# root, so anything listed here never reaches the daemon — which is what keeps
+# a local node_modules (Windows-built) from poisoning a Linux image.
+node_modules
+**/node_modules
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+**/.next
+**/out
+**/dist
+**/*.tsbuildinfo
+coverage
+.vitest
+playwright-report
+test-results
+storage
+docs
+infra/deploy
+**/*.log
+**/*.orig
+**/*.rej
+.DS_Store
+Thumbs.db
+.scratch

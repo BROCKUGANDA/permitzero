@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { Activity, ArrowRight, PlugZap, ShieldCheck } from 'lucide-react';
-import { Alert, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Skeleton } from '@permitzero/ui';
+import { Alert, Card, CardContent, CardDescription, CardHeader, CardTitle, Skeleton } from '@permitzero/ui';
 import { ApiError, useActions, useMe, useStatus } from '@/lib/api';
 import { canApprove } from '@/lib/permissions';
 import { ModeBadge, StateBadge, ToolBadge } from '@/components/badges';

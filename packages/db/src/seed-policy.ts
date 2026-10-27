@@ -4,6 +4,12 @@
  * verified low-value payments and reads. Published as revision 1 by `seed()`.
  * The policy test-suite proves this exact rule set behaves; keep the two in
  * sync when either changes.
+ *
+ * The allow rule lists every authoritative field the denial rules care about,
+ * on purpose. An unresolvable field is UNKNOWN, and an UNKNOWN condition makes
+ * the group not match — so a corrupt timestamp or a lookup that was never
+ * performed removes the allow path instead of leaving it intact. That is what
+ * makes "UNKNOWN never equals ALLOW" structural rather than a rule to remember.
  */
 import type { PolicyDocument } from '@permitzero/schemas';
 
@@ -98,6 +104,89 @@ export function buildApProtectPolicyDocument(): PolicyDocument {
         },
       },
       {
+        id: 'deny-non-positive-amount',
+        description: 'A payment must move money forward, not zero or backwards.',
+        effect: 'DENY',
+        reason_code: 'AMOUNT_NON_POSITIVE',
+        priority: 850,
+        enabled: true,
+        scope: { tools: ['payment.execute'] },
+        when: { any: [{ field: 'arguments.amount_minor', op: 'less_than_or_equal', value: 0 }] },
+      },
+      {
+        id: 'deny-connector-missing',
+        description: 'No connector record means no trustworthy dispatch path; fail closed.',
+        effect: 'DENY',
+        reason_code: 'CONNECTOR_UNKNOWN',
+        priority: 850,
+        enabled: true,
+        // Scoped to the side-effecting tools. A read is not connector-mediated,
+        // so denying it here would knock the dashboard and the auditor's
+        // evidence view offline during a connector outage.
+        scope: { tools: ['payment.execute', 'vendor.update_bank_details'] },
+        when: { any: [{ field: 'connector.exists', op: 'is_false' }] },
+      },
+      {
+        id: 'deny-connector-tool-not-allowed',
+        description: 'The connector must grant this tool, not merely be enabled.',
+        effect: 'DENY',
+        reason_code: 'TOOL_NOT_ALLOWED',
+        priority: 840,
+        enabled: true,
+        scope: { tools: ['payment.execute', 'vendor.update_bank_details'] },
+        when: { any: [{ field: 'connector.tool_allowed', op: 'is_false' }] },
+      },
+      {
+        id: 'deny-invoice-vendor-mismatch',
+        description: 'The invoice must belong to the vendor being paid.',
+        effect: 'DENY',
+        reason_code: 'RESOURCE_OUT_OF_SCOPE',
+        priority: 810,
+        enabled: true,
+        scope: { tools: ['payment.execute'] },
+        when: { any: [{ field: 'invoice.vendor_matches', op: 'is_false' }] },
+      },
+      {
+        id: 'deny-currency-mismatch',
+        description: 'The proposed currency must equal the invoice currency.',
+        effect: 'DENY',
+        reason_code: 'CURRENCY_MISMATCH',
+        priority: 810,
+        enabled: true,
+        scope: { tools: ['payment.execute'] },
+        when: { any: [{ field: 'invoice.currency_matches_argument', op: 'is_false' }] },
+      },
+      {
+        id: 'deny-po-amount-short',
+        description: 'The purchase order must cover the proposed amount.',
+        effect: 'DENY',
+        reason_code: 'PO_AMOUNT_MISMATCH',
+        priority: 805,
+        enabled: true,
+        scope: { tools: ['payment.execute'] },
+        when: { any: [{ field: 'purchase_order.amount_covers', op: 'is_false' }] },
+      },
+      {
+        id: 'deny-destination-not-allowed',
+        description: 'The destination must be on the vendor’s allowlist.',
+        effect: 'DENY',
+        reason_code: 'DESTINATION_NOT_ALLOWED',
+        priority: 800,
+        enabled: true,
+        scope: { tools: ['payment.execute'] },
+        when: { any: [{ field: 'vendor.destination_allowed', op: 'is_false' }] },
+      },
+      {
+        id: 'deny-beneficiary-change-unverified',
+        description: 'An unverified bank change blocks payment regardless of how old it is.',
+        effect: 'DENY',
+        reason_code: 'BENEFICIARY_CHANGE_UNVERIFIED',
+        priority: 795,
+        enabled: true,
+        scope: { tools: ['payment.execute'] },
+        when: { any: [{ field: 'vendor.banking_change_verified', op: 'is_false' }] },
+      },
+      {
         id: 'deny-po-mismatch',
         description: 'Payments must match a purchase order.',
         effect: 'DENY',
@@ -181,7 +270,13 @@ export function buildApProtectPolicyDocument(): PolicyDocument {
             { field: 'arguments.amount_minor', op: 'less_than_or_equal', value: 500000 },
             { field: 'vendor.status', op: 'equals', value: 'VERIFIED' },
             { field: 'vendor.beneficiary_matches_verified', op: 'is_true' },
+            { field: 'vendor.destination_allowed', op: 'is_true' },
+            { field: 'vendor.banking_change_verified', op: 'is_true' },
             { field: 'purchase_order.matched', op: 'is_true' },
+            { field: 'purchase_order.amount_covers', op: 'is_true' },
+            { field: 'invoice.vendor_matches', op: 'is_true' },
+            { field: 'invoice.currency_matches_argument', op: 'is_true' },
+            { field: 'connector.tool_allowed', op: 'is_true' },
           ],
         },
       },

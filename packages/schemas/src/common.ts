@@ -121,4 +121,5 @@ export type ErrorEnvelope = z.infer<typeof errorEnvelopeSchema>;
 export const operatorTextSchema = z
   .string()
   .max(1000)
+  // eslint-disable-next-line no-control-regex -- stripping control characters is the intent (FR-045)
   .transform((s) => s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim());
