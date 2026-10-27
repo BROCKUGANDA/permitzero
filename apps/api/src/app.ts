@@ -31,6 +31,8 @@ import type { ApprovalDeps } from './approvals.js';
 import type { CollectDeps } from './permits.js';
 import type { ExecuteDeps } from './execute.js';
 import { actionRoutes } from './routes/actions.js';
+import { auditRoutes } from './routes/audit.js';
+import { evidenceRoutes } from './routes/evidence.js';
 import { healthRoutes } from './routes/health.js';
 import { statusRoutes } from './routes/status.js';
 
@@ -165,6 +167,8 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
 
   await app.register(async (v1) => {
     await v1.register((scope) => actionRoutes(scope, ctx), { prefix: '/v1' });
+    await v1.register((scope) => auditRoutes(scope, ctx), { prefix: '/v1' });
+    await v1.register((scope) => evidenceRoutes(scope, ctx), { prefix: '/v1' });
     await v1.register((scope) => statusRoutes(scope, ctx), { prefix: '/v1' });
   });
   await app.register((scope) => healthRoutes(scope, ctx));
