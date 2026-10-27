@@ -52,6 +52,13 @@ export interface ApiConfig {
   trustedProxies: readonly string[];
   maxBodyBytes: number;
   /**
+   * Operational log level. `LOG_LEVEL` sat in `.env.example` unread for most of
+   * this project's life, which is the specific kind of false assurance an auditor
+   * cannot see from outside: the app accepted the variable, Fastify logged nothing,
+   * and the only `request.log.error` call in the codebase wrote into a no-op logger.
+   */
+  logLevel: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
+  /**
    * Bearer token for `GET /metrics`. Unset means the endpoint is not registered
    * at all — there is no route to probe and no default to forget to change,
    * which is the safer failure than serving operational data to anyone who asks.
@@ -80,6 +87,21 @@ function csvList(raw: string | undefined): string[] {
     .split(',')
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+const LOG_LEVELS = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'] as const;
+
+/**
+ * `LOG_LEVEL`, validated rather than coerced. An unrecognised level is a
+ * misconfiguration that hides the logs it was meant to turn on, so it fails boot
+ * naming the variable and the accepted values — same rule as every other setting
+ * here: never let a control be configured into a no-op.
+ */
+function logLevelOf(env: NodeJS.ProcessEnv): (typeof LOG_LEVELS)[number] {
+  const raw = env['LOG_LEVEL']?.trim().toLowerCase();
+  if (!raw) return 'info';
+  if ((LOG_LEVELS as readonly string[]).includes(raw)) return raw as (typeof LOG_LEVELS)[number];
+  throw new Error(`LOG_LEVEL must be one of ${LOG_LEVELS.join(', ')} (got "${raw}").`);
 }
 
 function intIn(env: NodeJS.ProcessEnv, name: string, def: number, min: number, max: number): number {
@@ -129,6 +151,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     corsOrigins: csvList(env['CORS_ORIGINS']),
     trustedProxies: csvList(env['TRUSTED_PROXIES']).length ? csvList(env['TRUSTED_PROXIES']) : ['127.0.0.1', '::1'],
     maxBodyBytes: intIn(env, 'MAX_BODY_BYTES', 1_048_576, 1024, 50_000_000),
+    logLevel: logLevelOf(env),
     metricsToken: env['METRICS_TOKEN']?.trim() ? env['METRICS_TOKEN'].trim() : null,
     shutdownGraceMs: intIn(env, 'SHUTDOWN_GRACE_MS', 10_000, 100, 120_000),
   };

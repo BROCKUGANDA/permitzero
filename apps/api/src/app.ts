@@ -161,6 +161,7 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
 
   const app = Fastify({
     bodyLimit: deps.config.maxBodyBytes,
+    logger: loggerOptions(deps.config),
     // Which hops may be believed for the client address. `false` was the original
     // setting, and behind Caddy it silently collapses every customer into a single
     // rate-limit bucket keyed on the proxy's IP — so one tenant can exhaust the
@@ -284,6 +285,42 @@ export function buildCorsOriginCheck(
   return (origin, callback) => {
     if (!origin) return callback(null, false); // same-origin / non-browser: no CORS grant needed
     callback(null, set.has(origin));
+  };
+}
+
+/**
+ * Paths redacted from every log line, at the serializer rather than per call
+ * site. A credential that has to be remembered is a credential that will one day
+ * be logged: bearer tokens, cookies and the signing secrets all appear in requests
+ * on this API's hot paths.
+ */
+export const LOG_REDACT_PATHS = [
+  'req.headers.authorization',
+  'req.headers.cookie',
+  'req.headers["x-api-key"]',
+  '*.authorization',
+  '*.password',
+  '*.secret',
+  '*.apiKey',
+  '*.permitSigningKey',
+  '*.auditHmacKey',
+] as const;
+
+/**
+ * Fastify's logger is disabled unless options are passed, and this app had been
+ * running with it disabled: `LOG_LEVEL` was in `.env.example`, nothing read it, and
+ * the single `request.log.error` call in the error handler wrote into a no-op
+ * logger. An operator who sets `LOG_LEVEL=info` and gets no logs is worse off than
+ * one who never set it, so the level is wired here and validated in config instead
+ * of being ignored.
+ */
+export function loggerOptions(config: ApiConfig): {
+  level: string;
+  redact: { paths: string[]; censor: string };
+} {
+  return {
+    level: config.logLevel,
+    redact: { paths: [...LOG_REDACT_PATHS], censor: '[redacted]' },
   };
 }
 

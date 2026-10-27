@@ -137,6 +137,10 @@ export function testConfig(): ApiConfig {
     corsOrigins: ['http://console.test'],
     trustedProxies: [],
     maxBodyBytes: 1_048_576,
+    // Silent by default: a suite that logs every request buries the one line a
+    // test is actually looking for. The logging test turns it on deliberately, so
+    // the default is a choice rather than an absence of logging.
+    logLevel: 'silent',
     // Set so the /metrics route exists under test: an endpoint that is only ever
     // exercised when someone remembers to configure it is an endpoint that is broken.
     metricsToken: 'test-metrics-token',
@@ -149,6 +153,7 @@ export function testConfig(): ApiConfig {
 export async function freshApp(opts?: {
   model?: 'disabled' | 'static';
   adapter?: Parameters<typeof buildApp>[0]['model'];
+  config?: Partial<ApiConfig>;
 }): Promise<ApiFixture> {
   const database = await testDb();
   const runtime = await testRuntimeDb();
@@ -157,7 +162,7 @@ export async function freshApp(opts?: {
   const tenantId = seeded.tenantIds[0] ?? '';
   const agentId = seeded.agentIds[0] ?? '';
   const tokenFor = (label: string): string => seeded.userTokens[seeded.userIds[label] ?? ''] ?? '';
-  const config = { ...testConfig(), modelProvider: opts?.model ?? 'disabled' };
+  const config = { ...testConfig(), modelProvider: opts?.model ?? 'disabled', ...opts?.config };
   const model = opts?.adapter ?? createModelAdapter(config.modelProvider);
   const { app } = await buildApp({ db: database, dbRuntime: runtime, config, model });
   return {

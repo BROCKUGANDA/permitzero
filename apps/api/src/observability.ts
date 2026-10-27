@@ -62,6 +62,13 @@ export function installRequestObservability(app: FastifyInstance, deps: Observab
     // which makes a log line, an HTTP error, an audit event and the caller's own
     // trace all one query instead of four unrelated identifiers.
     request.traceId = traceIdFromW3C(ctx.traceId) ?? newId('trace');
+    // Not `request.setLogContext({ traceId })`: that method does not exist in the
+    // Fastify version this app is pinned to (5.2), and calling it unconditionally
+    // from this hook 500s every routed request — which is exactly what it did the
+    // first time the logger was switched on and something finally printed it.
+    // Correlation therefore travels as an explicit field on the log calls that
+    // matter (the error handler passes `{ traceId }`) plus the `traceparent` header
+    // echoed below.
     reply.header('traceparent', formatTraceparent(ctx));
   });
 
