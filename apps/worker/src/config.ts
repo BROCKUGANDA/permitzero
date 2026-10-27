@@ -6,6 +6,13 @@
 export interface WorkerConfig {
   appEnv: string;
   databaseUrl: string;
+  /**
+   * The restricted `pz_app` runtime role used for all tenant row access.
+   * Defaults to `databaseUrl`; when it does, row-level security cannot bind this
+   * process and boot says so.
+   */
+  databaseRuntimeUrl: string;
+  runtimePoolMax: number;
   redisUrl: string | null;
   permitSigningKey: string;
   permitSigningKeyId: string;
@@ -52,6 +59,8 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
   return {
     appEnv: env['APP_ENV'] ?? 'development',
     databaseUrl: required(env, 'DATABASE_URL'),
+    databaseRuntimeUrl: env['DATABASE_URL_RUNTIME'] ?? env['DATABASE_URL'] ?? '',
+    runtimePoolMax: intIn(env, 'RUNTIME_POOL_MAX', 10, 1, 200),
     redisUrl: env['REDIS_URL'] ?? null,
     permitSigningKey,
     permitSigningKeyId: env['PERMIT_SIGNING_KEY_ID'] ?? 'k1',

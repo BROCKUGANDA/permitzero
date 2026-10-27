@@ -3,7 +3,7 @@
  * set), the outbox dispatcher and graceful shutdown. Boot logs name what is
  * enabled without printing any secret or URL credentials.
  */
-import { closeDb, createDb, migrate } from '@permitzero/db';
+import { closeDb, createDb, migrate, rlsEnforcementState, type RlsEnforcementState } from '@permitzero/db';
 import { MetaProviderClient, loadMetaConfig } from '@permitzero/provider-meta';
 import { createBullmqHandles } from '@permitzero/queue';
 import { loadConfig } from './config.js';
@@ -19,6 +19,25 @@ function describeDatabase(url: string): string {
   }
 }
 
+/**
+ * One line an operator can act on. `enforced` is the only state in which the
+ * database is doing the tenant filtering; the other two say which half is
+ * missing, because "RLS is configured" and "RLS applies to this connection" are
+ * different claims and the first one is worthless on its own.
+ */
+function describeIsolation(isolation: RlsEnforcementState): string {
+  if (isolation.enforced) {
+    return `enforced (role ${isolation.role}, ${isolation.tablesEnforced}/${isolation.tablesTotal} tables)`;
+  }
+  if (!isolation.subjectToRls) {
+    return `NOT enforced — role ${isolation.role} is ${isolation.superuser ? 'a superuser' : 'marked BYPASSRLS'}, so row-level security does not apply to it. Set DATABASE_URL_RUNTIME to the pz_app role.`;
+  }
+  if (!isolation.coverageReadable) {
+    return `NOT enforced — role ${isolation.role} cannot read pz_rls_coverage; run npm run db:migrate.`;
+  }
+  return `NOT enforced — role ${isolation.role} is bound, but ${isolation.unenforcedTables.length} table(s) lack a policy or the tenant-id trigger: ${isolation.unenforcedTables.join(', ')}`;
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
   const db = createDb(config.databaseUrl);
@@ -27,6 +46,14 @@ async function main(): Promise<void> {
     console.log(`[api] applied migrations: ${applied.applied.join(', ')}`);
   }
 
+  // The runtime pool is the one that touches tenant rows, and it is a different
+  // role from the migration pool on purpose: migrations need DDL rights, tenant
+  // traffic needs a role the database can bind with row-level security. Asking
+  // the database which of those it is, rather than reading a config flag, is
+  // what keeps the claim honest after a deployment changes the URL.
+  const runtime = createDb(config.databaseRuntimeUrl, { max: config.runtimePoolMax });
+  const isolation = await rlsEnforcementState(runtime);
+
   // Meta selection loads its own config here so a missing key or model id
   // fails boot with the variable name, never a value.
   const meta = config.modelProvider === 'meta' ? new MetaProviderClient(loadMetaConfig()) : undefined;
@@ -34,6 +61,7 @@ async function main(): Promise<void> {
   const bullmq = config.redisUrl ? createBullmqHandles(config.redisUrl) : null;
   const { app, ctx } = await buildApp({
     db,
+    dbRuntime: runtime,
     config,
     model,
     ...(bullmq
@@ -51,6 +79,7 @@ async function main(): Promise<void> {
   await app.listen({ host: config.host, port: config.port });
   console.log(`[api] listening on http://${config.host}:${config.port} (env=${config.appEnv})`);
   console.log(`[api] database ${describeDatabase(config.databaseUrl)}`);
+  console.log(`[api] tenant isolation: ${describeIsolation(isolation)}`);
   console.log(`[api] outbox dispatcher ${ctx.queues.dispatcher ? 'running' : 'disabled (no REDIS_URL)'}`);
   console.log(`[api] model provider ${model.providerName} (${model.enabled ? 'enabled' : 'disabled'})`);
 
@@ -59,6 +88,7 @@ async function main(): Promise<void> {
     await ctx.queues.dispatcher?.stop().catch(() => undefined);
     await app.close().catch(() => undefined);
     await bullmq?.close().catch(() => undefined);
+    await closeDb(runtime).catch(() => undefined);
     await closeDb(db).catch(() => undefined);
     process.exit(0);
   };

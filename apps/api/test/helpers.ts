@@ -36,7 +36,21 @@ function workerUrl(): string {
   return url.toString();
 }
 
+/**
+ * The same worker database, reached as the restricted `pz_app` role. This is what
+ * makes the whole API suite an RLS test: every route reads and writes through it,
+ * so a handler that loses its tenant context does not leak — it finds nothing,
+ * and the assertion that expects to find something fails.
+ */
+function workerRuntimeUrl(): string {
+  const url = new URL(workerUrl());
+  url.username = 'pz_app';
+  url.password = process.env['PZ_RLS_ROLE_PASSWORD'] ?? 'pz_app_dev';
+  return url.toString();
+}
+
 let db: Db | null = null;
+let runtimeDb: Db | null = null;
 
 export async function testDb(): Promise<Db> {
   if (db) return db;
@@ -55,7 +69,19 @@ export async function testDb(): Promise<Db> {
   }
   db = createDb(url, { max: 5 });
   await migrate(db);
+  // One clean database per test file: a vitest worker slot is reused across
+  // files and its database outlives the process, so a file must not inherit the
+  // rows its predecessor left behind.
+  await resetDb(db);
   return db;
+}
+
+/** The `pz_app` pool, after `testDb()` has created and migrated the database. */
+export async function testRuntimeDb(): Promise<Db> {
+  if (runtimeDb) return runtimeDb;
+  await testDb();
+  runtimeDb = createDb(workerRuntimeUrl(), { max: 5 });
+  return runtimeDb;
 }
 
 export async function closeTestDb(): Promise<void> {
@@ -63,11 +89,18 @@ export async function closeTestDb(): Promise<void> {
     await closeDb(db);
     db = null;
   }
+  if (runtimeDb) {
+    await closeDb(runtimeDb);
+    runtimeDb = null;
+  }
 }
 
 export interface ApiFixture {
   app: FastifyInstance;
+  /** Management pool (table owner, exempt from row-level security). Setup and assertions only. */
   db: Db;
+  /** The `pz_app` pool the routes actually use. Proving isolation needs this one. */
+  runtime: Db;
   seeded: SeedResult;
   tenantId: string;
   agentId: string;
@@ -87,6 +120,8 @@ export function testConfig(): ApiConfig {
     appEnv: 'test',
     version: '0.1.0-test',
     databaseUrl: workerUrl(),
+    databaseRuntimeUrl: workerRuntimeUrl(),
+    runtimePoolMax: 5,
     redisUrl: null,
     permitSigningKey: 'test-signing-key-0123456789abcdef',
     permitSigningKeyId: 'k-test',
@@ -104,6 +139,7 @@ export async function freshApp(opts?: {
   adapter?: Parameters<typeof buildApp>[0]['model'];
 }): Promise<ApiFixture> {
   const database = await testDb();
+  const runtime = await testRuntimeDb();
   await resetDb(database);
   const seeded = await seed(database);
   const tenantId = seeded.tenantIds[0] ?? '';
@@ -111,10 +147,11 @@ export async function freshApp(opts?: {
   const tokenFor = (label: string): string => seeded.userTokens[seeded.userIds[label] ?? ''] ?? '';
   const config = { ...testConfig(), modelProvider: opts?.model ?? 'disabled' };
   const model = opts?.adapter ?? createModelAdapter(config.modelProvider);
-  const { app } = await buildApp({ db: database, config, model });
+  const { app } = await buildApp({ db: database, dbRuntime: runtime, config, model });
   return {
     app,
     db: database,
+    runtime,
     seeded,
     tenantId,
     agentId,

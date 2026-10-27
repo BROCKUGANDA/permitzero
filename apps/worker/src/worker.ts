@@ -20,7 +20,14 @@ export interface WorkerQueues {
 }
 
 export interface BuildWorkerDeps {
+  /** Management pool: migrations and non-tenant operational reads. */
   db: Db;
+  /**
+   * The restricted runtime pool every tenant read and write goes through.
+   * Defaults to `db`, which means this process is connected as a role row-level
+   * security cannot bind — boot reports that rather than assuming isolation.
+   */
+  dbRuntime?: Db;
   config: WorkerConfig;
   queues?: WorkerQueues;
   clock?: () => Date;
@@ -49,7 +56,8 @@ export interface BuiltWorker {
 
 export function buildWorker(deps: BuildWorkerDeps): BuiltWorker {
   const clock = deps.clock ?? (() => new Date());
-  const { broker, stores } = createBroker(deps.db, {
+  const runtime = deps.dbRuntime ?? deps.db;
+  const { broker, stores } = createBroker(runtime, {
     signingKey: deps.config.permitSigningKey,
     signingKeyId: deps.config.permitSigningKeyId,
     auditHmacKey: deps.config.auditHmacKey,
@@ -80,7 +88,7 @@ export function buildWorker(deps: BuildWorkerDeps): BuiltWorker {
       audit: adaptDbAudit(stores.audit, clock),
       handlers: {
         [QUEUE_NAMES.outbox]: createOutboxRouter(),
-        [QUEUE_NAMES.reconciliation]: createReconciliationHandler({ db: deps.db, broker }),
+        [QUEUE_NAMES.reconciliation]: createReconciliationHandler({ db: runtime, broker }),
       },
       onEvent: (event) => console.log(`[worker:consume] ${JSON.stringify(event)}`),
     });
@@ -88,11 +96,11 @@ export function buildWorker(deps: BuildWorkerDeps): BuiltWorker {
 
   const sweepOnce = async (): Promise<SweepReport> => {
     const expiry = await sweepExpiredApprovals(
-      { db: deps.db, stores, broker, clock },
+      { db: runtime, stores, broker, clock },
       { limit: deps.config.sweepBatchSize },
     );
     const reconcile = await sweepUnknownOutcomes(
-      { db: deps.db, stores, broker, clock },
+      { db: runtime, stores, broker, clock },
       { limit: deps.config.sweepBatchSize, graceMs: deps.config.reconcileGraceMs },
     );
     if (

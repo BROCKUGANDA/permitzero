@@ -153,6 +153,11 @@ services:
     <<: *app-env
     environment:
       DATABASE_URL_TEST: postgres://permitzero:${PZ_PG_PASSWORD:?}@postgres:5432/permitzero_test
+      # The test harness derives the restricted pz_app URL from DATABASE_URL_TEST
+      # and connects with this password, which is the one 0006 assigns. Without it
+      # the suite would fall back to the exempt admin role and every
+      # tenant-isolation assertion would pass while proving nothing.
+      PZ_RLS_ROLE_PASSWORD: ${PZ_RLS_ROLE_PASSWORD:-pz_app_dev}
     depends_on:
       postgres:
         condition: service_healthy

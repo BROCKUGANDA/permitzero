@@ -3,7 +3,7 @@
  * agents. Every lookup is tenant-scoped except credential resolution by secret
  * hash (the hash itself is the lookup key; tenant scoping happens after).
  */
-import { and, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import type { AgentStatus, Environment, Role } from '@permitzero/domain';
 import type { DbExecutor } from '../client.js';
 import { agents, serviceCredentials, tenantMemberships, tenants, users } from '../schema.js';
@@ -38,6 +38,25 @@ export async function getTenantById(ex: DbExecutor, id: string): Promise<TenantR
 
 export async function getTenantBySlug(ex: DbExecutor, slug: string): Promise<TenantRow | null> {
   return first(ex.select().from(tenants).where(eq(tenants.slug, slug)).limit(1));
+}
+
+/**
+ * Every ACTIVE tenant id, oldest first.
+ *
+ * This is a cross-tenant read by necessity: it is how a background worker learns
+ * which tenants to visit. It is therefore only ever issued from inside
+ * `withTenantBlindTransaction`, where policy `door_lookup` permits SELECT on
+ * `tenants` and on nothing that holds customer data. Sweeps then iterate these
+ * ids and do their work tenant-scoped, which also means one busy tenant cannot
+ * starve another of a sweep pass.
+ */
+export async function listActiveTenantIds(ex: DbExecutor): Promise<string[]> {
+  const rows = await ex
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.status, 'ACTIVE'))
+    .orderBy(asc(tenants.createdAt));
+  return rows.map((r) => r.id);
 }
 
 export async function createUser(

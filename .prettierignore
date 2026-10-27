@@ -1,0 +1,15 @@
+# Build and generated output.
+node_modules/
+dist/
+coverage/
+.next/
+test-results/
+playwright-report/
+storage/
+.scratch/
+
+# Vendored third-party tooling, committed as authored by upstream. Formatting it
+# here means re-writing someone else's files on every upgrade, and it made
+# `npm run verify` red for reasons unrelated to this repository's code.
+.claude/
+.gitnexus/

@@ -16,7 +16,7 @@ import {
   rejectActionRequestSchema,
 } from '@permitzero/schemas';
 import { z } from 'zod';
-import { getAction, listActions } from '@permitzero/db';
+import { getAction, listActions, tenantScope } from '@permitzero/db';
 import { NotFoundError } from '@permitzero/domain';
 import type { ActionState } from '@permitzero/domain';
 import type { AppContext, ZodFastifyInstance } from '../app.js';
@@ -40,7 +40,7 @@ const actionPageSchema = pageSchema(actionDtoSchema);
 
 async function authHook(app: ZodFastifyInstance, ctx: AppContext): Promise<void> {
   app.addHook('preHandler', async (request) => {
-    request.principal = await authenticateToken(ctx.db.db, request.headers.authorization, new Date());
+    request.principal = await authenticateToken(ctx.runtime, request.headers.authorization, new Date());
   });
 }
 
@@ -71,21 +71,35 @@ export async function actionRoutes(app: ZodFastifyInstance, ctx: AppContext): Pr
     },
     async (request) => {
       const query = request.query;
-      const page = await listActions(
-        ctx.db.db,
-        request.principal.tenantId,
-        {
-          ...(query.state ? { states: [query.state as ActionState] } : {}),
-          ...(query.tool_name ? { toolName: query.tool_name } : {}),
-          ...(query.agent_id ? { agentId: query.agent_id } : {}),
-          ...(query.run_id ? { runId: query.run_id } : {}),
-        },
-        { limit: query.limit, cursor: query.cursor },
-      );
-      return {
-        data: await Promise.all(page.rows.map((row) => toActionDto(ctx.db.db, request.principal.tenantId, row))),
-        meta: { limit: query.limit, next_cursor: page.nextCursor },
-      };
+      const tenantId = request.principal.tenantId;
+      // One tenant-scoped transaction for the whole page. Under 0006 a statement
+      // on the root pool has no `app.tenant_id` and reads zero rows, so the list
+      // and the per-row DTO reads (revision, approvals, permit, execution) must
+      // share the transaction that carries the tenant. They share it rather than
+      // each taking their own because a transaction pins one pool connection for
+      // its lifetime: one scope per row would be a fresh connection and commit for
+      // a 20-row page, and a separate scope for the DTO reads would split one
+      // snapshot across commits. No network call may be added inside this block.
+      const scope = tenantScope(ctx.runtime, tenantId);
+      return scope(async (ex) => {
+        const page = await listActions(
+          ex,
+          tenantId,
+          {
+            ...(query.state ? { states: [query.state as ActionState] } : {}),
+            ...(query.tool_name ? { toolName: query.tool_name } : {}),
+            ...(query.agent_id ? { agentId: query.agent_id } : {}),
+            ...(query.run_id ? { runId: query.run_id } : {}),
+          },
+          { limit: query.limit, cursor: query.cursor },
+        );
+        return {
+          // `Promise.all` keeps the row order `listActions` returned; `toActionDto`
+          // issues its reads on `ex`, so they pipeline on the pinned connection.
+          data: await Promise.all(page.rows.map((row) => toActionDto(ex, tenantId, row))),
+          meta: { limit: query.limit, next_cursor: page.nextCursor },
+        };
+      });
     },
   );
 
@@ -98,9 +112,17 @@ export async function actionRoutes(app: ZodFastifyInstance, ctx: AppContext): Pr
       },
     },
     async (request) => {
-      const row = await getAction(ctx.db.db, request.principal.tenantId, request.params.id);
-      if (!row) throw new NotFoundError();
-      return toActionDto(ctx.db.db, request.principal.tenantId, row);
+      const tenantId = request.principal.tenantId;
+      const scope = tenantScope(ctx.runtime, tenantId);
+      // The action row and its DTO reads commit together, so a caller cannot see
+      // an action in one state and a permit from a later one. A NotFoundError
+      // thrown inside the transaction rolls the (read-only) transaction back and
+      // propagates unchanged, so the 404 behaviour is exactly what it was.
+      return scope(async (ex) => {
+        const row = await getAction(ex, tenantId, request.params.id);
+        if (!row) throw new NotFoundError();
+        return toActionDto(ex, tenantId, row);
+      });
     },
   );
 

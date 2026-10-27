@@ -24,6 +24,7 @@ export type {
   VendorRow,
 } from './schema.js';
 export * from './client.js';
+export * from './tenant.js';
 export * from './mappers.js';
 export * from './repos/identity.js';
 export * from './repos/policies.js';

@@ -8,7 +8,7 @@
  */
 import { NotFoundError } from '@permitzero/domain';
 import type { Broker } from '@permitzero/broker';
-import { getAction, getOutboxEvent } from '@permitzero/db';
+import { getAction, getOutboxEvent, tenantScope } from '@permitzero/db';
 import type { Db } from '@permitzero/db';
 import type { HandlerResult, JobHandler, QueueJob } from '@permitzero/queue';
 
@@ -36,26 +36,38 @@ export function createReconciliationHandler(deps: ReconcileHandlerDeps): JobHand
     }
 
     // The job carries identifiers only; the outbox row holds the reference.
-    const row = await getOutboxEvent(deps.db.db, outboxId);
-    if (!row) {
-      return { outcome: 'SKIPPED_STALE', reason: 'outbox row is gone' };
-    }
-    const payload = row.payloadJson as Record<string, unknown> | null;
-    const actionId = payload?.['action_id'];
-    if (typeof actionId !== 'string') {
-      return { outcome: 'FAILED', errorClass: 'INVALID_JOB_PAYLOAD' };
-    }
+    // Both reads happen in the job's own tenant transaction, which is what makes
+    // a job that names someone else's tenant resolve as stale instead of being
+    // honoured — and it is one transaction, not two pool round-trips.
+    type Reference =
+      | { kind: 'gone' }
+      | { kind: 'bad-payload' }
+      | { kind: 'stale'; reason: string }
+      | { kind: 'reconcile'; actionId: string };
 
-    const action = await getAction(deps.db.db, tenantId, actionId);
-    if (!action) {
-      return { outcome: 'SKIPPED_STALE', reason: 'action is gone' };
-    }
-    if (!RECONCILABLE_STATES.has(action.state)) {
-      return { outcome: 'SKIPPED_STALE', reason: `action already ${action.state}` };
-    }
+    const reference: Reference = await tenantScope(
+      deps.db,
+      tenantId,
+    )(async (ex): Promise<Reference> => {
+      const row = await getOutboxEvent(ex, outboxId);
+      if (!row) return { kind: 'gone' };
+      const payload = row.payloadJson as Record<string, unknown> | null;
+      const actionId = payload?.['action_id'];
+      if (typeof actionId !== 'string') return { kind: 'bad-payload' };
+      const action = await getAction(ex, tenantId, actionId);
+      if (!action) return { kind: 'stale', reason: 'action is gone' };
+      if (!RECONCILABLE_STATES.has(action.state)) {
+        return { kind: 'stale', reason: `action already ${action.state}` };
+      }
+      return { kind: 'reconcile', actionId };
+    });
+
+    if (reference.kind === 'gone') return { outcome: 'SKIPPED_STALE', reason: 'outbox row is gone' };
+    if (reference.kind === 'bad-payload') return { outcome: 'FAILED', errorClass: 'INVALID_JOB_PAYLOAD' };
+    if (reference.kind === 'stale') return { outcome: 'SKIPPED_STALE', reason: reference.reason };
 
     try {
-      await deps.broker.reconcile(actionId, tenantId);
+      await deps.broker.reconcile(reference.actionId, tenantId);
       return { outcome: 'DONE' };
     } catch (err) {
       if (err instanceof NotFoundError) {

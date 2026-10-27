@@ -9,6 +9,16 @@ export interface ApiConfig {
   appEnv: string;
   version: string;
   databaseUrl: string;
+  /**
+   * The restricted `pz_app` role created by
+   * `infra/migrations/0006_row_level_security.sql`, used for every tenant read
+   * and write. Falls back to `databaseUrl` when unset, which means the
+   * application is connected as a role that row-level security cannot bind —
+   * `tenantIsolationEnforced` reports that rather than assuming it.
+   */
+  databaseRuntimeUrl: string;
+  /** Pool ceiling for the runtime pool; each tenant transaction holds one connection. */
+  runtimePoolMax: number;
   redisUrl: string | null;
   permitSigningKey: string;
   permitSigningKeyId: string;
@@ -60,6 +70,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     appEnv: env['APP_ENV'] ?? 'development',
     version: env['APP_VERSION'] ?? '0.1.0',
     databaseUrl: required(env, 'DATABASE_URL'),
+    databaseRuntimeUrl: env['DATABASE_URL_RUNTIME'] ?? env['DATABASE_URL'] ?? '',
+    runtimePoolMax: intIn(env, 'RUNTIME_POOL_MAX', 10, 1, 200),
     redisUrl: env['REDIS_URL'] ?? null,
     permitSigningKey,
     permitSigningKeyId: env['PERMIT_SIGNING_KEY_ID'] ?? 'k1',

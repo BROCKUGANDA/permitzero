@@ -3,7 +3,7 @@
  * dispatcher, consumers and sweeps until told to stop. Boot logs name what
  * is enabled without printing any secret or URL credentials.
  */
-import { closeDb, createDb, migrate } from '@permitzero/db';
+import { closeDb, createDb, migrate, rlsEnforcementState } from '@permitzero/db';
 import { createBullmqHandles, createBullmqWorkerFactory } from '@permitzero/queue';
 import { loadWorkerConfig } from './config.js';
 import { buildWorker } from './worker.js';
@@ -18,8 +18,25 @@ async function main(): Promise<void> {
 
   const bullmq = config.redisUrl ? createBullmqHandles(config.redisUrl) : null;
   const workers = config.redisUrl ? createBullmqWorkerFactory(config.redisUrl) : null;
+  const runtime = createDb(config.databaseRuntimeUrl, { max: config.runtimePoolMax });
+  const isolation = await rlsEnforcementState(runtime);
+  if (isolation.enforced) {
+    console.log(
+      `[worker] tenant isolation: enforced (role ${isolation.role}, ${isolation.tablesEnforced}/${isolation.tablesTotal} tables)`,
+    );
+  } else {
+    console.warn(
+      `[worker] tenant isolation: NOT enforced — role ${isolation.role} is ${
+        isolation.subjectToRls
+          ? `missing coverage (${isolation.unenforcedTables.join(', ') || 'unknown'})`
+          : 'exempt from row-level security'
+      }. Set DATABASE_URL_RUNTIME to the pz_app role.`,
+    );
+  }
+
   const built = buildWorker({
     db,
+    dbRuntime: runtime,
     config,
     ...(bullmq && workers
       ? { queues: { factory: bullmq.factory, workerFactory: workers.factory, redis: bullmq.redis } }
@@ -37,6 +54,7 @@ async function main(): Promise<void> {
     await built.stop().catch(() => undefined);
     await workers?.close().catch(() => undefined);
     await bullmq?.close().catch(() => undefined);
+    await closeDb(runtime).catch(() => undefined);
     await closeDb(db).catch(() => undefined);
     process.exit(0);
   };

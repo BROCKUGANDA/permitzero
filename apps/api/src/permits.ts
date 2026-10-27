@@ -11,7 +11,14 @@ import { ConflictError, NotFoundError } from '@permitzero/domain';
 import type { Principal } from '@permitzero/domain';
 import type { PermitDto } from '@permitzero/schemas';
 import { PermitService } from '@permitzero/broker';
-import { createDbStores, getAction, getEnforcementMode, transitionAction, withTransaction } from '@permitzero/db';
+import {
+  createDbStores,
+  getAction,
+  getEnforcementMode,
+  tenantScope,
+  transitionAction,
+  withTenantTransaction,
+} from '@permitzero/db';
 import type { Db, DbTransaction } from '@permitzero/db';
 import { requireExecute } from './auth.js';
 import { toActionRecord } from '@permitzero/db';
@@ -30,9 +37,17 @@ const BLOCKED_MODES = ['EMERGENCY_STOP', 'DEGRADED_READ_ONLY', 'QUARANTINE'] as 
 export async function collectPermit(deps: CollectDeps, principal: Principal, actionId: string): Promise<PermitDto> {
   const now = deps.clock?.() ?? new Date();
   const tenantId = principal.tenantId;
+  const scope = tenantScope(deps.db, tenantId);
 
-  const action = await getAction(deps.db.db, tenantId, actionId);
-  if (!action) throw new NotFoundError();
+  // Whether this collection is allowed is one question about two tables, so it
+  // gets one transaction: the action row and the tenant's operating mode are
+  // read together and cannot straddle a mode flip.
+  const { action, mode } = await scope(async (ex) => {
+    const found = await getAction(ex, tenantId, actionId);
+    if (!found) throw new NotFoundError();
+    return { action: found, mode: (await getEnforcementMode(ex, tenantId))?.mode ?? 'ENFORCED' };
+  });
+
   requireExecute(principal, toActionRecord(action));
   if (action.state === 'PERMIT_ISSUED') {
     throw new ConflictError('A permit was already issued for this action; permits are collected exactly once.');
@@ -41,28 +56,31 @@ export async function collectPermit(deps: CollectDeps, principal: Principal, act
     throw new ConflictError(`This action is ${action.state}; only approved actions can collect a permit.`);
   }
   if (action.expiresAt && action.expiresAt.getTime() <= now.getTime()) {
-    const fresh = await getAction(deps.db.db, tenantId, actionId);
-    if (fresh && (fresh.state === 'APPROVED' || fresh.state === 'APPROVAL_REQUIRED')) {
-      await transitionAction(deps.db.db, {
-        tenantId,
-        actionId,
-        to: 'EXPIRED',
-        expectedVersion: fresh.version,
-        now,
-      });
-    }
+    // Its own transaction, and it must commit: the 409 below would otherwise
+    // unwind the EXPIRED transition this request is reporting.
+    await scope(async (ex) => {
+      const fresh = await getAction(ex, tenantId, actionId);
+      if (fresh && (fresh.state === 'APPROVED' || fresh.state === 'APPROVAL_REQUIRED')) {
+        await transitionAction(ex, {
+          tenantId,
+          actionId,
+          to: 'EXPIRED',
+          expectedVersion: fresh.version,
+          now,
+        });
+      }
+    });
     throw new ConflictError('The approval window has expired; submit the action again for a fresh review.');
   }
   if (!action.policyRevisionId) {
     throw new ConflictError('This action has no pinned policy revision and cannot collect a permit.');
   }
 
-  const mode = (await getEnforcementMode(deps.db.db, tenantId))?.mode ?? 'ENFORCED';
   if ((BLOCKED_MODES as readonly string[]).includes(mode)) {
     throw new ConflictError(`Mode ${mode} does not issue executable permits.`);
   }
 
-  return withTransaction(deps.db, async (tx: DbTransaction) => {
+  return withTenantTransaction(deps.db, tenantId, async (tx: DbTransaction) => {
     const stores = createDbStores(tx, { auditHmacKey: deps.auditHmacKey });
     const permits = new PermitService({
       signingKey: deps.permitSigningKey,

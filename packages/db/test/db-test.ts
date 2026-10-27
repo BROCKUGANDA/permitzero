@@ -38,6 +38,13 @@ export async function testDb(): Promise<Db> {
   }
   db = createDb(url, { max: 5 });
   await migrate(db);
+  // One clean database per test FILE. Vitest reuses a worker slot for several
+  // files and the slot's database outlives the process that made it, so without
+  // this a file inherits whatever the previous file left — which showed up as
+  // `uq_tenants_slug` collisions on the demo tenant the instant a second file
+  // started seeding three tenants. `beforeEach` resets are not enough: they run
+  // after `beforeAll` has already seeded.
+  await resetDb(db);
   return db;
 }
 
@@ -50,4 +57,31 @@ export async function closeTestDb(): Promise<void> {
     await closeDb(db);
     db = null;
   }
+  if (appDb) {
+    await closeDb(appDb);
+    appDb = null;
+  }
+}
+
+/**
+ * A second connection to the SAME worker database, authenticated as the
+ * restricted `pz_app` runtime role created by
+ * `infra/migrations/0006_row_level_security.sql`.
+ *
+ * This exists because row-level security is a property of the *role*, not of
+ * the schema: every other test in this suite connects as the admin role, which
+ * is exempt, so testing tenant isolation against `testDb()` would prove nothing
+ * at all. Assertions that claim isolation is enforced must go through here.
+ */
+let appDb: Db | null = null;
+
+export async function testAppDb(): Promise<Db> {
+  if (appDb) return appDb;
+  await testDb(); // guarantees the database exists and 0006 has run
+  const parsed = new URL(workerUrl());
+  const password = process.env['PZ_RLS_ROLE_PASSWORD'] ?? 'pz_app_dev';
+  parsed.username = 'pz_app';
+  parsed.password = password;
+  appDb = createDb(parsed.toString(), { max: 4 });
+  return appDb;
 }

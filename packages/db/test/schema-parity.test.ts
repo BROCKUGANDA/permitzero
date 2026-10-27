@@ -203,6 +203,7 @@ describe('schema parity', () => {
       '0003_security_comments.sql',
       '0004_dispatches_outbox_queue.sql',
       '0005_credential_names_outbox_freeze.sql',
+      '0006_row_level_security.sql',
     ]);
   });
 });

@@ -25,6 +25,11 @@ export default tseslint.config(
       '**/*.tsbuildinfo',
       'apps/web/next-env.d.ts',
       '.scratch/**',
+      // Vendored third-party tooling, committed as authored. Linting it here
+      // would mean editing someone else's files on every upgrade, and it made
+      // `npm run lint` red on main before any of our code was touched.
+      '.claude/**',
+      '.gitnexus/**',
     ],
   },
   js.configs.recommended,

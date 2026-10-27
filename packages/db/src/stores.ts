@@ -25,6 +25,7 @@ import { Broker, PermitService, SimulatedFinanceConnector } from '@permitzero/br
 import type { Clock } from '@permitzero/broker';
 import { newId } from '@permitzero/domain';
 import type { Db, DbExecutor } from './client.js';
+import { withTenantBlindTransaction, withTenantTransaction } from './tenant.js';
 import {
   toActionRecord,
   toConnectorDispatchRecord,
@@ -61,7 +62,6 @@ import {
   findExecutionByConnectorKey,
   findLatestExecutionByAction,
   findPermitByTokenHash,
-  findPermitByTokenHashAnyTenant,
   insertExecution,
   insertPermit,
   listUnknownOutcomeExecutions,
@@ -171,196 +171,255 @@ function asString(value: unknown): string | null {
 export function createDbStores(db: Db | DbExecutor, opts?: DbStoresOptions): DbStores {
   // A transaction satisfies DbExecutor structurally, so callers can scope a
   // whole pipeline (intake, approval quorum, execute) to one commit.
-  const ex: DbExecutor = 'db' in db ? db.db : db;
+  //
+  // Two very different things can be passed in, and the difference decides
+  // whether row-level security applies:
+  //
+  //   · a `Db` (the root pool) — the caller has NOT chosen a tenant, so every
+  //     method below has to open its own tenant-scoped transaction from the
+  //     tenant id it was given. Nearly every port method already receives one.
+  //   · a `DbTransaction` — the caller already opened the transaction, and from
+  //     0006 onwards the only supported way to open one for tenant work is
+  //     `withTenantTransaction`, so the context is set. Opening a nested
+  //     transaction here would take a second pool connection and deadlock under
+  //     load, so these calls run exactly as they did before.
+  const root = 'sql' in db ? db : null;
+  // Narrowed again rather than reusing `root`: TypeScript only refines `db`
+  // itself for the `in` check, so `root ? root.db : db` would leave the else
+  // branch as the union.
+  const ex: DbExecutor = 'sql' in db ? db.db : db;
   const auditHmacKey = opts?.auditHmacKey ?? null;
 
+  /** Tenant-scoped statement: a transaction carrying `tenantId`, or the caller's own. */
+  const run = <T>(tenantId: string, fn: (ex: DbExecutor) => Promise<T>): Promise<T> =>
+    root ? withTenantTransaction(root, tenantId, (tx) => fn(tx)) : fn(ex);
+
+  /**
+   * Cross-tenant statement, permitted only for the outbox: claiming with
+   * `FOR UPDATE SKIP LOCKED` across all tenants is what stops one busy tenant
+   * delaying delivery for the rest. Policy `dispatch_claim` opens nothing else.
+   */
+  const runBlind = <T>(fn: (ex: DbExecutor) => Promise<T>): Promise<T> =>
+    root ? withTenantBlindTransaction(root, (tx) => fn(tx)) : fn(ex);
+
   const permits: PermitStore = {
-    insert: (permit: PersistedPermit) => insertPermit(ex, permit).then(() => undefined),
+    insert: (permit: PersistedPermit) => run(permit.tenantId, (e) => insertPermit(e, permit)).then(() => undefined),
     consumeIfUnused: (permitId: string, tenantId: string, now: Date): Promise<PermitConsumeResult> =>
-      consumePermit(ex, permitId, tenantId, now),
-    findByTokenHash: async (tokenHash: string, tenantId: string) => {
-      const row = await findPermitByTokenHash(ex, tokenHash, tenantId);
-      return row ? toPersistedPermit(row) : null;
-    },
+      run(tenantId, (e) => consumePermit(e, permitId, tenantId, now)),
+    findByTokenHash: (tokenHash: string, tenantId: string) =>
+      run(tenantId, async (e) => {
+        const row = await findPermitByTokenHash(e, tokenHash, tenantId);
+        return row ? toPersistedPermit(row) : null;
+      }),
     revoke: (permitId: string, tenantId: string, reason: string, now: Date) =>
-      revokePermit(ex, tenantId, permitId, reason, now),
+      run(tenantId, (e) => revokePermit(e, tenantId, permitId, reason, now)),
     revokeByAction: (actionId: string, tenantId: string, reason: string, now: Date) =>
-      revokePermitsByAction(ex, tenantId, actionId, reason, now).then(() => undefined),
-    findByTokenHashCrossTenant: async (tokenHash: string) => {
-      const row = await findPermitByTokenHashAnyTenant(ex, tokenHash);
-      return row ? toPersistedPermit(row) : null;
-    },
+      run(tenantId, (e) => revokePermitsByAction(e, tenantId, actionId, reason, now)).then(() => undefined),
+    // Deliberately not implemented any more. It existed only to distinguish
+    // `PERMIT_MISSING` from `PERMIT_TENANT_MISMATCH` for the operator message,
+    // and doing that requires reading another tenant's `permits` row — which is
+    // precisely the thing row-level security now refuses. The port documents the
+    // optional-method contract: without it the broker reports `PERMIT_MISSING`
+    // in both cases, and the API still maps to 404 rather than 403, so the
+    // observable behaviour the PRD asked for is unchanged and the cross-tenant
+    // read is gone.
   };
 
   const executions: ExecutionStore = {
-    recordIntent: (execution: PersistedExecution) => insertExecution(ex, execution).then(() => undefined),
-    markDispatched: async (executionId: string, tenantId: string, dispatchStartedAt: Date) => {
-      const row = await markExecutionDispatched(ex, executionId, tenantId, dispatchStartedAt);
-      return row ? toPersistedExecution(row) : null;
-    },
-    markResult: async (update: ExecutionResultUpdate) => {
-      const row = await markExecutionResult(ex, update);
-      return row ? toPersistedExecution(row) : null;
-    },
-    findLatestByAction: async (actionId: string, tenantId: string) => {
-      const row = await findLatestExecutionByAction(ex, actionId, tenantId);
-      return row ? toPersistedExecution(row) : null;
-    },
-    findByIdempotencyKey: async (connectorIdempotencyKey: string, tenantId: string) => {
-      const row = await findExecutionByConnectorKey(ex, connectorIdempotencyKey, tenantId);
-      return row ? toPersistedExecution(row) : null;
-    },
-    listUnknownOutcomes: async (tenantId: string | null, limit?: number) => {
-      const rows = await listUnknownOutcomeExecutions(ex, tenantId, limit ?? 100);
-      return rows.map(toPersistedExecution);
-    },
-  };
-
-  const actions: ActionStore = {
-    loadAction: async (actionId: string, tenantId: string) => {
-      const row = await getAction(ex, tenantId, actionId);
-      return row ? toActionRecord(row) : null;
-    },
-    transitionState: (input: ActionTransitionInput) =>
-      transitionAction(ex, {
-        tenantId: input.tenantId,
-        actionId: input.actionId,
-        to: input.to,
-        expectedVersion: input.expectedVersion,
-        expectedFrom: input.expectedFrom,
-        patch: input.patch,
-        now: input.now,
+    recordIntent: (execution: PersistedExecution) =>
+      run(execution.tenantId, (e) => insertExecution(e, execution)).then(() => undefined),
+    markDispatched: (executionId: string, tenantId: string, dispatchStartedAt: Date) =>
+      run(tenantId, async (e) => {
+        const row = await markExecutionDispatched(e, executionId, tenantId, dispatchStartedAt);
+        return row ? toPersistedExecution(row) : null;
       }),
-  };
-
-  const data: ConnectorDataStore = {
-    getVendor: async (tenantId: string, vendorId: string) => {
-      const row = await getVendor(ex, tenantId, vendorId);
-      return row ? toVendorRecord(row) : null;
-    },
-    listVendors: async (tenantId: string, limit: number) => {
-      const rows = await listVendors(ex, tenantId, limit);
-      return rows.map(toVendorRecord);
-    },
-    putVendor: (vendor) =>
-      upsertVendor(ex, {
-        vendorId: vendor.vendorId,
-        tenantId: vendor.tenantId,
-        name: vendor.name,
-        status: vendor.status,
-        verifiedBeneficiaryRef: vendor.verifiedBeneficiaryRef,
-        verifiedAt: vendor.verifiedAt,
-        bankingChangedAt: vendor.bankingChangedAt,
-        bankingChangeVerifiedAt: vendor.bankingChangeVerifiedAt,
-        pendingBeneficiaryRef: vendor.pendingBeneficiaryRef,
-        allowedDestinationRefs: [...vendor.allowedDestinationRefs],
-        accountAgeDays: vendor.accountAgeDays,
-        dataClassification: vendor.dataClassification,
-      }).then(() => undefined),
-    getInvoice: async (tenantId: string, invoiceId: string) => {
-      const row = await getInvoice(ex, tenantId, invoiceId);
-      return row ? toInvoiceRecord(row) : null;
-    },
-    getPurchaseOrder: async (tenantId: string, purchaseOrderId: string) => {
-      const row = await getPurchaseOrder(ex, tenantId, purchaseOrderId);
-      return row ? toPurchaseOrderRecord(row) : null;
-    },
-    getLedgerEntry: async (tenantId: string, connectorIdempotencyKey: string) => {
-      const row = await getLedgerEntry(ex, tenantId, connectorIdempotencyKey);
-      return row ? toConnectorLedgerEntry(row) : null;
-    },
-    putLedgerEntryIfAbsent: async (entry): Promise<LedgerInsertResult> => {
-      const receipt = receiptToJson(entry.receipt) ?? {};
-      const result = await putLedgerEntryIfAbsent(ex, {
-        tenantId: entry.tenantId,
-        connectorId: entry.connectorId,
-        connectorIdempotencyKey: entry.connectorIdempotencyKey,
-        operation: entry.operation,
-        externalReference: entry.externalReference,
-        receipt,
-        amountMinor: BigInt(entry.receipt.amountMinor),
-        currency: entry.receipt.currency,
-        beneficiaryRef: entry.receipt.beneficiaryRef,
-        actionId: entry.actionId,
-        executionId: entry.executionId,
-        detailRedacted: { ...entry.detailRedacted },
-        recordedAt: entry.recordedAt,
-      });
-      return { inserted: result.inserted, entry: toConnectorLedgerEntry(result.entry) };
-    },
-    listLedger: async (tenantId: string) => {
-      const rows = await listLedger(ex, tenantId);
-      return rows.map(toConnectorLedgerEntry);
-    },
-    recordDispatch: (record: ConnectorDispatchRecord) =>
-      recordDispatch(ex, {
-        tenantId: record.tenantId,
-        connectorIdempotencyKey: record.connectorIdempotencyKey,
-        operation: record.operation,
-        startedAt: record.startedAt,
-      }).then(() => undefined),
-    completeDispatch: (tenantId: string, connectorIdempotencyKey: string, outcome: string, completedAt: Date) =>
-      completeDispatch(ex, tenantId, connectorIdempotencyKey, outcome, completedAt),
-    listDispatches: async (tenantId: string, connectorIdempotencyKey: string) => {
-      const rows = await listDispatches(ex, tenantId, connectorIdempotencyKey);
-      return rows.map(toConnectorDispatchRecord);
-    },
-  };
-
-  const audit: AuditSink = {
-    append: async (event: AuditSinkEvent) => {
-      await appendAuditEvent(
-        ex,
-        {
-          tenantId: event.tenantId,
-          actionId: event.actionId,
-          runId: event.runId,
-          actorType: event.actorType,
-          actorId: event.actorId,
-          eventType: event.eventType,
-          eventTime: event.eventTime,
-          traceId: event.traceId ?? newTraceId(),
-          policyRevisionId: event.policyRevisionId,
-          payload: { ...event.payloadRedacted },
-        },
-        { hmacKey: auditHmacKey },
+    markResult: (update: ExecutionResultUpdate) =>
+      run(update.tenantId, async (e) => {
+        const row = await markExecutionResult(e, update);
+        return row ? toPersistedExecution(row) : null;
+      }),
+    findLatestByAction: (actionId: string, tenantId: string) =>
+      run(tenantId, async (e) => {
+        const row = await findLatestExecutionByAction(e, actionId, tenantId);
+        return row ? toPersistedExecution(row) : null;
+      }),
+    findByIdempotencyKey: (connectorIdempotencyKey: string, tenantId: string) =>
+      run(tenantId, async (e) => {
+        const row = await findExecutionByConnectorKey(e, connectorIdempotencyKey, tenantId);
+        return row ? toPersistedExecution(row) : null;
+      }),
+    listUnknownOutcomes: (tenantId: string | null, limit?: number) => {
+      if (tenantId === null && root) {
+        // "All tenants" is not a thing this connection can ask for. Sweeps
+        // iterate tenants explicitly instead — failing loudly here is the point,
+        // because quietly returning [] would look like a healthy sweep that found
+        // nothing to reconcile.
+        throw new Error(
+          'listUnknownOutcomes(null) cannot enumerate tenants under row-level security; iterate tenant ids and pass one.',
+        );
+      }
+      return run(tenantId ?? '', (e) => listUnknownOutcomeExecutions(e, tenantId, limit ?? 100)).then((rows) =>
+        rows.map(toPersistedExecution),
       );
     },
   };
 
+  const actions: ActionStore = {
+    loadAction: (actionId: string, tenantId: string) =>
+      run(tenantId, async (e) => {
+        const row = await getAction(e, tenantId, actionId);
+        return row ? toActionRecord(row) : null;
+      }),
+    transitionState: (input: ActionTransitionInput) =>
+      run(input.tenantId, (e) =>
+        transitionAction(e, {
+          tenantId: input.tenantId,
+          actionId: input.actionId,
+          to: input.to,
+          expectedVersion: input.expectedVersion,
+          expectedFrom: input.expectedFrom,
+          patch: input.patch,
+          now: input.now,
+        }),
+      ),
+  };
+
+  const data: ConnectorDataStore = {
+    getVendor: (tenantId: string, vendorId: string) =>
+      run(tenantId, async (e) => {
+        const row = await getVendor(e, tenantId, vendorId);
+        return row ? toVendorRecord(row) : null;
+      }),
+    listVendors: (tenantId: string, limit: number) =>
+      run(tenantId, (e) => listVendors(e, tenantId, limit)).then((rows) => rows.map(toVendorRecord)),
+    putVendor: (vendor) =>
+      run(vendor.tenantId, (e) =>
+        upsertVendor(e, {
+          vendorId: vendor.vendorId,
+          tenantId: vendor.tenantId,
+          name: vendor.name,
+          status: vendor.status,
+          verifiedBeneficiaryRef: vendor.verifiedBeneficiaryRef,
+          verifiedAt: vendor.verifiedAt,
+          bankingChangedAt: vendor.bankingChangedAt,
+          bankingChangeVerifiedAt: vendor.bankingChangeVerifiedAt,
+          pendingBeneficiaryRef: vendor.pendingBeneficiaryRef,
+          allowedDestinationRefs: [...vendor.allowedDestinationRefs],
+          accountAgeDays: vendor.accountAgeDays,
+          dataClassification: vendor.dataClassification,
+        }),
+      ).then(() => undefined),
+    getInvoice: (tenantId: string, invoiceId: string) =>
+      run(tenantId, async (e) => {
+        const row = await getInvoice(e, tenantId, invoiceId);
+        return row ? toInvoiceRecord(row) : null;
+      }),
+    getPurchaseOrder: (tenantId: string, purchaseOrderId: string) =>
+      run(tenantId, async (e) => {
+        const row = await getPurchaseOrder(e, tenantId, purchaseOrderId);
+        return row ? toPurchaseOrderRecord(row) : null;
+      }),
+    getLedgerEntry: (tenantId: string, connectorIdempotencyKey: string) =>
+      run(tenantId, async (e) => {
+        const row = await getLedgerEntry(e, tenantId, connectorIdempotencyKey);
+        return row ? toConnectorLedgerEntry(row) : null;
+      }),
+    putLedgerEntryIfAbsent: (entry): Promise<LedgerInsertResult> =>
+      run(entry.tenantId, async (e) => {
+        const receipt = receiptToJson(entry.receipt) ?? {};
+        const result = await putLedgerEntryIfAbsent(e, {
+          tenantId: entry.tenantId,
+          connectorId: entry.connectorId,
+          connectorIdempotencyKey: entry.connectorIdempotencyKey,
+          operation: entry.operation,
+          externalReference: entry.externalReference,
+          receipt,
+          amountMinor: BigInt(entry.receipt.amountMinor),
+          currency: entry.receipt.currency,
+          beneficiaryRef: entry.receipt.beneficiaryRef,
+          actionId: entry.actionId,
+          executionId: entry.executionId,
+          detailRedacted: { ...entry.detailRedacted },
+          recordedAt: entry.recordedAt,
+        });
+        return { inserted: result.inserted, entry: toConnectorLedgerEntry(result.entry) };
+      }),
+    listLedger: (tenantId: string) =>
+      run(tenantId, (e) => listLedger(e, tenantId)).then((rows) => rows.map(toConnectorLedgerEntry)),
+    recordDispatch: (record: ConnectorDispatchRecord) =>
+      run(record.tenantId, (e) =>
+        recordDispatch(e, {
+          tenantId: record.tenantId,
+          connectorIdempotencyKey: record.connectorIdempotencyKey,
+          operation: record.operation,
+          startedAt: record.startedAt,
+        }),
+      ).then(() => undefined),
+    completeDispatch: (tenantId: string, connectorIdempotencyKey: string, outcome: string, completedAt: Date) =>
+      run(tenantId, (e) => completeDispatch(e, tenantId, connectorIdempotencyKey, outcome, completedAt)),
+    listDispatches: (tenantId: string, connectorIdempotencyKey: string) =>
+      run(tenantId, (e) => listDispatches(e, tenantId, connectorIdempotencyKey)).then((rows) =>
+        rows.map(toConnectorDispatchRecord),
+      ),
+  };
+
+  const audit: AuditSink = {
+    append: (event: AuditSinkEvent) =>
+      run(event.tenantId, (e) =>
+        appendAuditEvent(
+          e,
+          {
+            tenantId: event.tenantId,
+            actionId: event.actionId,
+            runId: event.runId,
+            actorType: event.actorType,
+            actorId: event.actorId,
+            eventType: event.eventType,
+            eventTime: event.eventTime,
+            traceId: event.traceId ?? newTraceId(),
+            policyRevisionId: event.policyRevisionId,
+            payload: { ...event.payloadRedacted },
+          },
+          { hmacKey: auditHmacKey },
+        ),
+      ).then(() => undefined),
+  };
+
   const outbox: DbOutboxStore = {
-    insert: async (draft: DbOutboxDraft) => {
-      const row = await insertOutboxEvent(ex, {
-        tenantId: draft.tenantId,
-        aggregateType: asString(draft.payload['aggregate_type']) ?? 'action',
-        aggregateId:
-          asString(draft.payload['action_id']) ??
-          asString(draft.payload['aggregate_id']) ??
-          `obx:${draft.traceId ?? 'untraced'}`,
-        eventType: draft.eventType,
-        queueName: draft.queueName,
-        payload: { ...draft.payload },
-        maxAttempts: draft.maxAttempts,
-        nextAttemptAt: draft.nextAttemptAt ?? null,
-        traceId: draft.traceId ?? null,
-      });
-      return claimedFromInsert(row);
-    },
-    claimPending: (limit: number, now: Date) => claimOutboxEvents(ex, limit, now),
-    markPublished: (id: string, publishedAt: Date) => markOutboxPublished(ex, id, publishedAt),
+    insert: (draft: DbOutboxDraft) =>
+      run(draft.tenantId, (e) =>
+        insertOutboxEvent(e, {
+          tenantId: draft.tenantId,
+          aggregateType: asString(draft.payload['aggregate_type']) ?? 'action',
+          aggregateId:
+            asString(draft.payload['action_id']) ??
+            asString(draft.payload['aggregate_id']) ??
+            `obx:${draft.traceId ?? 'untraced'}`,
+          eventType: draft.eventType,
+          queueName: draft.queueName,
+          payload: { ...draft.payload },
+          maxAttempts: draft.maxAttempts,
+          nextAttemptAt: draft.nextAttemptAt ?? null,
+          traceId: draft.traceId ?? null,
+        }),
+      ).then(claimedFromInsert),
+    claimPending: (limit: number, now: Date) => runBlind((e) => claimOutboxEvents(e, limit, now)),
+    markPublished: (id: string, publishedAt: Date) => runBlind((e) => markOutboxPublished(e, id, publishedAt)),
     markFailed: (id: string, errorClass: string, nextAttemptAt: Date) =>
-      markOutboxFailed(ex, id, errorClass, nextAttemptAt),
-    markDead: (id: string, errorClass: string) => markOutboxDead(ex, id, errorClass),
-    getDeadLetter: async (id: string) => {
-      const row = await getOutboxEvent(ex, id);
-      return row && row.status === 'DEAD' ? claimedFromInsert(row) : null;
-    },
-    countByStatus: () => countOutboxByStatus(ex),
+      runBlind((e) => markOutboxFailed(e, id, errorClass, nextAttemptAt)),
+    markDead: (id: string, errorClass: string) => runBlind((e) => markOutboxDead(e, id, errorClass)),
+    getDeadLetter: (id: string) =>
+      runBlind(async (e) => {
+        const row = await getOutboxEvent(e, id);
+        return row && row.status === 'DEAD' ? claimedFromInsert(row) : null;
+      }),
+    countByStatus: () => runBlind((e) => countOutboxByStatus(e)),
     // Reason/actor are accepted for port shape; the caller audits the redrive.
-    redrive: async (id: string, _reason: string, _actorId: string) => {
-      const row = await redriveOutboxEvent(ex, id);
-      return row ? claimedFromInsert(row) : null;
-    },
+    redrive: (id: string, _reason: string, _actorId: string) =>
+      runBlind(async (e) => {
+        const row = await redriveOutboxEvent(e, id);
+        return row ? claimedFromInsert(row) : null;
+      }),
   };
 
   return { permits, executions, actions, data, audit, outbox };
@@ -372,7 +431,7 @@ export async function resolveConnectorForTool(
   tenantId: string,
   toolName: string,
 ): Promise<ReturnType<typeof toConnectorRecord> | null> {
-  const row = await findConnectorForTool(db.db, tenantId, toolName);
+  const row = await withTenantTransaction(db, tenantId, (tx) => findConnectorForTool(tx, tenantId, toolName));
   return row ? toConnectorRecord(row) : null;
 }
 
@@ -403,7 +462,11 @@ export function createBroker(db: Db | DbExecutor, opts: BrokerFactoryOptions): B
     store: stores.permits,
     ...(clock ? { clock } : {}),
   });
-  const ex: DbExecutor = 'db' in db ? db.db : db;
+  const root = 'sql' in db ? db : null;
+  // Narrowed again rather than reusing `root`: TypeScript only refines `db`
+  // itself for the `in` check, so `root ? root.db : db` would leave the else
+  // branch as the union.
+  const ex: DbExecutor = 'sql' in db ? db.db : db;
   const broker = new Broker({
     permits,
     actions: stores.actions,
@@ -411,7 +474,11 @@ export function createBroker(db: Db | DbExecutor, opts: BrokerFactoryOptions): B
     data: stores.data,
     audit: stores.audit,
     resolveConnector: async (tenantId, toolName) => {
-      const row = await findConnectorForTool(ex, tenantId, toolName);
+      // Same rule as the stores: a root pool has to choose its tenant per call,
+      // a caller-supplied transaction already has one.
+      const row = root
+        ? await withTenantTransaction(root, tenantId, (tx) => findConnectorForTool(tx, tenantId, toolName))
+        : await findConnectorForTool(ex, tenantId, toolName);
       return row ? toConnectorRecord(row) : null;
     },
     getConnector: (record) =>

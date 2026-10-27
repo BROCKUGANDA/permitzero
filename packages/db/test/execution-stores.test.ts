@@ -199,10 +199,16 @@ describe('durable permit store', () => {
       ok: false,
       reason: DenyReason.PERMIT_REVOKED,
     });
-    // The cross-tenant lookup is optional on the port; the durable store provides it.
-    const crossTenant = stores.permits.findByTokenHashCrossTenant;
-    expect(crossTenant).toBeDefined();
-    expect(await crossTenant?.('0'.repeat(64))).toBeNull();
+    // The cross-tenant lookup is optional on the port, and the durable store
+    // deliberately does NOT implement it: the read it needs is another tenant's
+    // `permits` row, which is exactly what row-level security refuses. The broker
+    // falls back to PERMIT_MISSING, and the API still answers 404 for a foreign
+    // action id because the action lookup fails before the permit is checked.
+    expect(stores.permits.findByTokenHashCrossTenant).toBeUndefined();
+    expect(await service.verifyAndConsume(issued.token, { ...context, tenantId: 'ten_not_this_one' })).toMatchObject({
+      ok: false,
+      reason: DenyReason.PERMIT_MISSING,
+    });
   });
 });
 

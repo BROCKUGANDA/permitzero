@@ -64,6 +64,31 @@ export async function ensureDatabaseExists(adminDb: Db, name: string): Promise<v
 
 const DEFAULT_MIGRATIONS_DIR = fileURLToPath(new URL('../../../infra/migrations', import.meta.url));
 
+/**
+ * `0006_row_level_security.sql` creates the `pz_app` runtime role, which is a
+ * cluster-wide object that needs a password to connect over TCP the way every
+ * other role here does. The value is not committed to the repository: the file
+ * carries a `{{PZ_RLS_ROLE_PASSWORD}}` placeholder and the runner substitutes it
+ * from the environment.
+ *
+ * The character class is enforced because the substitution is textual — a
+ * password containing a quote would otherwise become part of the statement.
+ */
+const RLS_PASSWORD_PLACEHOLDER = /\{\{PZ_RLS_ROLE_PASSWORD\}\}/g;
+const RLS_PASSWORD_PATTERN = /^[A-Za-z0-9_.-]{1,128}$/;
+
+export function renderMigrationSql(text: string, env: NodeJS.ProcessEnv = process.env): string {
+  if (!RLS_PASSWORD_PLACEHOLDER.test(text)) return text;
+  RLS_PASSWORD_PLACEHOLDER.lastIndex = 0;
+  const value = env['PZ_RLS_ROLE_PASSWORD'] ?? 'pz_app_dev';
+  if (!RLS_PASSWORD_PATTERN.test(value)) {
+    throw new Error(
+      'PZ_RLS_ROLE_PASSWORD must match [A-Za-z0-9_.-]{1,128}: it is substituted into SQL text, so quoting characters are not allowed.',
+    );
+  }
+  return text.replace(RLS_PASSWORD_PLACEHOLDER, value);
+}
+
 export interface MigrateResult {
   applied: string[];
 }
@@ -79,7 +104,7 @@ export async function migrate(db: Db, opts?: { migrationsDir?: string }): Promis
     if (applied.has(file)) continue;
     const text = await readFile(path.join(dir, file), 'utf8');
     await withTransaction(db, async (tx) => {
-      await tx.execute(sql.raw(text));
+      await tx.execute(sql.raw(renderMigrationSql(text)));
       await tx.execute(sql`INSERT INTO _migrations (filename) VALUES (${file})`);
     });
     newly.push(file);

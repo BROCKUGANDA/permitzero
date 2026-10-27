@@ -8,6 +8,14 @@
  * quorum derived from the pinned revision. The deciding approval moves to
  * APPROVED and stops there — the permit is collected by the spending party
  * afterwards (see permits.ts), so the token never passes through the human.
+ *
+ * Row-level security means a decided request is three tenant transactions: read
+ * the action and the revision it pinned, write the decision, read the action
+ * back for the response. They stay separate because the response must describe
+ * the committed state rather than the write transaction's own uncommitted rows,
+ * and because the expiry path — a fourth transaction, on the rare branch that
+ * takes it — writes and then fails: inside the read transaction, the 409 would
+ * roll back the EXPIRED transition it just made.
  */
 import {
   ApprovalInvalidatedError,
@@ -27,8 +35,9 @@ import {
   getRevision,
   insertOutboxEvent,
   listApprovalsByAction,
+  tenantScope,
   transitionAction,
-  withTransaction,
+  withTenantTransaction,
 } from '@permitzero/db';
 import type { Db, DbTransaction } from '@permitzero/db';
 import { requireApprover } from './auth.js';
@@ -57,25 +66,38 @@ export async function decideApproval(
   requireApprover(principal);
   const now = deps.clock?.() ?? new Date();
   const tenantId = principal.tenantId;
+  const scope = tenantScope(deps.db, tenantId);
 
-  const action = await getAction(deps.db.db, tenantId, actionId);
-  if (!action) throw new NotFoundError();
+  const { action, revision } = await scope(async (ex) => {
+    const found = await getAction(ex, tenantId, actionId);
+    if (!found) throw new NotFoundError();
+    return {
+      action: found,
+      revision: found.policyRevisionId ? await getRevision(ex, tenantId, found.policyRevisionId) : null,
+    };
+  });
+
   if (action.state !== 'APPROVAL_REQUIRED') {
     throw new ConflictError(`This action is ${action.state}; only actions awaiting approval can be decided.`);
   }
   if (action.expiresAt && action.expiresAt.getTime() <= now.getTime()) {
     // The window lapsed. Re-read so a concurrent decision is reported
-    // truthfully instead of as an expiry.
-    const fresh = await getAction(deps.db.db, tenantId, actionId);
-    if (fresh && fresh.state === 'APPROVAL_REQUIRED') {
-      await transitionAction(deps.db.db, {
-        tenantId,
-        actionId,
-        to: 'EXPIRED',
-        expectedVersion: fresh.version,
-        now,
-      });
-    }
+    // truthfully instead of as an expiry. Its own transaction, and it has to
+    // commit: the request still fails with a 409 below, and a transaction
+    // unwound by that error would undo the EXPIRED transition.
+    const fresh = await scope(async (ex) => {
+      const current = await getAction(ex, tenantId, actionId);
+      if (current && current.state === 'APPROVAL_REQUIRED') {
+        await transitionAction(ex, {
+          tenantId,
+          actionId,
+          to: 'EXPIRED',
+          expectedVersion: current.version,
+          now,
+        });
+      }
+      return current;
+    });
     if (!fresh || fresh.state === 'APPROVAL_REQUIRED' || fresh.state === 'EXPIRED') {
       throw new ConflictError('The approval window has expired; submit the action again for a fresh review.');
     }
@@ -84,7 +106,6 @@ export async function decideApproval(
   if (!action.policyRevisionId) {
     throw new ConflictError('This action has no pinned policy revision and cannot be approved.');
   }
-  const revision = await getRevision(deps.db.db, tenantId, action.policyRevisionId);
   if (!revision) throw new NotFoundError('The pinned policy revision is no longer readable.');
   const requirements = approvalRequirementsFor(
     revision.policyJson as Parameters<typeof approvalRequirementsFor>[0],
@@ -105,7 +126,7 @@ export async function decideApproval(
   }
 
   try {
-    await withTransaction(deps.db, async (tx: DbTransaction) => {
+    await withTenantTransaction(deps.db, tenantId, async (tx: DbTransaction) => {
       const stores = createDbStores(tx, { auditHmacKey: deps.auditHmacKey });
       await createApproval(tx, {
         approvalId: newId('approval'),
@@ -213,7 +234,9 @@ export async function decideApproval(
     throw err;
   }
 
-  const reloaded = await getAction(deps.db.db, tenantId, actionId);
-  if (!reloaded) throw new NotFoundError();
-  return toActionDto(deps.db.db, tenantId, reloaded);
+  return scope(async (ex) => {
+    const reloaded = await getAction(ex, tenantId, actionId);
+    if (!reloaded) throw new NotFoundError();
+    return toActionDto(ex, tenantId, reloaded);
+  });
 }

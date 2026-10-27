@@ -60,7 +60,18 @@ export interface QueueWiring {
 }
 
 export interface AppContext {
+  /**
+   * The management pool (`DATABASE_URL`). Used for the migration-coverage
+   * readiness probe only. It is usually a superuser and therefore exempt from
+   * row-level security, so nothing that reads tenant rows goes through here.
+   */
   db: Db;
+  /**
+   * The pool every tenant read and write goes through. When it is the restricted
+   * `pz_app` role the database enforces isolation; when it is the same exempt
+   * role as `db` it is not, and `probeTenantIsolation()` says so.
+   */
+  runtime: Db;
   config: ApiConfig;
   model: ModelAdapter;
   broker: Broker;
@@ -73,6 +84,8 @@ export interface AppContext {
 
 export interface BuildAppDeps {
   db: Db;
+  /** Restricted runtime role. Defaults to `db`, which disables RLS enforcement. */
+  dbRuntime?: Db;
   config: ApiConfig;
   model: ModelAdapter;
   clock?: () => Date;
@@ -90,7 +103,8 @@ export interface BuiltApp {
 
 export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
   const clock = deps.clock ?? (() => new Date());
-  const { broker, stores } = createBroker(deps.db, {
+  const runtime = deps.dbRuntime ?? deps.db;
+  const { broker, stores } = createBroker(runtime, {
     signingKey: deps.config.permitSigningKey,
     signingKeyId: deps.config.permitSigningKeyId,
     auditHmacKey: deps.config.auditHmacKey,
@@ -113,7 +127,7 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
   }
 
   const shared = {
-    db: deps.db,
+    db: runtime,
     permitSigningKey: deps.config.permitSigningKey,
     permitSigningKeyId: deps.config.permitSigningKeyId,
     permitTtlSeconds: deps.config.permitTtlSeconds,
@@ -122,14 +136,15 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
   };
   const ctx: AppContext = {
     db: deps.db,
+    runtime,
     config: deps.config,
     model: deps.model,
     broker,
     queues,
     intake: { ...shared, model: deps.model },
-    approvals: { db: deps.db, auditHmacKey: deps.config.auditHmacKey, clock },
+    approvals: { db: runtime, auditHmacKey: deps.config.auditHmacKey, clock },
     collect: { ...shared },
-    execute: { db: deps.db, broker, clock },
+    execute: { db: runtime, broker, clock },
   };
 
   const app = Fastify({
@@ -140,7 +155,24 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
   app.setSerializerCompiler(serializerCompiler);
 
   await app.register(cors, { origin: true });
-  await app.register(helmet, { contentSecurityPolicy: false });
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:'],
+        connectSrc: ["'self'"],
+        fontSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+      },
+    },
+    hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
+    referrerPolicy: { policy: 'no-referrer' },
+  });
   await app.register(sensible);
   await app.register(rateLimit, {
     max: deps.config.rateLimitMax,

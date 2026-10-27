@@ -92,10 +92,6 @@ export async function findPermitByTokenHash(
   );
 }
 
-export async function findPermitByTokenHashAnyTenant(ex: DbExecutor, tokenHash: string): Promise<PermitRow | null> {
-  return first(ex.select().from(permits).where(eq(permits.tokenHash, tokenHash)).limit(1));
-}
-
 /** Latest permit issued for an action, for read models. Never returns the token (it is not stored). */
 export async function findLatestPermitByAction(
   ex: DbExecutor,

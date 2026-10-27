@@ -320,7 +320,7 @@ describe('action repositories', () => {
       expectedVersion: 3,
       now: NOW,
     });
-    const expired = await listExpiredApprovalActions(db.db, NOW, 10);
+    const expired = await listExpiredApprovalActions(db.db, tenantId(), NOW, 10);
     expect(expired.map((r) => r.actionId)).toEqual([staleId]);
     expect(expired.map((r) => r.actionId)).not.toContain(freshId);
   });

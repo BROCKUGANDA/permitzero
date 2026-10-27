@@ -35,6 +35,19 @@ function workerUrl(): string {
   return url.toString();
 }
 
+/**
+ * Same worker database, reached as the restricted `pz_app` role. The worker's
+ * sweeps and consumers run against this pool in production, so the tests follow
+ * it: a pass that forgot its tenant context finds nothing and fails its own
+ * assertion instead of silently scanning every tenant.
+ */
+function workerRuntimeUrl(): string {
+  const url = new URL(workerUrl());
+  url.username = 'pz_app';
+  url.password = process.env['PZ_RLS_ROLE_PASSWORD'] ?? 'pz_app_dev';
+  return url.toString();
+}
+
 let db: Db | null = null;
 
 export async function testDb(): Promise<Db> {
@@ -54,6 +67,10 @@ export async function testDb(): Promise<Db> {
   }
   db = createDb(url, { max: 5 });
   await migrate(db);
+  // One clean database per test file: a vitest worker slot is reused across
+  // files and its database outlives the process, so a file must not inherit the
+  // rows its predecessor left behind.
+  await resetDb(db);
   return db;
 }
 
@@ -78,6 +95,8 @@ export function testWorkerConfig(): WorkerConfig {
   return {
     appEnv: 'test',
     databaseUrl: workerUrl(),
+    databaseRuntimeUrl: workerRuntimeUrl(),
+    runtimePoolMax: 5,
     redisUrl: null,
     permitSigningKey: 'test-signing-key-0123456789abcdef',
     permitSigningKeyId: 'k-test',

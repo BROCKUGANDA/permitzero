@@ -7,6 +7,15 @@
  * commit leaves no trace; anything committed is complete — there is no state
  * in which a permit exists without its audit event.
  *
+ * Every statement is tenant-scoped. Row-level security (migration 0006) reads
+ * `app.tenant_id`, which is set transaction-locally, so a query on the root pool
+ * resolves no tenant and returns zero rows — reads therefore run inside
+ * `tenantScope`, one transaction per logical unit rather than per statement, and
+ * never nested: a transaction holds its pooled connection for its whole
+ * lifetime, so a second one opened from inside a callback would need a second
+ * connection. The model call is the reason the shape is read-tx → call →
+ * write-tx; a transaction must not span that network round trip.
+ *
  * Idempotency: the caller's key scopes to (tenant, principal). A completed
  * key replays the stored decision (without the permit token, which was
  * returned exactly once); the same key with a different payload is a 409.
@@ -43,11 +52,12 @@ import {
   insertOutboxEvent,
   listApprovalsByAction,
   setActionDecisionExtras,
+  tenantScope,
   toAgentRecord,
   transitionAction,
-  withTransaction,
+  withTenantTransaction,
 } from '@permitzero/db';
-import type { ActionRow, ApprovalRow, Db, DbTransaction, IdempotencyRecordRow } from '@permitzero/db';
+import type { ActionRow, ApprovalRow, Db, DbExecutor, DbTransaction, IdempotencyRecordRow } from '@permitzero/db';
 import { DomainError, ErrorCode, IdempotencyReuseError, ValidationError } from '@permitzero/domain';
 import type { ModelAdapter, ModelAnalysisOutcome } from './model.js';
 import { approvalRequirementsFor, evaluateQuorum } from './quorum.js';
@@ -125,16 +135,19 @@ async function replayFromRecord(
   now: Date,
 ): Promise<IntakeResult | null> {
   if (!record.resourceId) return null;
-  const action = await getAction(deps.db.db, tenantId, record.resourceId);
-  if (!action || !action.decision) return null;
-  return {
-    status: 200,
-    body: await buildResponseFromAction(deps, tenantId, action, {
-      replayed: true,
-      permitToken: null,
-      now,
-    }),
-  };
+  const resourceId = record.resourceId;
+  const read = tenantScope(deps.db, tenantId);
+  // The replayed action and the response rebuilt from it are one read — the
+  // action row, its revision, its approvals and the tenant mode all have to
+  // agree, so they share a transaction snapshot.
+  return read(async (ex): Promise<IntakeResult | null> => {
+    const action = await getAction(ex, tenantId, resourceId);
+    if (!action || !action.decision) return null;
+    return {
+      status: 200,
+      body: await responseFromAction(ex, tenantId, action, { replayed: true, permitToken: null, now }),
+    };
+  });
 }
 
 async function replayFromAction(
@@ -144,16 +157,15 @@ async function replayFromAction(
   idempotencyKey: string,
   now: Date,
 ): Promise<IntakeResult | null> {
-  const action = await getActionByIdempotency(deps.db.db, tenantId, agentId, idempotencyKey);
-  if (!action || !action.decision) return null;
-  return {
-    status: 200,
-    body: await buildResponseFromAction(deps, tenantId, action, {
-      replayed: true,
-      permitToken: null,
-      now,
-    }),
-  };
+  const read = tenantScope(deps.db, tenantId);
+  return read(async (ex): Promise<IntakeResult | null> => {
+    const action = await getActionByIdempotency(ex, tenantId, agentId, idempotencyKey);
+    if (!action || !action.decision) return null;
+    return {
+      status: 200,
+      body: await responseFromAction(ex, tenantId, action, { replayed: true, permitToken: null, now }),
+    };
+  });
 }
 
 export interface ResponseBuildOptions {
@@ -170,8 +182,9 @@ export interface ResponseBuildOptions {
 }
 
 /**
- * Rebuild a response from the stored action. Used for idempotent replays and
- * for the race path where a concurrent intake won the unique key.
+ * Rebuild a response from the stored action. Used by callers that hold an
+ * action row but no transaction; intake's own replay paths call
+ * `responseFromAction` inside the transaction they already opened instead.
  */
 export async function buildResponseFromAction(
   deps: IntakeDeps,
@@ -179,7 +192,21 @@ export async function buildResponseFromAction(
   action: ActionRow,
   opts: ResponseBuildOptions,
 ): Promise<CreateActionResponse> {
-  const ex = deps.db.db;
+  const read = tenantScope(deps.db, tenantId);
+  return read((ex) => responseFromAction(ex, tenantId, action, opts));
+}
+
+/**
+ * The response's three reads plus the assembly. Taking the executor keeps the
+ * rebuild inside whatever scope the caller is already in — nesting a second
+ * transaction here would cost a second pool connection.
+ */
+async function responseFromAction(
+  ex: DbExecutor,
+  tenantId: string,
+  action: ActionRow,
+  opts: ResponseBuildOptions,
+): Promise<CreateActionResponse> {
   const revision = action.policyRevisionId ? await getRevision(ex, tenantId, action.policyRevisionId) : null;
   const approvals: readonly ApprovalRow[] =
     action.decision === Decision.REQUIRE_APPROVAL ? await listApprovalsByAction(ex, tenantId, action.actionId) : [];
@@ -241,6 +268,9 @@ export async function intakeAction(
 ): Promise<IntakeResult> {
   const now = deps.clock?.() ?? new Date();
   const tenantId = principal.tenantId;
+  // Opens one tenant transaction per logical read. RLS resolves the tenant from
+  // a transaction-local setting, so a statement on the root pool reads nothing.
+  const read = tenantScope(deps.db, tenantId);
 
   if (!(SUPPORTED_TOOLS as readonly string[]).includes(body.tool_name)) {
     throw new ValidationError(`Unsupported tool '${body.tool_name}'.`, { tool_name: body.tool_name });
@@ -256,7 +286,14 @@ export async function intakeAction(
   if (principal.actorType === 'AGENT' && principal.agentId !== body.agent_id) {
     throw new ForbiddenError('Agents may only submit actions for themselves.');
   }
-  const agentRow = await getAgent(deps.db.db, tenantId, body.agent_id);
+  // Agent and mode are one read — a transaction per statement would borrow a pool
+  // connection for each, and nothing between the two lookups depends on their
+  // values. The checks below keep their original order, so a rejected request
+  // still sees the error it saw before.
+  const { agentRow, modeRow } = await read(async (ex) => ({
+    agentRow: await getAgent(ex, tenantId, body.agent_id),
+    modeRow: await getEnforcementMode(ex, tenantId),
+  }));
   if (!agentRow) {
     throw new NotFoundError('Unknown agent for this tenant.');
   }
@@ -275,13 +312,14 @@ export async function intakeAction(
   }
 
   const sideEffecting = isSideEffectingTool(body.tool_name);
-  const modeRow = await getEnforcementMode(deps.db.db, tenantId);
   if (sideEffecting && modeRow?.mode === 'EMERGENCY_STOP') {
     throw new EmergencyStopActiveError();
   }
 
   const requestHash = requestHashFor(body);
-  const existing = await findIdempotencyRecord(deps.db.db, tenantId, principalKey(principal), body.idempotency_key);
+  const existing = await read((ex) =>
+    findIdempotencyRecord(ex, tenantId, principalKey(principal), body.idempotency_key),
+  );
   if (existing) {
     if (existing.requestHash !== requestHash) {
       throw new IdempotencyReuseError(existing.resourceId ?? undefined);
@@ -300,30 +338,39 @@ export async function intakeAction(
     // FAILED records fall through: same payload, a previous attempt died.
   }
 
-  const pin = await pinPublishedPolicy(deps.db.db, tenantId);
-  if (!pin.ok) {
-    // No revision, no evaluation — not even an INDETERMINATE is meaningful,
-    // because every decision is bound to the revision that produced it.
-    throw new PolicyEngineUnavailableError(
-      `No published policy is available for this tenant (${pin.detail}); failing closed.`,
-    );
-  }
-
-  // Lookups first (hints null), then the advisory screen over what they found.
-  const draftInput = await buildPolicyInput(deps.db.db, {
-    tenantId,
-    environment: body.environment,
-    agent: toAgentRecord(agentRow),
-    principal,
-    toolName: body.tool_name,
-    operation,
-    taskPurpose: body.task_purpose,
-    args,
-    evidenceRefs: evidenceRefsFrom(body),
-    requestedAt,
-    runId: body.run_id,
-    riskHints: null,
-    requiredModelSignalUnavailable: false,
+  // The pin and the authoritative lookups are one read — every number the policy
+  // is evaluated against comes off the same snapshot as the revision itself. A
+  // missing pin throws before any of those lookups run, and the model call stays
+  // outside the transaction: it must not hold a pooled connection across a
+  // network round trip.
+  const { pin, draftInput } = await read(async (ex) => {
+    const pinned = await pinPublishedPolicy(ex, tenantId);
+    if (!pinned.ok) {
+      // No revision, no evaluation — not even an INDETERMINATE is meaningful,
+      // because every decision is bound to the revision that produced it.
+      throw new PolicyEngineUnavailableError(
+        `No published policy is available for this tenant (${pinned.detail}); failing closed.`,
+      );
+    }
+    // Lookups first (hints null), then the advisory screen over what they found.
+    return {
+      pin: pinned,
+      draftInput: await buildPolicyInput(ex, {
+        tenantId,
+        environment: body.environment,
+        agent: toAgentRecord(agentRow),
+        principal,
+        toolName: body.tool_name,
+        operation,
+        taskPurpose: body.task_purpose,
+        args,
+        evidenceRefs: evidenceRefsFrom(body),
+        requestedAt,
+        runId: body.run_id,
+        riskHints: null,
+        requiredModelSignalUnavailable: false,
+      }),
+    };
   });
 
   let analysis: ModelAnalysisOutcome = {
@@ -377,7 +424,7 @@ export async function intakeAction(
   // unique key stays claimed by this payload either way.
   const idemId = existing?.status === 'FAILED' ? existing.idempotencyId : newId('idempotency');
   try {
-    const committed = await withTransaction(deps.db, async (tx: DbTransaction) => {
+    const committed = await withTenantTransaction(deps.db, tenantId, async (tx: DbTransaction) => {
       if (!existing) {
         await createIdempotencyRecord(tx, {
           id: idemId,
@@ -574,22 +621,28 @@ export async function intakeAction(
       return { finalAction, issued };
     });
 
-    const stored = await getAction(deps.db.db, tenantId, actionId);
-    if (!stored) throw new Error('intake committed but the action could not be reloaded');
-    return {
-      status: 201,
-      body: await buildResponseFromAction(deps, tenantId, stored, {
-        replayed: false,
-        permitToken: committed.issued,
-        now,
-        ...(requirements ? { requirements } : {}),
-      }),
-    };
+    // Reload and response are one read — the row the response is assembled from
+    // has to be the row the reload found, not a later revision of it.
+    return read(async (ex): Promise<IntakeResult> => {
+      const stored = await getAction(ex, tenantId, actionId);
+      if (!stored) throw new Error('intake committed but the action could not be reloaded');
+      return {
+        status: 201,
+        body: await responseFromAction(ex, tenantId, stored, {
+          replayed: false,
+          permitToken: committed.issued,
+          now,
+          ...(requirements ? { requirements } : {}),
+        }),
+      };
+    });
   } catch (err) {
     if (pgCode(err) === '23505') {
       // Lost a race with an identical intake (or a zombie IN_PROGRESS row
       // whose owner died). Re-read outside the rolled-back transaction.
-      const record = await findIdempotencyRecord(deps.db.db, tenantId, principalKey(principal), body.idempotency_key);
+      const record = await read((ex) =>
+        findIdempotencyRecord(ex, tenantId, principalKey(principal), body.idempotency_key),
+      );
       if (record?.status === 'COMPLETED' && record.requestHash === requestHash) {
         const replayed = await replayFromRecord(deps, tenantId, record, now);
         if (replayed) return replayed;

@@ -112,6 +112,13 @@ export interface PermitStore {
    * secret, so this is not an existence oracle for arbitrary ids. Callers that
    * omit it simply get `PERMIT_MISSING` in both cases. The API layer MUST map
    * `PERMIT_TENANT_MISMATCH` to HTTP 404, never 403 (PRD §7.5).
+   *
+   * `@permitzero/db` deliberately stopped implementing this once tenant
+   * isolation moved into the database: distinguishing the two requires reading
+   * another tenant's `permits` row, which is the exact read row-level security
+   * now refuses. Nothing is lost at the HTTP boundary either way — a permit
+   * presented against an action the caller cannot see already returns 404 from
+   * the action lookup, before the broker is reached.
    */
   findByTokenHashCrossTenant?(tokenHash: string): Promise<PersistedPermit | null>;
 }

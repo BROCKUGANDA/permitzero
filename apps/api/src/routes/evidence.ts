@@ -6,11 +6,11 @@
 import { auditBundleSchema } from '@permitzero/schemas';
 import type { AppContext, ZodFastifyInstance } from '../app.js';
 import { authenticateToken } from '../auth.js';
-import { listAuditEvents, verifyAuditChain, getAuditHead } from '@permitzero/db';
+import { listAuditEvents, tenantScope, verifyAuditChain, getAuditHead } from '@permitzero/db';
 
 async function authHook(app: ZodFastifyInstance, ctx: AppContext): Promise<void> {
   app.addHook('preHandler', async (request) => {
-    request.principal = await authenticateToken(ctx.db.db, request.headers.authorization, new Date());
+    request.principal = await authenticateToken(ctx.runtime, request.headers.authorization, new Date());
   });
 }
 
@@ -24,9 +24,24 @@ export async function evidenceRoutes(app: ZodFastifyInstance, ctx: AppContext): 
     },
     async (request) => {
       const tenantId = request.principal.tenantId;
-      const head = await getAuditHead(ctx.db.db, tenantId);
-      const page = await listAuditEvents(ctx.db.db, tenantId, {}, { limit: 10000 });
-      const verification = await verifyAuditChain(ctx.db.db, tenantId, { hmacKey: ctx.config.auditHmacKey });
+      // The head, the event page and the chain verification are ONE read of ONE
+      // transaction, and that has to be the case: this payload is an evidentiary
+      // artifact whose manifest asserts a head hash and a chain verdict for the
+      // events it ships. Read across three transactions, an append landing between
+      // them would produce a bundle that is internally inconsistent — events up to
+      // sequence N, a head at N+2, a verdict computed from a third state — and the
+      // bundle would then "prove" a chain that is not the one it contains. A single
+      // scope also pins one pool connection rather than three.
+      //
+      // All three statements carry the tenant: `audit_events` has a `tenant_id`
+      // column, so it is under row-level security, and on the root pool each would
+      // return zero rows — an empty bundle that verifies cleanly.
+      const scope = tenantScope(ctx.runtime, tenantId);
+      const { head, page, verification } = await scope(async (ex) => ({
+        head: await getAuditHead(ex, tenantId),
+        page: await listAuditEvents(ex, tenantId, {}, { limit: 10000 }),
+        verification: await verifyAuditChain(ex, tenantId, { hmacKey: ctx.config.auditHmacKey }),
+      }));
 
       const sequences = page.rows.map((r) => r.sequence);
       const firstSeq = sequences.length ? Math.min(...sequences) : 0;

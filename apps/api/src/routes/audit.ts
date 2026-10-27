@@ -4,7 +4,7 @@
  */
 import { auditPageSchema, auditQuerySchema } from '@permitzero/schemas';
 import { z } from 'zod';
-import { listAuditEvents, verifyAuditChain } from '@permitzero/db';
+import { listAuditEvents, tenantScope, verifyAuditChain } from '@permitzero/db';
 import type { AppContext, ZodFastifyInstance } from '../app.js';
 import { authenticateToken } from '../auth.js';
 
@@ -18,7 +18,7 @@ const verifyResponseSchema = z
 
 async function authHook(app: ZodFastifyInstance, ctx: AppContext): Promise<void> {
   app.addHook('preHandler', async (request) => {
-    request.principal = await authenticateToken(ctx.db.db, request.headers.authorization, new Date());
+    request.principal = await authenticateToken(ctx.runtime, request.headers.authorization, new Date());
   });
 }
 
@@ -35,17 +35,24 @@ export async function auditRoutes(app: ZodFastifyInstance, ctx: AppContext): Pro
     },
     async (request) => {
       const q = request.query;
-      const page = await listAuditEvents(
-        ctx.db.db,
-        request.principal.tenantId,
-        {
-          ...(q.action_id ? { actionId: q.action_id } : {}),
-          ...(q.run_id ? { runId: q.run_id } : {}),
-          ...(q.event_type ? { eventType: q.event_type } : {}),
-          ...(q.from ? { from: q.from } : {}),
-          ...(q.to ? { to: q.to } : {}),
-        },
-        { limit: q.limit ?? 50, cursor: q.cursor ?? null },
+      const tenantId = request.principal.tenantId;
+      // `audit_events` carries `tenant_id`, so it is under RLS: the read has to
+      // run on the transaction that sets `app.tenant_id`, on the runtime pool.
+      // One statement, so one scope is all it needs — no network call inside.
+      const scope = tenantScope(ctx.runtime, tenantId);
+      const page = await scope((ex) =>
+        listAuditEvents(
+          ex,
+          tenantId,
+          {
+            ...(q.action_id ? { actionId: q.action_id } : {}),
+            ...(q.run_id ? { runId: q.run_id } : {}),
+            ...(q.event_type ? { eventType: q.event_type } : {}),
+            ...(q.from ? { from: q.from } : {}),
+            ...(q.to ? { to: q.to } : {}),
+          },
+          { limit: q.limit ?? 50, cursor: q.cursor ?? null },
+        ),
       );
       return {
         data: page.rows.map((r) => ({
@@ -76,9 +83,12 @@ export async function auditRoutes(app: ZodFastifyInstance, ctx: AppContext): Pro
       schema: { response: { 200: verifyResponseSchema } },
     },
     async (request) => {
-      const result = await verifyAuditChain(ctx.db.db, request.principal.tenantId, {
-        hmacKey: ctx.config.auditHmacKey,
-      });
+      const tenantId = request.principal.tenantId;
+      // Verification recomputes the chain from one tenant's whole log. It is a
+      // single SELECT, so it gets a single tenant-scoped transaction; on the root
+      // pool RLS would hand it zero rows and report an empty log as `chain_valid`.
+      const scope = tenantScope(ctx.runtime, tenantId);
+      const result = await scope((ex) => verifyAuditChain(ex, tenantId, { hmacKey: ctx.config.auditHmacKey }));
       return {
         checked: result.checked,
         chain_valid: result.chainValid,

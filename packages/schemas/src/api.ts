@@ -490,6 +490,28 @@ export const auditPageSchema = pageSchema(auditEventDtoSchema);
 
 export const healthLiveSchema = z.object({ status: z.literal('ok') }).strict();
 
+/**
+ * What the database reports it enforces for the pool that serves tenant
+ * traffic (`rlsEnforcementState()`), rather than what configuration claims.
+ * `subject_to_rls` and `enforced` are separate on purpose: a superuser or
+ * BYPASSRLS connection reads every tenant's rows no matter how many policies
+ * exist, so policy coverage alone would be a misleading green check.
+ */
+export const tenantIsolationSchema = z
+  .object({
+    role: z.string(),
+    superuser: z.boolean(),
+    bypassrls: z.boolean(),
+    subject_to_rls: z.boolean(),
+    enforced: z.boolean(),
+    tables_total: z.number().int(),
+    tables_enforced: z.number().int(),
+    unenforced_tables: z.array(z.string()),
+    coverage_readable: z.boolean(),
+  })
+  .strict();
+export type TenantIsolation = z.infer<typeof tenantIsolationSchema>;
+
 export const healthReadySchema = z
   .object({
     status: z.enum(['ready', 'not_ready']),
@@ -499,6 +521,10 @@ export const healthReadySchema = z
      * (PRD §10.8). */
     protected_writes_allowed: z.boolean(),
     reasons: z.array(z.string()),
+    /** Null when the probe itself could not run — unknown, not a pass. */
+    tenant_isolation: tenantIsolationSchema.nullable(),
+    /** Non-blocking visibility: `reasons` blocks readiness, these do not. */
+    warnings: z.array(z.string()),
   })
   .strict();
 

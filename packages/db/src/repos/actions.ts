@@ -294,11 +294,26 @@ export async function sumSucceededPaymentsSince(ex: DbExecutor, tenantId: string
  * Approval windows that lapsed without a quorum. The worker sweeps these to
  * EXPIRED; cross-tenant by design (service role), oldest first.
  */
-export async function listExpiredApprovalActions(ex: DbExecutor, now: Date, limit: number): Promise<ActionRow[]> {
+/**
+ * Actions whose approval window has lapsed, within ONE tenant.
+ *
+ * The tenant filter is not redundant bookkeeping. Under row-level security the
+ * caller's context already restricts the rows, but the filter is what makes the
+ * `idx_actions_tenant_state_created_at` index usable and what keeps the query
+ * meaningful on an admin connection, where RLS is off. A cross-tenant version of
+ * this sweep would also let one tenant's backlog consume the whole `limit` and
+ * starve every other tenant out of its pass.
+ */
+export async function listExpiredApprovalActions(
+  ex: DbExecutor,
+  tenantId: string,
+  now: Date,
+  limit: number,
+): Promise<ActionRow[]> {
   return ex
     .select()
     .from(actions)
-    .where(and(eq(actions.state, 'APPROVAL_REQUIRED'), lte(actions.expiresAt, now)))
+    .where(and(eq(actions.tenantId, tenantId), eq(actions.state, 'APPROVAL_REQUIRED'), lte(actions.expiresAt, now)))
     .orderBy(asc(actions.expiresAt))
     .limit(limit);
 }

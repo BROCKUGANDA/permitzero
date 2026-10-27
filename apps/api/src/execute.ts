@@ -23,7 +23,14 @@ import type { Principal } from '@permitzero/domain';
 import type { ExecuteActionRequest, ExecuteActionResponse } from '@permitzero/schemas';
 import { executeActionResponseSchema } from '@permitzero/schemas';
 import { Broker } from '@permitzero/broker';
-import { findConnectorForTool, getAction, getEnforcementMode, insertOutboxEvent, toActionRecord } from '@permitzero/db';
+import {
+  findConnectorForTool,
+  getAction,
+  getEnforcementMode,
+  insertOutboxEvent,
+  tenantScope,
+  toActionRecord,
+} from '@permitzero/db';
 import type { Db } from '@permitzero/db';
 import { requireExecute } from './auth.js';
 
@@ -43,25 +50,33 @@ export async function executeApprovedAction(
 ): Promise<ExecuteActionResponse> {
   const now = deps.clock?.() ?? new Date();
   const tenantId = principal.tenantId;
+  const scope = tenantScope(deps.db, tenantId);
 
-  const action = await getAction(deps.db.db, tenantId, actionId);
-  if (!action) throw new NotFoundError();
-  requireExecute(principal, toActionRecord(action));
-  if (action.state !== 'PERMIT_ISSUED') {
-    throw new ConflictError(`This action is ${action.state}; only actions with a live permit can execute.`);
-  }
-
-  const mode = (await getEnforcementMode(deps.db.db, tenantId))?.mode ?? 'ENFORCED';
-  if ((BLOCKED_MODES as readonly string[]).includes(mode)) {
-    if (mode === 'EMERGENCY_STOP') throw new EmergencyStopActiveError();
-    throw new ConflictError(`Mode ${mode} does not dispatch side effects.`);
-  }
-  if (mode === 'SIMULATION') {
-    const connector = await findConnectorForTool(deps.db.db, tenantId, action.toolName);
-    if (!connector?.simulated) {
-      throw new ConflictError('Simulation mode only dispatches to simulated connectors.');
+  // Everything the dispatch decision needs is a read, so it shares one tenant
+  // transaction — and that transaction closes before `deps.broker.execute`,
+  // which opens its own on the runtime pool. Holding a scope across the call
+  // would park a pool connection for the whole connector round-trip.
+  const action = await scope(async (ex) => {
+    const found = await getAction(ex, tenantId, actionId);
+    if (!found) throw new NotFoundError();
+    requireExecute(principal, toActionRecord(found));
+    if (found.state !== 'PERMIT_ISSUED') {
+      throw new ConflictError(`This action is ${found.state}; only actions with a live permit can execute.`);
     }
-  }
+
+    const mode = (await getEnforcementMode(ex, tenantId))?.mode ?? 'ENFORCED';
+    if ((BLOCKED_MODES as readonly string[]).includes(mode)) {
+      if (mode === 'EMERGENCY_STOP') throw new EmergencyStopActiveError();
+      throw new ConflictError(`Mode ${mode} does not dispatch side effects.`);
+    }
+    if (mode === 'SIMULATION') {
+      const connector = await findConnectorForTool(ex, tenantId, found.toolName);
+      if (!connector?.simulated) {
+        throw new ConflictError('Simulation mode only dispatches to simulated connectors.');
+      }
+    }
+    return found;
+  });
 
   const result = await deps.broker.execute({
     tenantId,
@@ -74,7 +89,7 @@ export async function executeApprovedAction(
 
   switch (result.outcome) {
     case 'SUCCEEDED': {
-      const reloaded = await getAction(deps.db.db, tenantId, actionId);
+      const reloaded = await scope((ex) => getAction(ex, tenantId, actionId));
       return executeActionResponseSchema.parse({
         action_id: actionId,
         execution_id: result.execution.executionId,
@@ -96,15 +111,17 @@ export async function executeApprovedAction(
       // Nudge the reconciler now; the worker's periodic sweep is the backstop
       // if this insert fails, so a failure here must not mask the 409.
       try {
-        await insertOutboxEvent(deps.db.db, {
-          tenantId,
-          aggregateType: 'execution',
-          aggregateId: result.execution.executionId,
-          eventType: 'execution.unknown_outcome',
-          queueName: 'pz.reconciliation',
-          payload: { action_id: actionId, execution_id: result.execution.executionId },
-          traceId: action.traceId,
-        });
+        await scope((ex) =>
+          insertOutboxEvent(ex, {
+            tenantId,
+            aggregateType: 'execution',
+            aggregateId: result.execution.executionId,
+            eventType: 'execution.unknown_outcome',
+            queueName: 'pz.reconciliation',
+            payload: { action_id: actionId, execution_id: result.execution.executionId },
+            traceId: action.traceId,
+          }),
+        );
       } catch (err) {
         console.error(
           `unknown-outcome nudge lost for execution ${result.execution.executionId}: ${err instanceof Error ? err.message : String(err)}`,

@@ -2,7 +2,7 @@
   "name": "permitzero",
   "version": "0.1.0",
   "private": true,
-  "description": "PermitZero — Authority before action. Runtime authorization and transaction-control plane for AI agents.",
+  "description": "PermitZero \u2014 Authority before action. Runtime authorization and transaction-control plane for AI agents.",
   "license": "MIT",
   "engines": {
     "node": ">=20.0.0",
@@ -48,6 +48,7 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.20.0",
-    "vitest": "^3.0.5"
+    "vitest": "^3.0.5",
+    "autocannon": "^8.0.0"
   }
 }
