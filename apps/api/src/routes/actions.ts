@@ -18,6 +18,7 @@ import {
 import { z } from 'zod';
 import { getAction, listActions } from '@permitzero/db';
 import { NotFoundError } from '@permitzero/domain';
+import type { ActionState } from '@permitzero/domain';
 import type { AppContext, ZodFastifyInstance } from '../app.js';
 import { authenticateToken } from '../auth.js';
 import { intakeAction } from '../intake.js';
@@ -74,7 +75,7 @@ export async function actionRoutes(app: ZodFastifyInstance, ctx: AppContext): Pr
         ctx.db.db,
         request.principal.tenantId,
         {
-          ...(query.state ? { states: [query.state] } : {}),
+          ...(query.state ? { states: [query.state as ActionState] } : {}),
           ...(query.tool_name ? { toolName: query.tool_name } : {}),
           ...(query.agent_id ? { agentId: query.agent_id } : {}),
           ...(query.run_id ? { runId: query.run_id } : {}),

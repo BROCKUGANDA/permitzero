@@ -7,7 +7,7 @@
  * vendor id and destination against authoritative records.
  */
 import { z } from 'zod';
-import { RiskSignalKind } from '@permitzero/domain';
+import { RiskSignalKind } from '@permitzero/domain/reason-codes';
 
 export const RISK_HINTS_SCHEMA_VERSION = 'risk-hints.v1';
 

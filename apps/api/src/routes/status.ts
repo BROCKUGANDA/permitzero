@@ -3,7 +3,7 @@
  * enforcement posture, the model provider's honest state and connector
  * health — the three things an operator asks about first.
  */
-import { statusSchema } from '@permitzero/schemas';
+import { meSchema, statusSchema } from '@permitzero/schemas';
 import {
   countOutboxByStatus,
   getEnforcementMode,
@@ -19,6 +19,18 @@ const DEGRADED_QUEUE_DEPTH = 100;
 export async function statusRoutes(app: ZodFastifyInstance, ctx: AppContext): Promise<void> {
   app.addHook('preHandler', async (request) => {
     request.principal = await authenticateToken(ctx.db.db, request.headers.authorization, new Date());
+  });
+
+  app.get('/me', { schema: { response: { 200: meSchema } } }, async (request) => {
+    const p = request.principal;
+    return {
+      actor_type: p.actorType,
+      actor_id: p.actorId,
+      tenant_id: p.tenantId,
+      display_name: p.displayName,
+      roles: [...p.roles],
+      environment: p.environment,
+    };
   });
 
   app.get('/status', { schema: { response: { 200: statusSchema } } }, async (request) => {

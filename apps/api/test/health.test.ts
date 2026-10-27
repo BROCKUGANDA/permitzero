@@ -43,6 +43,23 @@ describe('health and status', () => {
     await closeApp(t);
   });
 
+  it('identifies the caller without leaking the credential', async () => {
+    const user = await getJson(t, '/v1/me', t.approver1Token);
+    expect(user.status).toBe(200);
+    expect(user.json).toMatchObject({
+      actor_type: 'USER',
+      tenant_id: t.tenantId,
+      roles: ['APPROVER'],
+      environment: 'DEMO',
+    });
+    expect(user.json).not.toHaveProperty('credentialId');
+    const agent = await getJson(t, '/v1/me', t.agentToken);
+    expect(agent.json).toMatchObject({ actor_type: 'AGENT', actor_id: t.agentId, roles: [] });
+    const service = await getJson(t, '/v1/me', t.serviceToken);
+    expect(service.json).toMatchObject({ actor_type: 'WORKER', roles: ['SERVICE_AGENT'] });
+    await closeApp(t);
+  });
+
   it('describes the tenant posture including disabled subsystems', async () => {
     const res = await getJson(t, '/v1/status', t.agentToken);
     expect(res.status).toBe(200);

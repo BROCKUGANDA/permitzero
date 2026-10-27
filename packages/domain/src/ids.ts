@@ -10,6 +10,9 @@
  * and trace ID are distinct from any client-supplied request ID).
  */
 import { randomBytes } from 'node:crypto';
+import { ID_PREFIX, type IdKind } from './id-prefixes.js';
+
+export { ID_PREFIX, type IdKind } from './id-prefixes.js';
 
 const ENCODING = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const ENCODING_LEN = ENCODING.length; // 32
@@ -53,34 +56,6 @@ export function ulid(seedTime: number = Date.now()): string {
   }
   return encodeTime(now, TIME_LEN) + (lastRandom as number[]).map((d) => ENCODING[d]).join('');
 }
-
-/** ID prefixes. Add a prefix here and it becomes part of the parsed contract. */
-export const ID_PREFIX = {
-  tenant: 'ten',
-  user: 'usr',
-  membership: 'mbr',
-  agent: 'agt',
-  credential: 'cred',
-  policy: 'pol',
-  policyRevision: 'polrev',
-  action: 'act',
-  trace: 'trc',
-  approval: 'appr',
-  permit: 'pmt',
-  execution: 'exe',
-  connector: 'con',
-  auditEvent: 'aev',
-  outboxEvent: 'obx',
-  run: 'run',
-  simulation: 'sim',
-  replay: 'rpl',
-  modelEvaluation: 'mev',
-  idempotency: 'idm',
-  ledger: 'ldg',
-  dispatch: 'dsp',
-} as const;
-
-export type IdKind = keyof typeof ID_PREFIX;
 
 const PREFIX_TO_KIND = new Map<string, IdKind>(
   Object.entries(ID_PREFIX).map(([kind, prefix]) => [prefix as string, kind as IdKind]),

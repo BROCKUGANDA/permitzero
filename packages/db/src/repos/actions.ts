@@ -4,9 +4,9 @@
  * after `assertTransition` validation; illegal transitions throw (a bug), lost
  * races return typed conflicts.
  */
-import { and, asc, desc, eq, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lte, sql } from 'drizzle-orm';
 import { assertTransition } from '@permitzero/domain';
-import type { ActorType, Environment, EvidenceRef, RiskSignal } from '@permitzero/domain';
+import type { ActionState, ActorType, Environment, EvidenceRef, RiskSignal } from '@permitzero/domain';
 import type { ActionTransitionInput, ActionTransitionResult } from '@permitzero/broker';
 import type { DbExecutor } from '../client.js';
 import { assertSafeMinor, toActionRecord } from '../mappers.js';
@@ -163,7 +163,8 @@ export async function setActionDecisionExtras(
 }
 
 export interface ListActionsFilters {
-  states?: string[];
+  /** Unknown states simply match nothing; the route casts the raw query string. */
+  states?: ActionState[];
   agentId?: string;
   runId?: string;
   toolName?: string;
@@ -202,7 +203,9 @@ export async function listActions(
 ): Promise<ListActionsResult> {
   const conditions = [eq(actions.tenantId, tenantId)];
   if (filters.states && filters.states.length > 0) {
-    conditions.push(sql`${actions.state} = ANY(${filters.states})`);
+    // inArray, not `= ANY(array-literal)`: the driver binds JS arrays as
+    // scalar strings, which postgres rejects as a malformed array literal.
+    conditions.push(inArray(actions.state, filters.states));
   }
   if (filters.agentId) conditions.push(eq(actions.agentId, filters.agentId));
   if (filters.runId) conditions.push(eq(actions.runId, filters.runId));

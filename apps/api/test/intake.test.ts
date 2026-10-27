@@ -306,4 +306,29 @@ describe('intake', () => {
     expect(screenedBody.reason_codes).toContain('MODEL_RISK_SIGNAL_ESCALATION');
     await closeApp(t);
   });
+
+  it('lists actions filtered by state', async () => {
+    const allowed = await postJson(t, '/v1/actions', t.agentToken, intakeBody(t.agentId));
+    expect(allowed.status).toBe(201);
+    const denied = await postJson(
+      t,
+      '/v1/actions',
+      t.agentToken,
+      intakeBody(t.agentId, { arguments: paymentArgs({ vendor_id: 'VEN-NOPE' }) }),
+    );
+    expect(denied.status).toBe(201);
+
+    const filtered = await getJson(t, '/v1/actions?limit=50&state=DENIED', t.agentToken);
+    expect(filtered.status).toBe(200);
+    const rows = (filtered.json as { data: Array<{ action_id: string; state: string }> }).data;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      action_id: (denied.json as IntakeResponse).action_id,
+      state: 'DENIED',
+    });
+
+    const all = await getJson(t, '/v1/actions?limit=50', t.agentToken);
+    expect(((all.json as { data: unknown[] }).data)).toHaveLength(2);
+    await closeApp(t);
+  });
 });

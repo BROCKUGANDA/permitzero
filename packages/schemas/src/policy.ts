@@ -15,7 +15,7 @@
  *     The document hash is computed over its canonical form.
  */
 import { z } from 'zod';
-import { ALL_REASON_CODES } from '@permitzero/domain';
+import { ALL_REASON_CODES } from '@permitzero/domain/reason-codes';
 
 export const POLICY_SCHEMA_VERSION = 'policy.v1';
 

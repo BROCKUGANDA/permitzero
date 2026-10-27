@@ -2,11 +2,8 @@
  * Shared primitives: IDs, money, pagination, envelopes.
  */
 import { z } from 'zod';
-import {
-  SUPPORTED_CURRENCIES,
-  ID_PREFIX,
-  type IdKind,
-} from '@permitzero/domain';
+import { SUPPORTED_CURRENCIES } from '@permitzero/domain/money';
+import { ID_PREFIX, type IdKind } from '@permitzero/domain/id-prefixes';
 
 /** A prefixed ULID, validated for both prefix and body shape. */
 export function idSchema(kind: IdKind) {

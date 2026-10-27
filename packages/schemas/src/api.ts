@@ -7,7 +7,8 @@
  * (Master Prompt §5.1, FR-001).
  */
 import { z } from 'zod';
-import { Decision, ActionState, EnforcementMode, RiskSignalKind } from '@permitzero/domain';
+import { Decision, ActionState, ActorType, EnforcementMode, Role } from '@permitzero/domain/enums';
+import { RiskSignalKind } from '@permitzero/domain/reason-codes';
 import {
   actionHashSchema,
   actionIdSchema,
@@ -539,6 +540,22 @@ export const statusSchema = z
   })
   .strict();
 export type StatusResponse = z.infer<typeof statusSchema>;
+
+/**
+ * The authenticated caller. Lets dashboards greet the principal and gate UI
+ * affordances by role; every route still enforces authorization itself.
+ */
+export const meSchema = z
+  .object({
+    actor_type: z.nativeEnum(ActorType),
+    actor_id: z.string(),
+    tenant_id: z.string(),
+    display_name: z.string(),
+    roles: z.array(z.nativeEnum(Role)),
+    environment: environmentSchema,
+  })
+  .strict();
+export type MeResponse = z.infer<typeof meSchema>;
 
 export const changeModeRequestSchema = z
   .object({
