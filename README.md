@@ -42,20 +42,20 @@ Agent ──POST /v1/actions──► API (Fastify) ──► Intake pipeline
 
 ### Packages (monorepo workspaces)
 
-| Package | Responsibility |
-|---|---|
-| `packages/domain` | Types, reason codes, errors, canonicalization, money |
-| `packages/schemas` | Zod request/response + policy + risk-hints (Meta structured output) schemas |
-| `packages/policy` | Pure deterministic PDP: deny precedence, default deny, field resolution, lint, simulation |
-| `packages/broker` | Permit issuing/verification/consumption, broker, simulated finance connector, reconciliation |
-| `packages/db` | Drizzle + postgres; migrations, seeds, stores, RLS-friendly tenant scoping |
-| `packages/queue` | BullMQ + transactional outbox, dispatcher, workers, DLQ |
-| `packages/provider-meta` | Meta Model API client: config, prompt, retry, circuit breaker, semaphore, strict validation |
-| `packages/ui` | Shared React UI kit (design tokens, components) |
-| `packages/test-fixtures` | Synthetic corpus + builders |
-| `apps/api` | Fastify API: intake, approvals, execution, policies, replay, health, status |
-| `apps/worker` | Outbox dispatcher, model-analysis consumer, reconciliation, sweeps |
-| `apps/web` | Next.js operator console (dashboard, action queue, policy studio, replay lab, evidence) |
+| Package                  | Responsibility                                                                               |
+| ------------------------ | -------------------------------------------------------------------------------------------- |
+| `packages/domain`        | Types, reason codes, errors, canonicalization, money                                         |
+| `packages/schemas`       | Zod request/response + policy + risk-hints (Meta structured output) schemas                  |
+| `packages/policy`        | Pure deterministic PDP: deny precedence, default deny, field resolution, lint, simulation    |
+| `packages/broker`        | Permit issuing/verification/consumption, broker, simulated finance connector, reconciliation |
+| `packages/db`            | Drizzle + postgres; migrations, seeds, stores, RLS-friendly tenant scoping                   |
+| `packages/queue`         | BullMQ + transactional outbox, dispatcher, workers, DLQ                                      |
+| `packages/provider-meta` | Meta Model API client: config, prompt, retry, circuit breaker, semaphore, strict validation  |
+| `packages/ui`            | Shared React UI kit (design tokens, components)                                              |
+| `packages/test-fixtures` | Synthetic corpus + builders                                                                  |
+| `apps/api`               | Fastify API: intake, approvals, execution, policies, replay, health, status                  |
+| `apps/worker`            | Outbox dispatcher, model-analysis consumer, reconciliation, sweeps                           |
+| `apps/web`               | Next.js operator console (dashboard, action queue, policy studio, replay lab, evidence)      |
 
 ### Trust boundaries
 
@@ -87,16 +87,16 @@ See `packages/provider-meta/` and `apps/api/src/model.ts`.
 
 ## 4. Threat model (summary)
 
-| Threat | Mitigation |
-|---|---|
-| Agent bypasses PermitZero | Broker-only credentials; architecture + integration tests; connector access policy |
-| Prompt injection in documents | Untrusted-source labeling; model advisory signal; deterministic scope/amount/destination/approval rules still apply even if detection fails |
-| False allow from policy bug | Deny-by-default; replay corpus; mutation tests; two-person policy publication for high-risk rules |
-| Duplicate payment after timeout | Durable idempotency; `UNKNOWN_OUTCOME` state; connector reconciliation; no blind retry |
-| Stale approval | Approval + permit bound to exact hash + policy revision; re-evaluated at execution |
-| Tenant data leak | Server-side identity; DB constraints/RLS; no tenant ID trusted from client; adversarial tenant tests |
-| Model provider outage/rate limit | Model-independent deterministic core; bounded queue; backoff + breaker + safe degraded mode |
-| Overclaiming compliance/security | Evidence mapping only; independent review; no unsupported certification claims |
+| Threat                           | Mitigation                                                                                                                                  |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Agent bypasses PermitZero        | Broker-only credentials; architecture + integration tests; connector access policy                                                          |
+| Prompt injection in documents    | Untrusted-source labeling; model advisory signal; deterministic scope/amount/destination/approval rules still apply even if detection fails |
+| False allow from policy bug      | Deny-by-default; replay corpus; mutation tests; two-person policy publication for high-risk rules                                           |
+| Duplicate payment after timeout  | Durable idempotency; `UNKNOWN_OUTCOME` state; connector reconciliation; no blind retry                                                      |
+| Stale approval                   | Approval + permit bound to exact hash + policy revision; re-evaluated at execution                                                          |
+| Tenant data leak                 | Server-side identity; DB constraints/RLS; no tenant ID trusted from client; adversarial tenant tests                                        |
+| Model provider outage/rate limit | Model-independent deterministic core; bounded queue; backoff + breaker + safe degraded mode                                                 |
+| Overclaiming compliance/security | Evidence mapping only; independent review; no unsupported certification claims                                                              |
 
 ---
 
