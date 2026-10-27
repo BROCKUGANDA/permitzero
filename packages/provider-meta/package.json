@@ -16,7 +16,8 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "model:check": "tsx src/check.ts"
   },
   "dependencies": {
     "@permitzero/domain": "*",

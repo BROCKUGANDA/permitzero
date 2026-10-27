@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --dir test",
     "demo:scenario": "tsx scripts/demo-scenario.ts",
-    "model:check": "tsx scripts/model-check.ts"
+    "model:check": "npm run model:check -w @permitzero/provider-meta"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.2",

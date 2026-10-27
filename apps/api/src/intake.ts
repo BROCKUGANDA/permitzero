@@ -346,6 +346,7 @@ export async function intakeAction(
     status: 'DISABLED',
     hints: null,
     modelId: null,
+    promptVersion: null,
     errorClass: null,
     latencyMs: 0,
   };
@@ -467,7 +468,7 @@ export async function intakeAction(
         actionId,
         provider: deps.model.providerName,
         modelId: analysis.modelId ?? 'none',
-        promptVersion: deps.model.providerName === 'static' ? 'static-v1' : 'none',
+        promptVersion: analysis.promptVersion ?? 'none',
         schemaVersion: 'risk-hints.v1',
         inputHash: canonicalHash({ action_hash: actionHash, untrusted_refs: evidenceRefs.map((e) => e.ref) }),
         status: analysis.status,

@@ -4,6 +4,7 @@
  * enabled without printing any secret or URL credentials.
  */
 import { closeDb, createDb, migrate } from '@permitzero/db';
+import { MetaProviderClient, loadMetaConfig } from '@permitzero/provider-meta';
 import { createBullmqHandles } from '@permitzero/queue';
 import { loadConfig } from './config.js';
 import { createModelAdapter } from './model.js';
@@ -26,7 +27,10 @@ async function main(): Promise<void> {
     console.log(`[api] applied migrations: ${applied.applied.join(', ')}`);
   }
 
-  const model = createModelAdapter(config.modelProvider);
+  // Meta selection loads its own config here so a missing key or model id
+  // fails boot with the variable name, never a value.
+  const meta = config.modelProvider === 'meta' ? new MetaProviderClient(loadMetaConfig()) : undefined;
+  const model = createModelAdapter(config.modelProvider, meta ? { meta } : undefined);
   const bullmq = config.redisUrl ? createBullmqHandles(config.redisUrl) : null;
   const { app, ctx } = await buildApp({
     db,

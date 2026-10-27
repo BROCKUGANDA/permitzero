@@ -331,4 +331,31 @@ describe('intake', () => {
     expect(((all.json as { data: unknown[] }).data)).toHaveLength(2);
     await closeApp(t);
   });
+
+  it('caps a would-be allow at human review when the provider fails', async () => {
+    await closeApp(t);
+    t = await freshApp({
+      adapter: {
+        providerName: 'failing-test-double',
+        enabled: true,
+        analyze: async () => ({
+          status: 'ERROR',
+          hints: null,
+          modelId: 'test-model',
+          promptVersion: null,
+          errorClass: 'PROVIDER_ERROR',
+          latencyMs: 3,
+        }),
+        status: () => ({ enabled: true, status: 'down', breaker: 'OPEN', modelId: 'test-model' }),
+      },
+    });
+    const res = await postJson(t, '/v1/actions', t.agentToken, intakeBody(t.agentId));
+    expect(res.status).toBe(201);
+    const body = res.json as IntakeResponse;
+    expect(body.decision).toBe('REQUIRE_APPROVAL');
+    expect(body.state).toBe('APPROVAL_REQUIRED');
+    expect(body.reason_codes).toContain('REQUIRED_SIGNAL_UNAVAILABLE');
+    expect(body.permit).toBeNull();
+    await closeApp(t);
+  });
 });

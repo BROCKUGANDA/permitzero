@@ -12,6 +12,8 @@
  */
 import { RiskSignalKind } from '@permitzero/domain';
 import type { EvidenceRef, RiskHints } from '@permitzero/domain';
+import type { MetaProviderClient } from '@permitzero/provider-meta';
+import { MetaProviderError } from '@permitzero/provider-meta';
 
 export interface ModelAnalysisInput {
   tenantId: string;
@@ -31,6 +33,8 @@ export interface ModelAnalysisOutcome {
   status: ModelAnalysisStatus;
   hints: RiskHints | null;
   modelId: string | null;
+  /** Prompt version that produced the hints; null when nothing ran. */
+  promptVersion: string | null;
   errorClass: string | null;
   latencyMs: number;
 }
@@ -54,7 +58,7 @@ export class DisabledModelAdapter implements ModelAdapter {
   readonly enabled = false;
 
   async analyze(_input: ModelAnalysisInput): Promise<ModelAnalysisOutcome> {
-    return { status: 'DISABLED', hints: null, modelId: null, errorClass: null, latencyMs: 0 };
+    return { status: 'DISABLED', hints: null, modelId: null, promptVersion: null, errorClass: null, latencyMs: 0 };
   }
 
   status(): ModelProviderStatus {
@@ -104,6 +108,7 @@ export class StaticModelAdapter implements ModelAdapter {
         summary: indicators.length > 0 ? 'static screening flagged injection-shaped phrasing' : 'static screening clean',
       },
       modelId: 'static-v1',
+      promptVersion: 'static-v1',
       errorClass: null,
       latencyMs: Date.now() - started,
     };
@@ -114,6 +119,62 @@ export class StaticModelAdapter implements ModelAdapter {
   }
 }
 
-export function createModelAdapter(kind: 'disabled' | 'static'): ModelAdapter {
-  return kind === 'static' ? new StaticModelAdapter() : new DisabledModelAdapter();
+/**
+ * Live Meta Model API adapter. Provider failures become typed ERROR/TIMEOUT
+ * outcomes — never exceptions past this point, never hints — so intake can
+ * fail closed through its existing `requiredModelSignalUnavailable` path.
+ */
+export class MetaModelAdapter implements ModelAdapter {
+  readonly providerName = 'meta';
+  readonly enabled = true;
+
+  constructor(private readonly client: MetaProviderClient) {}
+
+  async analyze(input: ModelAnalysisInput): Promise<ModelAnalysisOutcome> {
+    const started = Date.now();
+    try {
+      const result = await this.client.analyze({
+        toolName: input.toolName,
+        operation: input.operation,
+        taskPurpose: input.taskPurpose,
+        argumentsJson: input.argumentsRedacted,
+        evidenceRefs: input.evidenceRefs.map((e) => e.ref),
+        untrustedTexts: [...input.untrustedTexts],
+      });
+      return {
+        status: 'OK',
+        hints: result.hints,
+        modelId: result.modelId,
+        promptVersion: result.promptVersion,
+        errorClass: null,
+        latencyMs: result.latencyMs,
+      };
+    } catch (err) {
+      const errorClass = err instanceof MetaProviderError ? err.errorClass : 'UNKNOWN';
+      return {
+        status: errorClass === 'TIMEOUT' ? 'TIMEOUT' : 'ERROR',
+        hints: null,
+        modelId: this.client.status().modelId,
+        promptVersion: null,
+        errorClass,
+        latencyMs: Date.now() - started,
+      };
+    }
+  }
+
+  status(): ModelProviderStatus {
+    return this.client.status();
+  }
+}
+
+export function createModelAdapter(
+  kind: 'disabled' | 'static' | 'meta',
+  deps?: { meta?: MetaProviderClient },
+): ModelAdapter {
+  if (kind === 'static') return new StaticModelAdapter();
+  if (kind === 'meta') {
+    if (!deps?.meta) throw new Error('createModelAdapter(meta) requires a MetaProviderClient.');
+    return new MetaModelAdapter(deps.meta);
+  }
+  return new DisabledModelAdapter();
 }

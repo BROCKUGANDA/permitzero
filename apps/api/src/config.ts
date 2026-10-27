@@ -13,7 +13,7 @@ export interface ApiConfig {
   permitSigningKey: string;
   permitSigningKeyId: string;
   permitTtlSeconds: number;
-  modelProvider: 'disabled' | 'static';
+  modelProvider: 'disabled' | 'static' | 'meta';
   auditHmacKey: string | null;
   rateLimitMax: number;
   rateLimitWindowMs: number;
@@ -43,10 +43,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   if (permitSigningKey.length < 16) {
     throw new Error('PERMIT_SIGNING_KEY must be at least 16 characters.');
   }
-  const modelProvider = env['MODEL_PROVIDER'] ?? 'disabled';
-  if (modelProvider !== 'disabled' && modelProvider !== 'static') {
-    throw new Error("MODEL_PROVIDER must be 'disabled' or 'static'.");
+  const explicitOff = (env['MODEL_ENABLED'] ?? '').toLowerCase() === 'false';
+  const requested = env['MODEL_PROVIDER'] ?? 'disabled';
+  if (requested !== 'disabled' && requested !== 'static' && requested !== 'meta') {
+    throw new Error("MODEL_PROVIDER must be 'disabled', 'static' or 'meta'.");
   }
+  // MODEL_ENABLED=false is an explicit deterministic-only deployment choice
+  // and wins over the provider selection. The runtime check above makes the
+  // cast total.
+  const modelProvider: ApiConfig['modelProvider'] = explicitOff
+    ? 'disabled'
+    : (requested as ApiConfig['modelProvider']);
   return {
     host: env['HOST'] ?? '127.0.0.1',
     port: intIn(env, 'PORT', 3000, 1, 65535),

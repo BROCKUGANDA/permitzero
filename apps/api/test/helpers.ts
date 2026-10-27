@@ -99,7 +99,10 @@ export function testConfig(): ApiConfig {
   };
 }
 
-export async function freshApp(opts?: { model?: 'disabled' | 'static' }): Promise<ApiFixture> {
+export async function freshApp(opts?: {
+  model?: 'disabled' | 'static';
+  adapter?: Parameters<typeof buildApp>[0]['model'];
+}): Promise<ApiFixture> {
   const database = await testDb();
   await resetDb(database);
   const seeded = await seed(database);
@@ -107,7 +110,8 @@ export async function freshApp(opts?: { model?: 'disabled' | 'static' }): Promis
   const agentId = seeded.agentIds[0] ?? '';
   const tokenFor = (label: string): string => seeded.userTokens[seeded.userIds[label] ?? ''] ?? '';
   const config = { ...testConfig(), modelProvider: opts?.model ?? 'disabled' };
-  const { app } = await buildApp({ db: database, config, model: createModelAdapter(config.modelProvider) });
+  const model = opts?.adapter ?? createModelAdapter(config.modelProvider);
+  const { app } = await buildApp({ db: database, config, model });
   return {
     app,
     db: database,
