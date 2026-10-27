@@ -16,11 +16,14 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import sensible from '@fastify/sensible';
 import { serializerCompiler, validatorCompiler, type ZodTypeProvider } from 'fastify-type-provider-zod';
-import { NotFoundError, newId } from '@permitzero/domain';
+import { NotFoundError } from '@permitzero/domain';
 import type { Principal } from '@permitzero/domain';
 import type { Broker } from '@permitzero/broker';
 import { createBroker } from '@permitzero/db';
-import type { Db } from '@permitzero/db';
+import type { Db, DbStores } from '@permitzero/db';
+import { rlsEnforcementState } from '@permitzero/db';
+import { createMetrics, type MetricsBundle } from '@permitzero/observability';
+import { installRequestObservability, metricsRoute } from './observability.js';
 import { adaptDbOutbox, createOutboxDispatcher } from '@permitzero/queue';
 import type { OutboxDispatcher, QueueFactory, RedisLike } from '@permitzero/queue';
 import type { ApiConfig } from './config.js';
@@ -76,6 +79,10 @@ export interface AppContext {
   model: ModelAdapter;
   broker: Broker;
   queues: QueueWiring;
+  /** Prometheus series for this process. One registry per app, so tests cannot read each other's counters. */
+  metrics: MetricsBundle;
+  /** Durable port adapters, shared by the broker, the dispatcher and the scrape refresh. */
+  stores: DbStores;
   intake: IntakeDeps;
   approvals: ApprovalDeps;
   collect: CollectDeps;
@@ -110,6 +117,9 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
     auditHmacKey: deps.config.auditHmacKey,
     clock,
   });
+  const metrics = createMetrics({
+    constLabels: { service: 'permitzero-api', environment: deps.config.appEnv },
+  });
 
   let queues: QueueWiring = { factory: null, redis: null, probeOutboxDepth: null, dispatcher: null };
   if (deps.queues) {
@@ -141,10 +151,12 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
     model: deps.model,
     broker,
     queues,
-    intake: { ...shared, model: deps.model },
-    approvals: { db: runtime, auditHmacKey: deps.config.auditHmacKey, clock },
-    collect: { ...shared },
-    execute: { db: runtime, broker, clock },
+    metrics,
+    stores,
+    intake: { ...shared, model: deps.model, metrics },
+    approvals: { db: runtime, auditHmacKey: deps.config.auditHmacKey, clock, metrics },
+    collect: { ...shared, metrics },
+    execute: { db: runtime, broker, clock, metrics },
   };
 
   const app = Fastify({
@@ -179,9 +191,11 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
     timeWindow: deps.config.rateLimitWindowMs,
   });
 
-  app.addHook('onRequest', async (request) => {
-    request.traceId = newId('trace');
-  });
+  // Replaces the previous `onRequest` hook that minted a fresh trace id per
+  // request: an id generated here and never sent to anybody is a correlation key
+  // that correlates nothing. The installed hook adopts a valid incoming
+  // `traceparent` so an agent's own trace and our audit chain become one query.
+  installRequestObservability(app, { metrics });
 
   app.setErrorHandler((err, request, reply) => {
     const traceId = (request as { traceId?: string }).traceId ?? null;
@@ -204,6 +218,31 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
     await v1.register((scope) => statusRoutes(scope, ctx), { prefix: '/v1' });
   });
   await app.register((scope) => healthRoutes(scope, ctx));
+
+  // Operational gauges are refreshed at scrape time rather than on a timer: an
+  // idle process then costs no database traffic, and a scrape never reports a
+  // number that is stale by a whole poll interval.
+  await app.register(async (scope) =>
+    metricsRoute(scope, {
+      metrics,
+      token: deps.config.metricsToken,
+      refresh: async () => {
+        const counts = await stores.outbox.countByStatus();
+        for (const [status, n] of Object.entries(counts)) {
+          metrics.outboxByStatus.set({ status }, n);
+        }
+        const probe = ctx.queues.probeOutboxDepth;
+        if (probe) {
+          const depth = await probe().catch(() => null);
+          if (depth) metrics.outboxOldestAgeSeconds.set((depth.oldestJobAgeMs ?? 0) / 1000);
+        }
+        // One probe, not two: this asked the database the same question twice per
+        // scrape on the first pass, and the answer is a single row.
+        const isolation = await rlsEnforcementState(runtime);
+        metrics.tenantIsolationEnforced.set({ role: isolation.role }, isolation.enforced ? 1 : 0);
+      },
+    }),
+  );
 
   return { app, ctx };
 }

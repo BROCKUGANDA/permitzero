@@ -95,6 +95,16 @@
 		reverse_proxy api:3000
 	}
 
+	# Prometheus scrapes the API by service name on the private compose
+	# network; this path exists so a browser or a scanner on the public name
+	# cannot stumble into it and get a 200 from the console SPA. The exposition
+	# is bearer-guarded at the API as well, so this is defence in depth rather
+	# than the control — but "route exists on the internet" is itself the thing
+	# being avoided.
+	handle /metrics {
+		respond "not found" 404
+	}
+
 	# Everything else is the console.
 	handle {
 		reverse_proxy web:3000 {

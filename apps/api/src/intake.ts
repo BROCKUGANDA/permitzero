@@ -60,6 +60,7 @@ import {
 import type { ActionRow, ApprovalRow, Db, DbExecutor, DbTransaction, IdempotencyRecordRow } from '@permitzero/db';
 import { DomainError, ErrorCode, IdempotencyReuseError, ValidationError } from '@permitzero/domain';
 import type { ModelAdapter, ModelAnalysisOutcome } from './model.js';
+import type { MetricsBundle } from '@permitzero/observability';
 import { approvalRequirementsFor, evaluateQuorum } from './quorum.js';
 import type { ApprovalRequirements } from './quorum.js';
 import { buildPolicyInput, pinPublishedPolicy, revisionUsesModel } from './policy-input.js';
@@ -73,6 +74,8 @@ export interface IntakeDeps {
   permitTtlSeconds: number;
   auditHmacKey: string | null;
   clock?: () => Date;
+  /** Prometheus series; recorded here so the decision itself, not just the HTTP envelope, is observable. */
+  metrics: MetricsBundle;
 }
 
 export interface IntakeResult {
@@ -265,8 +268,19 @@ export async function intakeAction(
   deps: IntakeDeps,
   principal: Principal,
   body: CreateActionRequest,
+  /**
+   * The request's trace id, from `installRequestObservability`. Passing it in
+   * rather than minting a fresh one here is what makes an audit event, an error
+   * envelope and the caller's own `traceparent` answer to the same query; an id
+   * generated in this function would be a third identifier nobody could join on.
+   */
+  traceId?: string,
 ): Promise<IntakeResult> {
   const now = deps.clock?.() ?? new Date();
+  // Wall clock for the decision-latency metric. `now` is the domain clock, which
+  // tests freeze; measuring against it would report 0ms for every decision and a
+  // latency series that is always perfect is worse than no series at all.
+  const startedAt = performance.now();
   const tenantId = principal.tenantId;
   // Opens one tenant transaction per logical read. RLS resolves the tenant from
   // a transaction-local setting, so a statement on the root pool reads nothing.
@@ -406,7 +420,7 @@ export async function intakeAction(
     pin.pin,
   );
 
-  const traceId = newId('trace');
+  const trace = traceId ?? newId('trace');
   const actionId = newId('action');
   const actionHash = canonicalHash(args);
   const redactedArgs = redact(args) as Record<string, unknown>;
@@ -452,7 +466,7 @@ export async function intakeAction(
         idempotencyKey: body.idempotency_key,
         requestedAt,
         environment: body.environment,
-        traceId,
+        traceId: trace,
         createdByActorId: principal.actorId,
         createdByActorType: principal.actorType,
       });
@@ -466,7 +480,7 @@ export async function intakeAction(
         actorId: principal.actorId,
         eventType: 'action.submitted',
         eventTime: now,
-        traceId,
+        traceId: trace,
         policyRevisionId: pin.pin.revisionId,
         payloadRedacted: {
           tool_name: body.tool_name,
@@ -572,7 +586,7 @@ export async function intakeAction(
           actorId: principal.actorId,
           eventType: 'permit.issued',
           eventTime: now,
-          traceId,
+          traceId: trace,
           policyRevisionId: pin.pin.revisionId,
           payloadRedacted: { permit_id: fresh.permitId, audience: body.tool_name },
         });
@@ -586,7 +600,7 @@ export async function intakeAction(
         actorId: 'system:policy-engine',
         eventType: 'action.decided',
         eventTime: now,
-        traceId,
+        traceId: trace,
         policyRevisionId: pin.pin.revisionId,
         payloadRedacted: {
           decision: evaluation.decision,
@@ -607,7 +621,7 @@ export async function intakeAction(
           state: finalAction.state,
           policy_revision_id: pin.pin.revisionId,
         },
-        traceId,
+        traceId: trace,
       });
 
       await completeIdempotencyRecord(tx, {
@@ -620,6 +634,21 @@ export async function intakeAction(
 
       return { finalAction, issued };
     });
+
+    // Recorded after the commit, not before it. A decision that was evaluated
+    // but rolled back is not a decision the caller received, and a metric that
+    // counts it would make the engine look busier and more correct than it was.
+    deps.metrics.decisions.inc({
+      decision: evaluation.decision,
+      environment: body.environment,
+      tool: body.tool_name,
+    });
+    deps.metrics.policyEvaluations.inc({
+      decision: evaluation.decision,
+      model_signal_used: analysis.status === 'OK' ? 'true' : 'false',
+    });
+    deps.metrics.decisionDuration.observe({ decision: evaluation.decision }, (performance.now() - startedAt) / 1000);
+    if (committed.issued) deps.metrics.permitsIssued.inc({ outcome: 'issued' });
 
     // Reload and response are one read — the row the response is assembled from
     // has to be the row the reload found, not a later revision of it.

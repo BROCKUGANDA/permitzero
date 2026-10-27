@@ -56,7 +56,7 @@ export async function actionRoutes(app: ZodFastifyInstance, ctx: AppContext): Pr
       },
     },
     async (request, reply) => {
-      const result = await intakeAction(ctx.intake, request.principal, request.body);
+      const result = await intakeAction(ctx.intake, request.principal, request.body, request.traceId);
       return reply.status(result.status).send(result.body);
     },
   );

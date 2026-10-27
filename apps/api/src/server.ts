@@ -3,7 +3,7 @@
  * set), the outbox dispatcher and graceful shutdown. Boot logs name what is
  * enabled without printing any secret or URL credentials.
  */
-import { closeDb, createDb, migrate, rlsEnforcementState, type RlsEnforcementState } from '@permitzero/db';
+import { closeDb, createDb, loadRootEnv, migrate, rlsEnforcementState, type RlsEnforcementState } from '@permitzero/db';
 import { MetaProviderClient, loadMetaConfig } from '@permitzero/provider-meta';
 import { createBullmqHandles } from '@permitzero/queue';
 import { loadConfig } from './config.js';
@@ -39,6 +39,7 @@ function describeIsolation(isolation: RlsEnforcementState): string {
 }
 
 async function main(): Promise<void> {
+  loadRootEnv();
   const config = loadConfig();
   const db = createDb(config.databaseUrl);
   const applied = await migrate(db);

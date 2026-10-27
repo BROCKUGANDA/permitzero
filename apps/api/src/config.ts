@@ -28,6 +28,12 @@ export interface ApiConfig {
   rateLimitMax: number;
   rateLimitWindowMs: number;
   maxBodyBytes: number;
+  /**
+   * Bearer token for `GET /metrics`. Unset means the endpoint is not registered
+   * at all — there is no route to probe and no default to forget to change,
+   * which is the safer failure than serving operational data to anyone who asks.
+   */
+  metricsToken: string | null;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -81,5 +87,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     rateLimitMax: intIn(env, 'RATE_LIMIT_MAX', 500, 1, 100000),
     rateLimitWindowMs: intIn(env, 'RATE_LIMIT_WINDOW_MS', 60_000, 1000, 3_600_000),
     maxBodyBytes: intIn(env, 'MAX_BODY_BYTES', 1_048_576, 1024, 50_000_000),
+    metricsToken: env['METRICS_TOKEN']?.trim() ? env['METRICS_TOKEN'].trim() : null,
   };
 }

@@ -20,6 +20,7 @@ import {
   withTenantTransaction,
 } from '@permitzero/db';
 import type { Db, DbTransaction } from '@permitzero/db';
+import type { MetricsBundle } from '@permitzero/observability';
 import { requireExecute } from './auth.js';
 import { toActionRecord } from '@permitzero/db';
 
@@ -30,6 +31,8 @@ export interface CollectDeps {
   permitTtlSeconds: number;
   auditHmacKey: string | null;
   clock?: () => Date;
+  /** Prometheus series; recorded here so the decision itself, not just the HTTP envelope, is observable. */
+  metrics: MetricsBundle;
 }
 
 const BLOCKED_MODES = ['EMERGENCY_STOP', 'DEGRADED_READ_ONLY', 'QUARANTINE'] as const;
@@ -80,7 +83,7 @@ export async function collectPermit(deps: CollectDeps, principal: Principal, act
     throw new ConflictError(`Mode ${mode} does not issue executable permits.`);
   }
 
-  return withTenantTransaction(deps.db, tenantId, async (tx: DbTransaction) => {
+  const dto = await withTenantTransaction(deps.db, tenantId, async (tx: DbTransaction) => {
     const stores = createDbStores(tx, { auditHmacKey: deps.auditHmacKey });
     const permits = new PermitService({
       signingKey: deps.permitSigningKey,
@@ -127,4 +130,8 @@ export async function collectPermit(deps: CollectDeps, principal: Principal, act
       expires_at: fresh.expiresAt,
     };
   });
+  // After the commit: a permit whose transaction rolled back was never issued,
+  // and counting one would make the issuance rate lie.
+  deps.metrics.permitsIssued.inc({ outcome: 'collected' });
+  return dto;
 }

@@ -1,0 +1,454 @@
+{
+  "uid": "permitzero-control-plane",
+  "title": "PermitZero — Authorization Plane",
+  "tags": ["permitzero", "slo"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "description": "The questions an operator of a runtime authorization plane asks first: what did we decide, how fast, is the tenant boundary still enforced, is the audit chain intact, and is delivery keeping up. Every panel queries a series this repository emits; none of them is decorative.",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Prometheus data source"
+      },
+      {
+        "name": "tenant",
+        "type": "textbox",
+        "label": "Tenant id (for the API-scoped panels)",
+        "query": ""
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "The four things that must not be wrong",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "Tenant isolation enforced",
+      "description": "1 = the serving role is bound by row-level security with full table coverage. 0 = tenant isolation is back to being a code convention. This is a gauge of a PROBE, not of a config flag: the API asks Postgres what role the traffic pool actually authenticated as.",
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "NOT ENFORCED", "color": "red" },
+                "1": { "text": "ENFORCED", "color": "green" }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min(pz_tenant_isolation_enforced{service=\"permitzero-api\"})",
+          "instant": true,
+          "legendFormat": "enforced"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Audit chain breaks",
+      "description": "Any value above zero is an integrity incident, not a degradation. The chain is the product an auditor reads.",
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [{ "refId": "A", "expr": "max(pz_audit_chain_breaks)", "instant": true, "legendFormat": "breaks" }]
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Decision availability (30d objective 99.9%)",
+      "description": "Share of requests answered without a 5xx over the last 30 days. A DENY is a successful decision; only a 5xx is a failure here.",
+      "gridPos": { "h": 5, "w": 5, "x": 8, "y": 1 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.99 },
+              { "color": "green", "value": 0.999 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "1 - (sum(increase(pz_http_requests_total{service=\"permitzero-api\",status_class=\"5xx\"}[30d])) / sum(increase(pz_http_requests_total{service=\"permitzero-api\"}[30d])))",
+          "legendFormat": "availability"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "Error budget remaining",
+      "description": "Of the 0.1% failure allowance for a 30-day window, how much is left. Negative means the objective is already spent and the page alert should have fired.",
+      "gridPos": { "h": 5, "w": 5, "x": 13, "y": 1 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.25 },
+              { "color": "green", "value": 0.5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "1 - ((sum(increase(pz_http_requests_total{service=\"permitzero-api\",status_class=\"5xx\"}[30d])) / sum(increase(pz_http_requests_total{service=\"permitzero-api\"}[30d]))) / 0.001)",
+          "legendFormat": "budget remaining"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 5,
+      "title": "Decisions requiring approval",
+      "description": "Rising share means more actions are being routed to humans. That is a product outcome as often as an incident.",
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "decimals": 1 }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(pz_decisions_total{decision=\"REQUIRE_APPROVAL\"}[1h])) / sum(increase(pz_decisions_total[1h]))",
+          "legendFormat": "of decisions in the last hour"
+        }
+      ]
+    },
+
+    {
+      "type": "row",
+      "id": 101,
+      "title": "What the engine decided",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 6,
+      "title": "Decision rate by outcome",
+      "description": "ALLOW / DENY / REQUIRE_APPROVAL / INDETERMINATE. INDETERMINATE is a real state: the engine declined to authorise anything. It must never be merged into DENY, because the causes differ.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (decision) (rate(pz_decisions_total[5m]))", "legendFormat": "{{decision}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 7,
+      "title": "Deny reasons",
+      "description": "Which rule is doing the blocking. A sudden shift in the reason mix usually means a policy revision was published, not that traffic changed.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (rate(pz_permit_rejections_total[5m]))",
+          "legendFormat": "{{reason}}",
+          "hide": false
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (decision) (rate(pz_policy_evaluations_total{decision=\"DENY\"}[5m]))",
+          "legendFormat": "policy-deny {{decision}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 8,
+      "title": "Did the model contribute? (advisory only, never authoritative)",
+      "description": "model_signal_used=true counts evaluations where a schema-valid risk-hint response actually reached the engine. When it is false and decisions still come out ALLOW, that is the point of the design: the deterministic core decides. A drop in true does not reduce safety.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (model_signal_used) (rate(pz_policy_evaluations_total[5m]))",
+          "legendFormat": "model_signal_used={{model_signal_used}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 9,
+      "title": "Model provider latency and failures",
+      "description": "Provider-side variance lives here, deliberately separate from decision latency, so a Meta API slowdown is not mistaken for an engine regression.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(pz_model_latency_seconds_bucket[5m])))",
+          "legendFormat": "p99"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(pz_model_latency_seconds_bucket[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (status, error_class) (rate(pz_model_screenings_total[5m]))",
+          "legendFormat": "{{status}} / {{error_class}}"
+        }
+      ]
+    },
+
+    {
+      "type": "row",
+      "id": 102,
+      "title": "Latency against the objective",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "Decision latency percentiles (objective: 99% under 1.5s)",
+      "description": "The 1.5s bucket exists in DECISION_BUCKETS_SECONDS specifically so the compliance share below is a count rather than an interpolation. If that bucket is ever removed, panel 11 silently becomes fiction.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(pz_decision_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(pz_decision_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(pz_decision_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "Share of decisions inside 1.5s",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.98 },
+              { "color": "green", "value": 0.99 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(pz_decision_duration_seconds_bucket{le=\"1.5\"}[5m])) / sum(rate(pz_decision_duration_seconds_count[5m]))",
+          "legendFormat": "within objective"
+        }
+      ]
+    },
+
+    {
+      "type": "row",
+      "id": 103,
+      "title": "Permits, approvals, execution",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 12,
+      "title": "Broker outcomes",
+      "description": "UNKNOWN_OUTCOME is the important series: the connector may have completed the action and we cannot yet prove it. It is shown rather than folded into failures, because the correct response is reconciliation, not a retry.",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 33 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (outcome) (rate(pz_executions_total[5m]))", "legendFormat": "{{outcome}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 13,
+      "title": "Permit rejections by reason",
+      "description": "PERMIT_CONSUMED rising means a client is retrying with a spent token — a client bug, not a breach. PERMIT_NONCE_MISMATCH or PERMIT_SIGNATURE_INVALID are a different conversation.",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 33 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (reason) (rate(pz_permit_rejections_total[5m]))", "legendFormat": "{{reason}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 14,
+      "title": "Human approvals vs automated decisions",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 33 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (decision, quorum_complete) (rate(pz_approval_decisions_total[5m]))",
+          "legendFormat": "{{decision}} quorum={{quorum_complete}}"
+        }
+      ]
+    },
+
+    {
+      "type": "row",
+      "id": 104,
+      "title": "Delivery and saturation",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 15,
+      "title": "Outbox by state",
+      "description": "DEAD is a delivery that will not happen without an operator. PENDING rising with age is the lag alert.",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 42 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
+      "targets": [{ "refId": "A", "expr": "sum by (status) (pz_outbox_events)", "legendFormat": "{{status}}" }]
+    },
+    {
+      "type": "timeseries",
+      "id": 16,
+      "title": "Oldest unpublished event age",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 42 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 30 },
+              { "color": "red", "value": 60 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{ "refId": "A", "expr": "pz_outbox_oldest_unpublished_age_seconds", "legendFormat": "oldest age" }]
+    },
+    {
+      "type": "timeseries",
+      "id": 17,
+      "title": "Circuit breaker state (0 closed / 1 half-open / 2 open)",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 42 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short", "max": 2, "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{ "refId": "A", "expr": "pz_circuit_breaker_state", "legendFormat": "{{dependency}}" }]
+    },
+    {
+      "type": "timeseries",
+      "id": 18,
+      "title": "HTTP requests by route and status class",
+      "description": "Labelled by route PATTERN only. If this panel ever shows an /v1/actions/act_… route, cardinality has escaped and the metrics backend is being poisoned by our own traffic.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 50 },
+      "datasource": { "name": "${datasource}", "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (route, status_class) (rate(pz_http_requests_total[5m]))",
+          "legendFormat": "{{route}} {{status_class}}"
+        }
+      ]
+    }
+  ]
+}

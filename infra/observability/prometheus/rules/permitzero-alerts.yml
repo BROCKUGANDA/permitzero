@@ -1,0 +1,175 @@
+# ---------------------------------------------------------------------------
+# PermitZero — Prometheus alert rules.
+#
+# Every burn-rate number in this file is generated, not chosen. The formula is
+# `burnRateForBudgetSpend()` in `packages/observability/src/slos.ts`:
+#
+#     burn_rate = budget_spend x (window_days x 24) / alert_window_hours
+#
+# so a page that must not let 2% of a 30-day budget vanish inside an hour is
+# 0.02 x 720 / 1 = 14.4, and a ticket that allows 5% over six hours is
+# 0.05 x 720 / 6 = 6. `packages/observability/test/alert-rules.test.ts` reads
+# this file and asserts the products agree, because a rule whose threshold was
+# hand-tuned away from the objective is an alert that fires for reasons nobody
+# can explain.
+#
+# Multi-window form: the long range expression carries the signal, the short one
+# is kept as a conjunction so a single stale scrape or a self-healing retry storm
+# cannot page. This mirrors `evaluateMultiWindow()`.
+# ---------------------------------------------------------------------------
+
+groups:
+  - name: permitzero-objectives
+    rules:
+      # --- decision availability: objective 99.9% over 30 days ----------------
+      # Budget 0.001. Page at 14.4x sustained for an hour; ticket at 6x for six.
+      - alert: PermitZeroDecisionAvailabilityFastBurn
+        expr: |
+          (
+            sum(rate(pz_http_requests_total{status_class="5xx", service="permitzero-api"}[1h]))
+              /
+            sum(rate(pz_http_requests_total{service="permitzero-api"}[1h]))
+          ) > (14.4 * 0.001)
+          and
+          (
+            sum(rate(pz_http_requests_total{status_class="5xx", service="permitzero-api"}[5m]))
+              /
+            sum(rate(pz_http_requests_total{service="permitzero-api"}[5m]))
+          ) > (14.4 * 0.001)
+        for: 5m
+        labels:
+          severity: page
+          product: permitzero
+          slo: decision-availability
+        annotations:
+          summary: 'Decision API is burning its 30-day error budget 14.4x faster than allowed'
+          description: 'More than 1.44% of /v1 requests are failing with 5xx over both the last hour and the last five minutes. At this rate the whole 30-day budget is gone in about two days.'
+          runbook: 'docs/incidents.md#decision-availability'
+
+      - alert: PermitZeroDecisionAvailabilitySlowBurn
+        expr: |
+          (
+            sum(rate(pz_http_requests_total{status_class="5xx", service="permitzero-api"}[6h]))
+              /
+            sum(rate(pz_http_requests_total{service="permitzero-api"}[6h]))
+          ) > (6 * 0.001)
+          and
+          (
+            sum(rate(pz_http_requests_total{status_class="5xx", service="permitzero-api"}[30m]))
+              /
+            sum(rate(pz_http_requests_total{service="permitzero-api"}[30m]))
+          ) > (6 * 0.001)
+        for: 30m
+        labels:
+          severity: ticket
+          product: permitzero
+          slo: decision-availability
+        annotations:
+          summary: 'Decision API is over its error budget at a rate that empties it in five days'
+          runbook: 'docs/incidents.md#decision-availability'
+
+      # --- decision latency: objective 99% of decisions under 1.5s, 28 days ----
+      # Bucket at exactly 1.5s exists in DECISION_BUCKETS_SECONDS precisely so
+      # this expression can be computed rather than interpolated.
+      - alert: PermitZeroDecisionLatencyBurn
+        expr: |
+          (
+            1 -
+            sum(rate(pz_decision_duration_seconds_bucket{le="1.5"}[1h]))
+              /
+            sum(rate(pz_decision_duration_seconds_count[1h]))
+          ) > (13.44 * 0.01)
+          and
+          (
+            1 -
+            sum(rate(pz_decision_duration_seconds_bucket{le="1.5"}[5m]))
+              /
+            sum(rate(pz_decision_duration_seconds_count[5m]))
+          ) > (13.44 * 0.01)
+        for: 5m
+        labels:
+          severity: ticket
+          product: permitzero
+          slo: decision-latency
+        annotations:
+          summary: 'More than 13.4% of decisions are exceeding the 1.5s objective'
+          description: 'The deterministic engine is not the usual cause; check database connection pool saturation first, since every tenant transaction holds a connection.'
+          runbook: 'docs/incidents.md#decision-latency'
+
+      # --- zero-tolerance objectives: no budget, so no rate to average ---------
+      # A ratio would let one leak hide inside a million clean requests. These
+      # fire on the existence of the condition, not on its frequency.
+      - alert: PermitZeroTenantIsolationNotEnforced
+        expr: |
+          pz_tenant_isolation_enforced == 0
+        for: 1m
+        labels:
+          severity: page
+          product: permitzero
+          slo: tenant-isolation
+        annotations:
+          summary: 'A PermitZero process is serving tenant traffic without row-level security'
+          description: 'The role in use is a superuser or carries BYPASSRLS, or a tenant table lost its policy. Tenant isolation is then a code convention again. Check DATABASE_URL_RUNTIME and re-run npm run db:migrate.'
+          runbook: 'docs/incidents.md#tenant-isolation'
+
+      - alert: PermitZeroAuditChainBroken
+        expr: |
+          pz_audit_chain_breaks > 0
+        for: 0m
+        labels:
+          severity: page
+          product: permitzero
+          slo: audit-integrity
+        annotations:
+          summary: 'The audit hash chain failed verification'
+          description: 'Audit events are the evidence product. A break means bytes changed after append, a sequence gap, or a keyed hash verified without its key. Stop protected writes until it is explained.'
+          runbook: 'docs/incidents.md#audit-integrity'
+
+      - alert: PermitZeroOutboxDeliveryStalled
+        expr: |
+          pz_outbox_oldest_unpublished_age_seconds > 60
+        for: 10m
+        labels:
+          severity: ticket
+          product: permitzero
+          slo: delivery-lag
+        annotations:
+          summary: 'Transactional outbox events are waiting more than a minute to reach the queue'
+          description: 'Decisions are unaffected — this delays dispatch of side effects. Check the worker, and whether Redis is reachable.'
+          runbook: 'docs/incidents.md#delivery-lag'
+
+      - alert: PermitZeroDeadLetteredEvents
+        expr: |
+          increase(pz_outbox_events{status="DEAD"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: ticket
+          product: permitzero
+        annotations:
+          summary: 'An outbox event exhausted its retries and was dead-lettered'
+          description: 'Nothing will deliver it automatically. Redrive through the operator surface once the downstream cause is fixed.'
+          runbook: 'docs/incidents.md#dead-letter'
+
+      # --- saturation signals that usually precede the objective alerts --------
+      - alert: PermitZeroModelProviderDegraded
+        expr: |
+          sum(rate(pz_model_screenings_total{status!="OK"}[10m])) > 0
+        for: 15m
+        labels:
+          severity: ticket
+          product: permitzero
+        annotations:
+          summary: 'Meta Model API screening is failing or timing out'
+          description: 'Expected behaviour is degraded advice, not lost authority: a required model signal that is unavailable makes the engine return REQUIRE_APPROVAL or INDETERMINATE rather than ALLOW.'
+          runbook: 'docs/incidents.md#model-provider'
+
+      - alert: PermitZeroCircuitBreakerOpen
+        expr: |
+          pz_circuit_breaker_state >= 2
+        for: 5m
+        labels:
+          severity: ticket
+          product: permitzero
+        annotations:
+          summary: 'A dependency circuit breaker is open'
+          runbook: 'docs/incidents.md#circuit-breaker'

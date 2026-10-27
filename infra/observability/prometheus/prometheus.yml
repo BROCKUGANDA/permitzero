@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# PermitZero — Prometheus scrape configuration.
+#
+# The target is addressed by compose service name, so `/metrics` never needs a
+# public path (Caddy 404s it on the site name). The bearer token is read from a
+# mounted file rather than written here, because this file is committed and the
+# token is not.
+#
+# There is deliberately no `permitzero-worker` job. The worker does not expose a
+# metrics endpoint, and a scrape target that answers 404 shows up as an up==0
+# alert that trains people to ignore alerts. Its observable behaviour currently
+# reaches Prometheus through the API: `pz_outbox_*` is refreshed from the
+# database, which is the same source the worker acts on.
+# ---------------------------------------------------------------------------
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: permitzero-demo
+
+rule_files:
+  - rules/permitzero-alerts.yml
+
+scrape_configs:
+  - job_name: permitzero-api
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets: ['api:3000']
+        labels:
+          service: permitzero-api
+          environment: staging
+    authorization:
+      credentials_file: /run/secrets/pz_metrics_token
+    # Drop the process/cpu series if a future base image changes prefix; the
+    # dashboards key off `pz_` and an unnamed extra series is noise, not signal.
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'node_.*'
+        action: drop

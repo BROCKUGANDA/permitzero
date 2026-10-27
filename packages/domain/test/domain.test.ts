@@ -6,6 +6,9 @@ import {
   Decision,
   DenyReason,
   FAIL_CLOSED_REASONS,
+  ID_PREFIX,
+  traceIdFromW3C,
+  w3cTraceIdFromId,
   HASH_VERSION,
   IllegalTransitionError,
   MoneyError,
@@ -401,5 +404,55 @@ describe('fail-closed reason codes', () => {
     // a code path that cannot decide has somewhere to go that is not "allow".
     expect(Object.values(Decision)).toEqual(['ALLOW', 'DENY', 'REQUIRE_APPROVAL', 'INDETERMINATE']);
     expect(Decision.INDETERMINATE).not.toBe(Decision.ALLOW);
+  });
+});
+
+describe('w3c trace context <-> domain trace id', () => {
+  const SAMPLE = '0af7651916cd43dd8448eb211c80319c';
+
+  it('round-trips a caller trace id without losing bits', () => {
+    const id = traceIdFromW3C(SAMPLE);
+    expect(id).not.toBeNull();
+    expect(id).toMatch(/^trc_[0-9A-HJKMNP-TV-Z]{26}$/);
+    expect(w3cTraceIdFromId(id as string)).toBe(SAMPLE);
+  });
+
+  it('is deterministic, which is the whole point of the mapping', () => {
+    expect(traceIdFromW3C(SAMPLE)).toBe(traceIdFromW3C(SAMPLE));
+    // Two different callers must not collide, or the audit chain would attribute
+    // one tenant's trace to another.
+    expect(traceIdFromW3C(SAMPLE)).not.toBe(traceIdFromW3C('1af7651916cd43dd8448eb211c80319c'));
+  });
+
+  it('round-trips the extreme values of the 128-bit space', () => {
+    for (const hex of ['1'.padEnd(32, '0'), 'f'.repeat(32), 'fffffffffffffffffffffffffffffffe']) {
+      const id = traceIdFromW3C(hex);
+      expect(id, hex).not.toBeNull();
+      expect(w3cTraceIdFromId(id as string), hex).toBe(hex);
+    }
+  });
+
+  it('satisfies the same pattern newId("trace") produces', () => {
+    // If this stops being true the derived id fails response serialization, and
+    // every request carrying a traceparent turns into a 500.
+    expect(traceIdFromW3C(SAMPLE)).toMatch(new RegExp(`^${ID_PREFIX.trace}_[0-9A-HJKMNP-TV-Z]{26}$`));
+    expect(newId('trace')).toMatch(new RegExp(`^${ID_PREFIX.trace}_[0-9A-HJKMNP-TV-Z]{26}$`));
+  });
+
+  it.each([
+    ['all-zero (invalid by spec)', '0'.repeat(32)],
+    ['too short', 'abc'],
+    ['too long', 'f'.repeat(33)],
+    ['uppercase', SAMPLE.toUpperCase()],
+    ['non-hex', 'g'.repeat(32)],
+    ['empty', ''],
+  ])('refuses %s rather than producing a malformed id', (_l, value) => {
+    expect(traceIdFromW3C(value)).toBeNull();
+  });
+
+  it('refuses to decode something that is not a trace id', () => {
+    expect(w3cTraceIdFromId('act_01ARZ3NDEKTSV4RRFFQ69G5FAV')).toBeNull();
+    expect(w3cTraceIdFromId('trc_short')).toBeNull();
+    expect(w3cTraceIdFromId('trc_' + 'Z'.repeat(26))).toBeNull();
   });
 });

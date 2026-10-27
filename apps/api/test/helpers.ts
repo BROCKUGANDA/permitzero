@@ -131,6 +131,9 @@ export function testConfig(): ApiConfig {
     rateLimitMax: 100000,
     rateLimitWindowMs: 60_000,
     maxBodyBytes: 1_048_576,
+    // Set so the /metrics route exists under test: an endpoint that is only ever
+    // exercised when someone remembers to configure it is an endpoint that is broken.
+    metricsToken: 'test-metrics-token',
   };
 }
 

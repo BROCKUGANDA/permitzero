@@ -32,12 +32,15 @@ import {
   toActionRecord,
 } from '@permitzero/db';
 import type { Db } from '@permitzero/db';
+import type { MetricsBundle } from '@permitzero/observability';
 import { requireExecute } from './auth.js';
 
 export interface ExecuteDeps {
   db: Db;
   broker: Broker;
   clock?: () => Date;
+  /** Prometheus series; recorded here so the decision itself, not just the HTTP envelope, is observable. */
+  metrics: MetricsBundle;
 }
 
 const BLOCKED_MODES = ['EMERGENCY_STOP', 'DEGRADED_READ_ONLY', 'QUARANTINE'] as const;
@@ -86,6 +89,13 @@ export async function executeApprovedAction(
     traceId: action.traceId,
     ...(body.client_timeout_ms !== undefined ? { deadlineMs: now.getTime() + body.client_timeout_ms } : {}),
   });
+
+  // Every broker outcome is recorded, including the ones this endpoint turns into
+  // a 4xx. UNKNOWN_OUTCOME in particular is the number an operator must see
+  // rising: it is not a failed request, it is a side effect whose fate is
+  // temporarily unknown, and hiding it inside a 409 count loses the signal.
+  deps.metrics.executions.inc({ outcome: result.outcome });
+  if (result.outcome === 'REJECTED') deps.metrics.permitRejections.inc({ reason: result.reason });
 
   switch (result.outcome) {
     case 'SUCCEEDED': {

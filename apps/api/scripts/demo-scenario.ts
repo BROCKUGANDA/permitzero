@@ -8,10 +8,19 @@
  * Reads API_URL (default http://127.0.0.1:3000). Exits non-zero on the first
  * unexpected response. Tokens are read from disk, never printed.
  */
+import { loadRootEnv } from '@permitzero/db';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
-const API_URL = process.env['API_URL'] ?? 'http://127.0.0.1:3000';
+// `loadRootEnv` first, then API_URL, then API_BASE_URL, then the port this
+// process would itself bind to. A hardcoded 3000 here pointed the demo at a
+// port the API does not listen on whenever it was started with `npm run
+// start:api` (which reads PORT from .env), so the scenario's "fetch failed"
+// looked like an outage rather than a script that had forgotten where its own
+// server lives.
+loadRootEnv();
+const API_URL =
+  process.env['API_URL'] ?? process.env['API_BASE_URL'] ?? `http://127.0.0.1:${process.env['PORT'] ?? '8080'}`;
 
 interface DemoCredentials {
   tenantIds: string[];

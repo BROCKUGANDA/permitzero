@@ -62,6 +62,17 @@ if (withE2E) {
 }
 
 if (liveUrl) {
+  // Measured, not asserted: the SLO report scrapes the running stack and fails
+  // if an objective is breached. It is REQUIRED when --live is given, and skipped
+  // (loudly) otherwise, because a report of an absent stack would print all
+  // zeros and look like a clean bill of health.
+  add('SLO report (live scrape)', 'npx', ['tsx', 'scripts/slo-report.mjs', '--url', liveUrl], {
+    required: true,
+    env: { METRICS_TOKEN: process.env.METRICS_TOKEN ?? '' },
+  });
+}
+
+if (liveUrl) {
   // The scenario file is the product's own proof: it drives intake → policy →
   // approval → permit → broker → simulated connector → receipt and exits
   // non-zero on the first unexpected response.

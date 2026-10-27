@@ -40,6 +40,7 @@ import {
   withTenantTransaction,
 } from '@permitzero/db';
 import type { Db, DbTransaction } from '@permitzero/db';
+import type { MetricsBundle } from '@permitzero/observability';
 import { requireApprover } from './auth.js';
 import { approvalRequirementsFor, evaluateQuorum } from './quorum.js';
 import { toActionDto } from './dto.js';
@@ -49,6 +50,8 @@ export interface ApprovalDeps {
   db: Db;
   auditHmacKey: string | null;
   clock?: () => Date;
+  /** Prometheus series; recorded here so the decision itself, not just the HTTP envelope, is observable. */
+  metrics: MetricsBundle;
 }
 
 export type ApprovalBody = ApproveActionRequest | RejectActionRequest;
@@ -237,6 +240,13 @@ export async function decideApproval(
   return scope(async (ex) => {
     const reloaded = await getAction(ex, tenantId, actionId);
     if (!reloaded) throw new NotFoundError();
+    // Counted from the committed row rather than from the transaction's own
+    // bookkeeping: if this reload says APPROVED, the quorum really closed, and a
+    // rollback that threw before reaching here never increments.
+    deps.metrics.approvalDecisions.inc({
+      decision: body.decision,
+      quorum_complete: String(reloaded.state === 'APPROVED'),
+    });
     return toActionDto(ex, tenantId, reloaded);
   });
 }

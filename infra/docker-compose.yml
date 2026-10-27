@@ -169,6 +169,24 @@ services:
   # makes crucible's own `web` and `api` services resolve instead of ours, and
   # this site then answers 502/503 while every container here reports healthy —
   # the exact failure mode the ASTROLABE edge documents and moved away from.
+  # Scraped over this compose network only; no published port, so the metrics
+  # endpoint never has a path in from the internet. Starts only with
+  # `--profile observability`, because a demo deployment without a Prometheus has
+  # nothing to feed it and an empty target list is a warning nobody reads.
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    restart: unless-stopped
+    profiles: ['observability']
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
+      - ../run/pz_metrics_token:/run/secrets/pz_metrics_token:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle=false
+
   edge:
     image: caddy:2.10-alpine
     restart: unless-stopped
@@ -202,3 +220,4 @@ volumes:
   redisdata:
   caddy_data:
   caddy_config:
+  prometheus_data:

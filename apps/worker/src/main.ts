@@ -3,12 +3,13 @@
  * dispatcher, consumers and sweeps until told to stop. Boot logs name what
  * is enabled without printing any secret or URL credentials.
  */
-import { closeDb, createDb, migrate, rlsEnforcementState } from '@permitzero/db';
+import { closeDb, createDb, loadRootEnv, migrate, rlsEnforcementState } from '@permitzero/db';
 import { createBullmqHandles, createBullmqWorkerFactory } from '@permitzero/queue';
 import { loadWorkerConfig } from './config.js';
 import { buildWorker } from './worker.js';
 
 async function main(): Promise<void> {
+  loadRootEnv();
   const config = loadWorkerConfig();
   const db = createDb(config.databaseUrl);
   const applied = await migrate(db);
