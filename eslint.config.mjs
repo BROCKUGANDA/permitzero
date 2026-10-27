@@ -10,6 +10,7 @@
  * relaxation states why.
  */
 import js from '@eslint/js';
+import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
@@ -23,10 +24,15 @@ export default tseslint.config(
       '**/playwright-report/**',
       '**/*.tsbuildinfo',
       'apps/web/next-env.d.ts',
+      '.scratch/**',
     ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
+  {
+    files: ['**/*.{mjs,js,cjs}'],
+    languageOptions: { globals: { ...globals.node } },
+  },
   {
     files: ['**/*.{ts,tsx,mjs}'],
     rules: {

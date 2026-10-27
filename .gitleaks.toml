@@ -1,0 +1,15 @@
+# Gitleaks configuration for PermitZero.
+# Test files use obviously fake, low-value placeholder credentials that are not
+# secrets. Build artifacts and test output are never committed but are scanned
+# when present locally, so they are allowlisted here as well.
+[allowlist]
+description = "Test fixtures and local build/test artifacts"
+paths = [
+  '''(^|/)test/.*''',
+  '''(^|/).*\.test\.ts$''',
+  '''(^|/)helpers\.ts$''',
+  '''(^|/)\.next/.*''',
+  '''(^|/)test-results/.*''',
+  '''(^|/)coverage/.*''',
+  '''(^|/)storage/.*''',
+]
