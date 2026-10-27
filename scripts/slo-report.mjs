@@ -17,7 +17,16 @@
  *   ... --json     machine readable
  *   ... --strict   NO_DATA becomes a failure (what CI should use once there is traffic)
  */
-import { SLOS, evaluateMultiWindow, errorBudget, errorRate } from '../packages/observability/src/index.js';
+import {
+  SLOS,
+  bucketCountAtOrBelow,
+  errorBudget,
+  errorRate,
+  evaluateMultiWindow,
+  histogramCount,
+  parseExposition,
+  sumBy,
+} from '../packages/observability/src/index.js';
 
 const argv = process.argv.slice(2);
 const valueOf = (name, def) => {
@@ -30,94 +39,6 @@ const baseUrl = valueOf('url', null);
 const token = valueOf('token', process.env.METRICS_TOKEN ?? null);
 const asJson = flag('json');
 const strict = flag('strict');
-
-/**
- * Minimal Prometheus text parser: counters, gauges and histograms only.
- *
- * Not a dependency, because this is release evidence and it has to run in an
- * environment where installing a package may not be possible.
- */
-function parseExposition(text) {
-  /** @type {Map<string, {type: string, samples: Array<{labels: Record<string,string>, value: number}>}>} */
-  const metrics = new Map();
-  for (const rawLine of text.split('\n')) {
-    const line = rawLine.trim();
-    if (!line) continue;
-    if (line.startsWith('#')) {
-      const parts = line.split(/\s+/);
-      if (parts[1] && parts[0] === '# TYPE') ensure(metrics, parts[1]).type = parts[2] ?? 'untyped';
-      continue;
-    }
-    const braceStart = line.indexOf('{');
-    let name;
-    let labels = {};
-    let valueText;
-    if (braceStart === -1) {
-      const parts = line.split(/\s+/);
-      name = parts[0];
-      valueText = parts[1];
-    } else {
-      name = line.slice(0, braceStart);
-      const braceEnd = line.lastIndexOf('}');
-      labels = parseLabels(line.slice(braceStart + 1, braceEnd));
-      valueText = line.slice(braceEnd + 1).trim().split(/\s+/)[0];
-    }
-    const value = Number(valueText);
-    if (!name || !Number.isFinite(value)) continue;
-    ensure(metrics, name).samples.push({ labels, value });
-  }
-  return metrics;
-}
-
-function ensure(map, name) {
-  if (!map.has(name)) map.set(name, { type: 'untyped', samples: [] });
-  return map.get(name);
-}
-
-/** `k="v"` pairs; values may contain commas and escapes, so split outside quotes. */
-function parseLabels(body) {
-  const out = {};
-  let key = '';
-  let value = '';
-  let mode = 'key';
-  let escaped = false;
-  for (const ch of body) {
-    if (mode === 'key') {
-      if (ch === '=') mode = 'value';
-      else if (ch !== ' ' && ch !== ',') key += ch;
-    } else if (mode === 'value') {
-      if (escaped) {
-        value += ch;
-        escaped = false;
-      } else if (ch === '\\') escaped = true;
-      else if (ch === '"') {
-        out[key] = value;
-        key = '';
-        value = '';
-        mode = 'between';
-      } else value += ch;
-    } else if (ch === ',') mode = 'key';
-  }
-  return out;
-}
-
-const matches = (labels, predicate) =>
-  !predicate || Object.entries(predicate).every(([k, v]) => labels[k] === undefined || labels[k] === v);
-
-function sumBy(metrics, name, predicate) {
-  const entry = metrics.get(name);
-  if (!entry) return null;
-  return entry.samples.filter((s) => matches(s.labels, predicate)).reduce((acc, s) => acc + s.value, 0);
-}
-
-/** Count of observations at or below `le`, read from the bucket series. */
-function bucketCountAtOrBelow(metrics, baseName, le, predicate) {
-  const samples = (metrics.get(`${baseName}_bucket`)?.samples ?? []).filter((s) =>
-    matches(s.labels, predicate),
-  );
-  if (samples.length === 0) return null;
-  return samples.filter((s) => s.labels.le !== '+Inf' && Number(s.labels.le) <= le).reduce((a, s) => a + s.value, 0);
-}
 
 async function scrape() {
   const res = await fetch(new URL('/metrics', baseUrl), { headers: { authorization: `Bearer ${token}` } });
@@ -211,7 +132,7 @@ function observe(metrics, slo) {
       return { total, violated: bad };
     }
     case 'decision-latency': {
-      const count = sumBy(metrics, 'pz_decision_duration_seconds_count');
+      const count = histogramCount(metrics, 'pz_decision_duration_seconds');
       if (count === null || count === 0) return null;
       // Uses the bucket at exactly the threshold, which is why
       // DECISION_BUCKETS_SECONDS contains 1.5. Interpolating between 1 and 2.5

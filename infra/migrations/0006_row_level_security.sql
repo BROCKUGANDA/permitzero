@@ -93,15 +93,14 @@ $pzrls$;
 -- -----------------------------------------------------------------------------
 
 DO $pzrls$
+DECLARE
+  needs_alter boolean;
 BEGIN
   -- Roles are CLUSTER-WIDE, but this migration runs once per database, and the
-  -- test harness migrates one database per vitest worker concurrently. Without
-  -- serialization two workers both reach `ALTER ROLE pz_app` and update the same
-  -- pg_authid tuple; PostgreSQL answers `tuple concurrently updated` (40001),
-  -- which aborts the whole migration transaction — so the losing worker's
-  -- database ends up with no 0006 at all, no pz_rls_coverage, and every test in
-  -- that file failing with a 500 while the real cause is a lock collision in an
-  -- unrelated database. Observed; this is why the lock is here.
+  -- test harness migrates one database per vitest worker concurrently. Two
+  -- workers reaching for the same `pz_app` tuple is where a migration can die for
+  -- a reason that has nothing to do with the database it is opening, so the
+  -- advisory lock serialises the intent.
   --
   -- Transaction-scoped on purpose: it is released when the migration commits or
   -- rolls back, so a crashed migrator cannot leave the role creation blocked.
@@ -113,8 +112,29 @@ BEGIN
   EXCEPTION WHEN duplicate_object THEN
     NULL;
   END;
-  ALTER ROLE pz_app WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB
-    PASSWORD '{{PZ_RLS_ROLE_PASSWORD}}';
+
+  -- The unconditional `ALTER ROLE` that used to follow this still lost races: the
+  -- lock orders the intent, but every database opened afterwards wrote the same
+  -- pg_authid tuple, and PostgreSQL answered `tuple concurrently updated`
+  -- (SQLSTATE XX000), aborting that whole migration transaction — the worker's
+  -- database then had no 0006, no pz_rls_coverage, and a file of tests failing
+  -- with 500s whose cause was an unrelated database opening at the same moment.
+  -- Observed twice; this is why the write is now conditional.
+  --
+  -- A per-database migration has no business performing a cluster-wide write on
+  -- every run. The role is repaired when it has drifted from what this file
+  -- requires, and doing nothing otherwise is the correct outcome. Rotating the
+  -- password on a live cluster stays an explicit `ALTER ROLE pz_app PASSWORD ...`
+  -- by an operator, not a side effect of opening a database.
+  SELECT rolsuper OR rolbypassrls OR NOT rolcanlogin OR rolcreaterole OR rolcreatedb
+    INTO needs_alter
+    FROM pg_roles
+   WHERE rolname = 'pz_app';
+
+  IF COALESCE(needs_alter, true) THEN
+    ALTER ROLE pz_app WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB
+      PASSWORD '{{PZ_RLS_ROLE_PASSWORD}}';
+  END IF;
 END
 $pzrls$;
 

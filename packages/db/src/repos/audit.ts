@@ -1,13 +1,16 @@
 /**
  * Audit repository: hash-chained, append-only event log.
  *
- * The application reads the chain head, computes the new event hash over the
- * canonical event plus the previous hash, and inserts with `sequence` omitted.
- * A BEFORE trigger assigns the sequence under a transaction-scoped advisory
- * lock and verifies the previous hash still matches head; on a concurrent
- * move the insert fails and the application retries with the new head.
- * Event times are truncated to milliseconds (JavaScript Date precision) so a
- * PostgreSQL round-trip never changes the hashed bytes.
+ * The application takes the chain advisory lock for the tenant, reads the chain
+ * head, computes the new event hash over the canonical event plus the previous
+ * hash, and inserts with `sequence` omitted. The BEFORE trigger assigns the
+ * sequence under the same lock (transaction-scoped, so re-acquiring it is a
+ * no-op) and verifies the previous hash still matches head. The lock is taken
+ * before the read rather than only at insert because a collision cannot be
+ * retried inside a transaction: the failed insert aborts it, and the retry's next
+ * statement fails with 25P02 instead of colliding again. Event times are
+ * truncated to milliseconds (JavaScript Date precision) so a PostgreSQL
+ * round-trip never changes the hashed bytes.
  */
 import { createHash, createHmac } from 'node:crypto';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
@@ -78,6 +81,39 @@ export interface AppendAuditInput {
 
 const APPEND_ATTEMPTS = 5;
 
+/**
+ * The three messages `trg_audit_events_chain` raises when another writer has moved
+ * the head (infra/migrations/0002_triggers.sql). They are matched positively rather
+ * than by SQLSTATE because the trigger raises `check_violation` — the same code any
+ * real CHECK on the table uses — and postgres.js does not surface a constraint name
+ * for a trigger-raised error, so "no constraint named" would also catch a row that
+ * simply is not allowed.
+ */
+const CHAIN_COLLISION_MESSAGES = [
+  /audit hash chain broken for tenant/,
+  /audit sequence .* is not the next value for tenant/,
+  /genesis audit event for tenant .* must have a NULL previous_hash/,
+];
+
+/**
+ * Is this error contention, or a row that breaks a rule?
+ *
+ * Treating a rule violation as retryable is actively harmful: the retry dies on
+ * 25P02 inside a transaction, so a bad payload surfaces as a 500 that mentions the
+ * aborted retry instead of the constraint, and the HTTP boundary never gets the
+ * 422 it would have produced from it.
+ */
+export function isAuditChainCollision(err: unknown): boolean {
+  if (isDbError(err, '23505')) return true;
+  if (!isDbError(err, '23514')) return false;
+  const message = String(
+    (err as { cause?: { message?: string }; message?: string }).cause?.message ??
+      (err as { message?: string }).message ??
+      '',
+  );
+  return CHAIN_COLLISION_MESSAGES.some((pattern) => pattern.test(message));
+}
+
 export async function appendAuditEvent(
   ex: DbExecutor,
   input: AppendAuditInput,
@@ -86,6 +122,21 @@ export async function appendAuditEvent(
   const eventId = input.eventId ?? newId('auditEvent');
   const eventTime = truncateToMs(input.eventTime ?? new Date());
   let lastError: unknown = null;
+  // Take the chain lock before reading the head, not at insert time.
+  //
+  // The trigger already holds this same advisory lock, but it only takes it once
+  // the head has been read and the hash computed — and inside a transaction a
+  // collision at that point is unrecoverable: the failed insert aborts the
+  // transaction, so the retry's very next statement dies with 25P02 rather than
+  // re-reading the head. Sequential tests cannot see this (one writer never
+  // collides); under load it surfaces as a 500. Locking here makes a concurrent
+  // writer wait on this statement instead, which is the back-pressure the chain
+  // needs anyway. `pg_advisory_xact_lock` is idempotent for a key already held by
+  // the transaction, so the trigger's acquisition afterwards is a no-op, and on a
+  // non-transactional executor the lock simply releases at statement end and the
+  // retry loop below still works, because each statement there is its own
+  // transaction.
+  await ex.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended('pz_audit_chain:' || ${input.tenantId}, 0))`);
   for (let attempt = 0; attempt < APPEND_ATTEMPTS; attempt++) {
     const head = await ex
       .select({ sequence: auditEvents.sequence, eventHash: auditEvents.eventHash })
@@ -136,8 +187,10 @@ export async function appendAuditEvent(
       if (!row) throw new Error('audit insert returned no row');
       return toAuditEventRecord(row);
     } catch (err) {
-      // Concurrent head move (or sequence race): retry with the new head.
-      if (isDbError(err, '23505', '23514')) {
+      // Contention: another writer moved the head, so re-read it and try again.
+      // Anything else — including a plain CHECK violation on the row — is a bug in
+      // what we were asked to write, and retrying it only hides it behind a 25P02.
+      if (isAuditChainCollision(err)) {
         lastError = err;
         continue;
       }

@@ -13,3 +13,8 @@ storage/
 # `npm run verify` red for reasons unrelated to this repository's code.
 .claude/
 .gitnexus/
+
+# Generated benchmark evidence. `npm run load:sweep` and `npm run load:test` rewrite
+# these files from the measured run, so formatting them here would be undone by the
+# next run — the content is the point and it is machine-written, not hand-authored.
+docs/benchmarks/

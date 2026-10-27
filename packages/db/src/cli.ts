@@ -6,7 +6,11 @@
  * `seed` writes the demo bearer tokens to `storage/demo-credentials.json`
  * (gitignored runtime state) outside production; secrets are never printed.
  */
-import 'dotenv/config';
+import { loadRootEnv } from './root-env.js';
+
+// Resolved from the repository root rather than from cwd, which npm sets to this
+// package when it runs `npm run db:migrate`.
+loadRootEnv();
 import { mkdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { closeDb, createDb, ensureDatabaseExists, healthCheck, migrate, resetDb } from './client.js';

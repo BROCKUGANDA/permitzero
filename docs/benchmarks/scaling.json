@@ -1,0 +1,319 @@
+{
+  "ranAt": "2026-10-27T23:29:09.247Z",
+  "scenario": "allow",
+  "workload": {
+    "durationSeconds": 30,
+    "path": "POST /v1/actions",
+    "amountMinor": 300000,
+    "dispatcher": "disabled (REDIS_URL empty)"
+  },
+  "objectives": {
+    "availability": 0.999,
+    "latencyMs": 1500
+  },
+  "environment": {
+    "node": "v26.7.0",
+    "rlsRole": "pz_app via DATABASE_URL_RUNTIME"
+  },
+  "cells": [
+    {
+      "runtimePoolMax": 10,
+      "connections": 10,
+      "port": 54111,
+      "durationSeconds": 30,
+      "boot": {
+        "readyMs": 2613,
+        "tenantIsolationEnforced": true
+      },
+      "requests": 1580,
+      "rps": 52.7,
+      "freshDecisions": 159,
+      "requestsSeenByServer": 1581,
+      "replayShare": 0.8994,
+      "server5xx": 0,
+      "serverErrorRate": 0,
+      "throttled4xx": 0,
+      "throttledShare": 0,
+      "serverLatencyMs": {
+        "p50": 174,
+        "p95": 243,
+        "p99": 249
+      },
+      "clientLatencyMs": {
+        "p50": 178,
+        "p99": 325,
+        "max": 6557
+      },
+      "client": {
+        "failures": 0,
+        "failureRate": 0,
+        "connectionErrorsAndTimeouts": 0,
+        "ofWhichTimeouts": 0,
+        "pipelineResets": 0,
+        "statusCodes": {
+          "200": 1422,
+          "201": 158
+        }
+      },
+      "logTail": "  code: '42P07',\n  message: 'relation \"_migrations\" already exists, skipping',\n  file: 'parse_utilcmd.c',\n  line: '210',\n  routine: 'transformCreateStmt'\n}\n[api] listening on http://127.0.0.1:54111 (env=development)\n[api] database 127.0.0.1:5432/permitzero\n[api] tenant isolation: enforced (role pz_app, 22/22 tables)\n[api] outbox dispatcher disabled (no REDIS_URL)\n[api] model provider disabled (disabled)\n"
+    },
+    {
+      "runtimePoolMax": 10,
+      "connections": 25,
+      "port": 59165,
+      "durationSeconds": 30,
+      "boot": {
+        "readyMs": 2057,
+        "tenantIsolationEnforced": true
+      },
+      "requests": 1838,
+      "rps": 61.3,
+      "freshDecisions": 75,
+      "requestsSeenByServer": 1839,
+      "replayShare": 0.9592,
+      "server5xx": 0,
+      "serverErrorRate": 0,
+      "throttled4xx": 0,
+      "throttledShare": 0,
+      "serverLatencyMs": {
+        "p50": 228,
+        "p95": 485,
+        "p99": 813
+      },
+      "clientLatencyMs": {
+        "p50": 391,
+        "p99": 1042,
+        "max": 9733
+      },
+      "client": {
+        "failures": 12,
+        "failureRate": 0.00653,
+        "connectionErrorsAndTimeouts": 12,
+        "ofWhichTimeouts": 12,
+        "pipelineResets": 0,
+        "statusCodes": {
+          "200": 1764,
+          "201": 74
+        }
+      },
+      "logTail": "  code: '42P07',\n  message: 'relation \"_migrations\" already exists, skipping',\n  file: 'parse_utilcmd.c',\n  line: '210',\n  routine: 'transformCreateStmt'\n}\n[api] listening on http://127.0.0.1:59165 (env=development)\n[api] database 127.0.0.1:5432/permitzero\n[api] tenant isolation: enforced (role pz_app, 22/22 tables)\n[api] outbox dispatcher disabled (no REDIS_URL)\n[api] model provider disabled (disabled)\n"
+    },
+    {
+      "runtimePoolMax": 25,
+      "connections": 25,
+      "port": 60335,
+      "durationSeconds": 30,
+      "boot": {
+        "readyMs": 2051,
+        "tenantIsolationEnforced": true
+      },
+      "requests": 1887,
+      "rps": 62.9,
+      "freshDecisions": 77,
+      "requestsSeenByServer": 1888,
+      "replayShare": 0.9592,
+      "server5xx": 0,
+      "serverErrorRate": 0,
+      "throttled4xx": 0,
+      "throttledShare": 0,
+      "serverLatencyMs": {
+        "p50": 360,
+        "p95": 493,
+        "p99": 1115
+      },
+      "clientLatencyMs": {
+        "p50": 382,
+        "p99": 1243,
+        "max": 9630
+      },
+      "client": {
+        "failures": 13,
+        "failureRate": 0.00689,
+        "connectionErrorsAndTimeouts": 13,
+        "ofWhichTimeouts": 13,
+        "pipelineResets": 0,
+        "statusCodes": {
+          "200": 1812,
+          "201": 75
+        }
+      },
+      "logTail": "  code: '42P07',\n  message: 'relation \"_migrations\" already exists, skipping',\n  file: 'parse_utilcmd.c',\n  line: '210',\n  routine: 'transformCreateStmt'\n}\n[api] listening on http://127.0.0.1:60335 (env=development)\n[api] database 127.0.0.1:5432/permitzero\n[api] tenant isolation: enforced (role pz_app, 22/22 tables)\n[api] outbox dispatcher disabled (no REDIS_URL)\n[api] model provider disabled (disabled)\n"
+    },
+    {
+      "runtimePoolMax": 10,
+      "connections": 5,
+      "port": 60971,
+      "durationSeconds": 30,
+      "boot": {
+        "readyMs": 2562,
+        "tenantIsolationEnforced": true
+      },
+      "requests": 1390,
+      "rps": 46.3,
+      "freshDecisions": 279,
+      "requestsSeenByServer": 1391,
+      "replayShare": 0.7994,
+      "server5xx": 0,
+      "serverErrorRate": 0,
+      "throttled4xx": 0,
+      "throttledShare": 0,
+      "serverLatencyMs": {
+        "p50": 77,
+        "p95": 150,
+        "p99": 230
+      },
+      "clientLatencyMs": {
+        "p50": 103,
+        "p99": 174,
+        "max": 3907
+      },
+      "client": {
+        "failures": 0,
+        "failureRate": 0,
+        "connectionErrorsAndTimeouts": 0,
+        "ofWhichTimeouts": 0,
+        "pipelineResets": 0,
+        "statusCodes": {
+          "200": 1112,
+          "201": 278
+        }
+      },
+      "logTail": "  code: '42P07',\n  message: 'relation \"_migrations\" already exists, skipping',\n  file: 'parse_utilcmd.c',\n  line: '210',\n  routine: 'transformCreateStmt'\n}\n[api] listening on http://127.0.0.1:60971 (env=development)\n[api] database 127.0.0.1:5432/permitzero\n[api] tenant isolation: enforced (role pz_app, 22/22 tables)\n[api] outbox dispatcher disabled (no REDIS_URL)\n[api] model provider disabled (disabled)\n"
+    }
+  ],
+  "diagnosis": {
+    "poolGain": 1.026,
+    "clientGain": 1.163,
+    "clientScalingEfficiency": 0.465,
+    "binding": "neither knob: throughput was flat against both the pool size and the client count",
+    "pairs": {
+      "overPool": {
+        "small": 61.3,
+        "large": 62.9
+      },
+      "overClients": {
+        "few": 52.7,
+        "many": 61.3
+      }
+    },
+    "serializedByTenant": "More clients produced no more throughput, and the pool was not the limit. Writes that append to the per-tenant audit hash chain are serialised by design (packages/db/src/repos/audit.ts: the sequence is assigned under a transaction-scoped advisory lock and the previous hash is re-checked against the head), so a single tenant cannot be appended to concurrently. This workload drives one tenant, so the chain is the ceiling."
+  },
+  "checks": [
+    {
+      "name": "every cell booted with row-level security enforced on the runtime pool",
+      "pass": true,
+      "unknown": false,
+      "detail": [
+        {
+          "pool": 10,
+          "enforced": true
+        },
+        {
+          "pool": 10,
+          "enforced": true
+        },
+        {
+          "pool": 25,
+          "enforced": true
+        },
+        {
+          "pool": 10,
+          "enforced": true
+        }
+      ]
+    },
+    {
+      "name": "no cell answered 5xx — a saturated pool must queue, not lie",
+      "pass": true,
+      "unknown": false,
+      "detail": [
+        {
+          "pool": 10,
+          "connections": 10,
+          "server5xx": 0
+        },
+        {
+          "pool": 10,
+          "connections": 25,
+          "server5xx": 0
+        },
+        {
+          "pool": 25,
+          "connections": 25,
+          "server5xx": 0
+        },
+        {
+          "pool": 10,
+          "connections": 5,
+          "server5xx": 0
+        }
+      ]
+    },
+    {
+      "name": "the limiter stayed out of the way",
+      "pass": true,
+      "unknown": false,
+      "detail": [
+        {
+          "pool": 10,
+          "throttledShare": 0
+        },
+        {
+          "pool": 10,
+          "throttledShare": 0
+        },
+        {
+          "pool": 25,
+          "throttledShare": 0
+        },
+        {
+          "pool": 10,
+          "throttledShare": 0
+        }
+      ]
+    },
+    {
+      "name": "the recommended operating point (pool 10, 5 clients) holds both objectives",
+      "pass": true,
+      "unknown": false,
+      "detail": {
+        "failureRate": 0,
+        "availabilityObjective": 0.999,
+        "serverP99Ms": 230,
+        "latencyObjectiveMs": 1500
+      }
+    },
+    {
+      "name": "every cell was measured",
+      "pass": true,
+      "unknown": false,
+      "detail": [
+        {
+          "pool": 10,
+          "connections": 10,
+          "p99": 249,
+          "freshDecisions": 159
+        },
+        {
+          "pool": 10,
+          "connections": 25,
+          "p99": 813,
+          "freshDecisions": 75
+        },
+        {
+          "pool": 25,
+          "connections": 25,
+          "p99": 1115,
+          "freshDecisions": 77
+        },
+        {
+          "pool": 10,
+          "connections": 5,
+          "p99": 230,
+          "freshDecisions": 279
+        }
+      ]
+    }
+  ],
+  "verdict": "PASS"
+}

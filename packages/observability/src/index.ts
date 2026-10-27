@@ -5,6 +5,7 @@
  * `apps/api`, so the worker can emit the same series without importing a web
  * framework, and the SLO math stays testable as pure functions.
  */
+export * from './exposition.js';
 export * from './metrics.js';
 export * from './slos.js';
 export * from './tracing.js';

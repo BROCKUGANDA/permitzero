@@ -1,0 +1,181 @@
+{
+  "ranAt": "2026-10-27T23:31:11.618Z",
+  "finishedAt": "2026-10-27T23:31:48.843Z",
+  "target": "http://127.0.0.1:8080",
+  "scenario": "allow",
+  "workload": {
+    "connections": 10,
+    "durationSeconds": 30,
+    "amountMinor": 300000,
+    "path": "POST /v1/actions"
+  },
+  "statusClasses": {
+    "before": {
+      "2xx": 1660
+    },
+    "after": {
+      "2xx": 3251
+    }
+  },
+  "pathMix": {
+    "requestsCompleted": 1590,
+    "freshDecisions": 159,
+    "replayedOrOther": 1432,
+    "replayShare": 0.9001,
+    "explanation": "fresh decisions are the ones that evaluated policy; the remainder answered 200 from the completed idempotency record"
+  },
+  "client": {
+    "requests": 1590,
+    "throughputRps": 53,
+    "bytesPerSecond": 87020.8,
+    "latencyMs": {
+      "p50": 186,
+      "p99": 259,
+      "max": 6479
+    },
+    "non2xx": 0,
+    "transportErrors": 0,
+    "failuresWithoutAnAnswer": 0,
+    "failureRate": 0,
+    "errorBreakdown": {
+      "connectionErrorsAndTimeouts": 0,
+      "ofWhichTimeouts": 0,
+      "pipelineResets": 0,
+      "expectationMismatches": 0,
+      "statusCodes": {
+        "200": 1431,
+        "201": 159
+      }
+    }
+  },
+  "server": {
+    "decisionsRecorded": 159,
+    "requestDelta": 1591,
+    "fivexxDelta": 0,
+    "latencyMs": {
+      "p50": 175,
+      "p95": 243,
+      "p99": 249
+    },
+    "note": "Server percentiles come from the API histogram scraped before/after, so they exclude load-generator scheduling. They are cumulative since process start, which is why the deltas of the counters are reported alongside."
+  },
+  "queryPlans": {
+    "actions by tenant + state (approval queue)": {
+      "index": null,
+      "parallel": false,
+      "sharedHits": null,
+      "sharedReads": null
+    },
+    "actions by tenant + time (list page)": {
+      "index": null,
+      "parallel": false,
+      "sharedHits": null,
+      "sharedReads": null
+    },
+    "audit by tenant + time (evidence page)": {
+      "index": null,
+      "parallel": false,
+      "sharedHits": null,
+      "sharedReads": null
+    },
+    "outbox claim (dispatcher tick)": {
+      "index": null,
+      "parallel": false,
+      "sharedHits": null,
+      "sharedReads": null
+    }
+  },
+  "checks": [
+    {
+      "name": "load actually reached the server",
+      "pass": true,
+      "unknown": false,
+      "detail": {
+        "requests": 1590
+      }
+    },
+    {
+      "name": "the server was reachable and scraped",
+      "pass": true,
+      "unknown": false,
+      "detail": {
+        "scrapedBefore": true,
+        "scrapedAfter": true,
+        "metricsTokenConfigured": true
+      }
+    },
+    {
+      "name": "the server recorded the decisions it made",
+      "pass": true,
+      "unknown": false,
+      "detail": {
+        "decisionsDelta": 159,
+        "histogramCount": 326
+      }
+    },
+    {
+      "name": "decision p99 within the 1500ms objective",
+      "pass": true,
+      "unknown": false,
+      "detail": {
+        "serverP99Ms": 249,
+        "clientP99Ms": 259,
+        "fallbackUsed": false,
+        "objective": 0.99
+      }
+    },
+    {
+      "name": "server-observed availability held under load",
+      "pass": true,
+      "unknown": false,
+      "detail": {
+        "serverErrorRate": 0,
+        "objective": 0.999
+      }
+    },
+    {
+      "name": "client-observed availability held under load",
+      "pass": true,
+      "unknown": false,
+      "detail": {
+        "clientFailureRate": 0,
+        "clientFailures": 0,
+        "objective": 0.999,
+        "connectionErrorsAndTimeouts": 0,
+        "ofWhichTimeouts": 0,
+        "pipelineResets": 0,
+        "expectationMismatches": 0,
+        "statusCodes": {
+          "200": 1431,
+          "201": 159
+        }
+      }
+    },
+    {
+      "name": "the server answered every request it accepted without a 5xx",
+      "pass": true,
+      "unknown": false,
+      "detail": {
+        "server5xx": 0,
+        "runtimePoolMax": "10"
+      }
+    },
+    {
+      "name": "the run measured the engine, not the rate limiter",
+      "pass": true,
+      "unknown": false,
+      "detail": {
+        "throttled": 0,
+        "requestsSeen": 1591,
+        "rateLimitMax": "(default 500/min)"
+      }
+    }
+  ],
+  "verdict": "PASS",
+  "environment": {
+    "node": "v26.7.0",
+    "runtimePoolMax": "10",
+    "modelProvider": "disabled (deterministic path)",
+    "rls": "enforced for tenant traffic (see /health/ready tenant_isolation)"
+  }
+}
