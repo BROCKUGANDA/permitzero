@@ -63,6 +63,12 @@ export async function closeTestDb(): Promise<void> {
   }
 }
 
+/** The current worker's database URL — for opening a SECOND session against it,
+ * which is the only way to test row-lock contention rather than lease timing. */
+export function testDbUrl(): string {
+  return workerUrl();
+}
+
 /**
  * A second connection to the SAME worker database, authenticated as the
  * restricted `pz_app` runtime role created by

@@ -9,6 +9,7 @@ import { createBullmqHandles } from '@permitzero/queue';
 import { loadConfig } from './config.js';
 import { createModelAdapter } from './model.js';
 import { buildApp } from './app.js';
+import { closeWithinDeadline } from './shutdown.js';
 
 function describeDatabase(url: string): string {
   try {
@@ -87,7 +88,10 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`[api] ${signal}; shutting down`);
     await ctx.queues.dispatcher?.stop().catch(() => undefined);
-    await app.close().catch(() => undefined);
+    const report = await closeWithinDeadline(app, config.shutdownGraceMs);
+    console.log(
+      `[api] drained in ${report.tookMs}ms (grace ${report.graceMs}ms${report.forced ? ', connections forced closed' : ''})`,
+    );
     await bullmq?.close().catch(() => undefined);
     await closeDb(runtime).catch(() => undefined);
     await closeDb(db).catch(() => undefined);

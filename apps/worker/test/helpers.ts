@@ -97,6 +97,7 @@ export function testWorkerConfig(): WorkerConfig {
     databaseUrl: workerUrl(),
     databaseRuntimeUrl: workerRuntimeUrl(),
     runtimePoolMax: 5,
+    shutdownGraceMs: 2_000,
     redisUrl: null,
     permitSigningKey: 'test-signing-key-0123456789abcdef',
     permitSigningKeyId: 'k-test',

@@ -31,6 +31,8 @@ export interface WorkerConfig {
   workerConcurrency: number;
   /** Age before an unknown execution is reconciled (in-flight calls settle first). */
   reconcileGraceMs: number;
+  /** Bounded drain on SIGTERM; keep below the orchestrator's kill timeout. */
+  shutdownGraceMs: number;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -65,6 +67,7 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     permitSigningKey,
     permitSigningKeyId: env['PERMIT_SIGNING_KEY_ID'] ?? 'k1',
     auditHmacKey: env['AUDIT_HMAC_KEY'] ?? null,
+    shutdownGraceMs: intIn(env, 'SHUTDOWN_GRACE_MS', 10_000, 100, 120_000),
     dispatchPollMs: intIn(env, 'DISPATCH_POLL_MS', 500, 50, 60_000),
     sweepIntervalMs: intIn(env, 'SWEEP_INTERVAL_MS', 30_000, 1_000, 3_600_000),
     dispatchBatchSize: intIn(env, 'DISPATCH_BATCH_SIZE', 50, 1, 500),

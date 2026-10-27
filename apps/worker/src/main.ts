@@ -52,7 +52,14 @@ async function main(): Promise<void> {
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`[worker] ${signal}; shutting down`);
-    await built.stop().catch(() => undefined);
+    // Bounded like the API's drain: a consumer that will not settle must not
+    // become the reason the pools never close and the outbox lease is held open.
+    const stopped = built.stop().catch(() => undefined);
+    const deadline = new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), config.shutdownGraceMs));
+    const outcome = await Promise.race([stopped.then(() => 'clean' as const), deadline]);
+    console.log(
+      `[worker] consumers and dispatcher ${outcome === 'clean' ? 'stopped' : 'stopped forcibly after the grace window'} (${config.shutdownGraceMs}ms allowed)`,
+    );
     await workers?.close().catch(() => undefined);
     await bullmq?.close().catch(() => undefined);
     await closeDb(runtime).catch(() => undefined);

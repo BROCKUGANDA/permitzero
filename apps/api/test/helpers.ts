@@ -134,6 +134,9 @@ export function testConfig(): ApiConfig {
     // Set so the /metrics route exists under test: an endpoint that is only ever
     // exercised when someone remembers to configure it is an endpoint that is broken.
     metricsToken: 'test-metrics-token',
+    // Short, so a test that shuts an app down does not wait on the
+    // production grace window.
+    shutdownGraceMs: 2_000,
   };
 }
 

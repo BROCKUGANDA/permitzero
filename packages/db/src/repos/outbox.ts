@@ -33,7 +33,13 @@ export interface ClaimedOutboxRow {
   traceId: string | null;
 }
 
-const CLAIM_LEASE_SECONDS = 60;
+/**
+ * How long a claim reserves a row before it becomes claimable again. Exported so
+ * the dispatcher's backoff maths and the tests read the same number instead of
+ * restating it — a lease that is 60s in the code and 120s in a test is a test
+ * that asserts a contract the implementation never made.
+ */
+export const CLAIM_LEASE_SECONDS = 60;
 
 export interface InsertOutboxInput {
   tenantId: string;

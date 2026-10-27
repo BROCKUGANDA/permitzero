@@ -34,6 +34,12 @@ export interface ApiConfig {
    * which is the safer failure than serving operational data to anyone who asks.
    */
   metricsToken: string | null;
+  /**
+   * How long SIGTERM lets in-flight requests finish before connections are closed
+   * forcibly. Must stay below whatever `stop_grace_period` the orchestrator uses,
+   * or the container is SIGKILLed mid-shutdown and the pools never close cleanly.
+   */
+  shutdownGraceMs: number;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -88,5 +94,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     rateLimitWindowMs: intIn(env, 'RATE_LIMIT_WINDOW_MS', 60_000, 1000, 3_600_000),
     maxBodyBytes: intIn(env, 'MAX_BODY_BYTES', 1_048_576, 1024, 50_000_000),
     metricsToken: env['METRICS_TOKEN']?.trim() ? env['METRICS_TOKEN'].trim() : null,
+    shutdownGraceMs: intIn(env, 'SHUTDOWN_GRACE_MS', 10_000, 100, 120_000),
   };
 }
