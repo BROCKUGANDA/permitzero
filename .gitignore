@@ -44,6 +44,14 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 
+# GitNexus index (large, regenerated locally)
+.gitnexus/
+
+# Demo artifacts (large binaries; not part of the codebase)
+demo-permitzero/
+*.mp4
+*.wav
+
 # Docker volumes mounted locally
 infra/data/
 
