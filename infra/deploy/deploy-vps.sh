@@ -33,6 +33,40 @@ done
 ENV_FILE=infra/deploy/permitzero.env
 COMPOSE="docker compose --env-file $ENV_FILE -f infra/docker-compose.yml"
 
+# The env file lives OUTSIDE the tree the deploy is run from, when the
+# operator points PZ_STATE_DIR at a persistent location.
+#
+# The reason is the deployment workflow: it checks the repository out into
+# the runner's workspace, and `actions/checkout` removes untracked and
+# ignored files — which includes this env file and the `storage/` and `run/`
+# directories. A later checkout would therefore erase the permit signing key
+# and the audit HMAC key, and the script would generate NEW ones against the
+# EXISTING database volume: every previously issued permit would stop
+# verifying, and the existing audit chain would stop verifying.
+#
+# So the durable state has one home, outside the tree, and the tree is a
+# copy of the verified commit rather than the place the state lives.
+STATE_DIR="${PZ_STATE_DIR:-}"
+if [ -n "$STATE_DIR" ]; then
+  mkdir -p "$STATE_DIR"
+  # Move any state that is still in the tree into its permanent home, once.
+  if [ -f "$ENV_FILE" ] && [ ! -f "$STATE_DIR/permitzero.env" ]; then
+    cp "$ENV_FILE" "$STATE_DIR/permitzero.env"
+    chmod 600 "$STATE_DIR/permitzero.env"
+    echo "== moved the env file to $STATE_DIR"
+  fi
+  if [ -d storage ] && [ ! -d "$STATE_DIR/storage" ]; then
+    cp -a storage "$STATE_DIR/storage"
+    echo "== moved the runtime state to $STATE_DIR"
+  fi
+  ENV_FILE="$STATE_DIR/permitzero.env"
+  # The compose file reads the env file by this variable, so the services
+  # receive the same file the script uses rather than a path relative to the
+  # tree.
+  export PZ_APP_ENV_FILE="$ENV_FILE"
+  COMPOSE="docker compose --env-file $ENV_FILE -f infra/docker-compose.yml"
+fi
+
 # --- 0. preflight: the invariants that must hold before anything starts -----
 # Checked before the build, not after, so a misconfigured host fails in
 # seconds rather than after a four-minute image build.
@@ -215,11 +249,25 @@ preflight
 mkdir -p run
 umask 077
 printf '%s' "${METRICS_TOKEN:-}" > run/pz_metrics_token
+# The file stays mode 0600 and owned by the deploying user: the containers
+# that need it read a COPY staged into a named volume by a one-shot container
+# that runs as root inside its own namespace. See the `observability-secrets`
+# service in infra/docker-compose.yml for why a bind mount cannot carry these
+# permissions into a container that runs as `nobody`.
 chmod 600 run/pz_metrics_token
 echo "== rendered run/pz_metrics_token ($(wc -c < run/pz_metrics_token) bytes)"
 
 if [ -n "${PZ_ALERT_WEBHOOK_URL:-}" ]; then
-  sed "s|__PZ_ALERT_WEBHOOK_URL__|${PZ_ALERT_WEBHOOK_URL}|g" \
+  # The URL is substituted into a sed REPLACEMENT, where `&` means "the text
+  # that matched" and `\` escapes the next character. A webhook URL
+  # containing either would corrupt the rendered config — or make sed fail
+  # and take the deployment down with it. So the replacement metacharacters
+  # are escaped first.
+  #
+  # The `|` delimiter is escaped too, because an unescaped `|` would end the
+  # sed expression early.
+  WEBHOOK_ESCAPED=$(printf '%s' "$PZ_ALERT_WEBHOOK_URL" | sed -e 's/[\\&|]/\\&/g')
+  sed "s|__PZ_ALERT_WEBHOOK_URL__|${WEBHOOK_ESCAPED}|g" \
     infra/observability/alertmanager/alertmanager.yml.template \
     > run/alertmanager.yml
   chmod 600 run/alertmanager.yml
@@ -240,10 +288,16 @@ fi
 # --- 2. images -------------------------------------------------------------
 if [ "$BUILD" = "1" ]; then
   echo "== reclaiming space before the build"
-  # Only this project's own images and the build cache. The box hosts other
-  # people's deployments and their rollback images are not ours to delete.
-  docker image prune -f >/dev/null 2>&1 || true
-  docker builder prune -f >/dev/null 2>&1 || true
+  # ONLY this project's own images. The box hosts other people's deployments
+  # and their rollback images are not ours to delete — a global
+  # `docker image prune -a` would remove every unreferenced image on the
+  # daemon, including another project's rollback target, and a global
+  # `docker builder prune` would delete every project's build cache.
+  #
+  # The compose label is what makes the scoping possible: images built by
+  # compose carry `com.docker.compose.project`, so the prune below reaches
+  # this project and nothing else.
+  docker image prune -f --filter "label=com.docker.compose.project=permitzero" >/dev/null 2>&1 || true
   for img in permitzero/verify:local permitzero/migrate:local; do
     if docker images -q "$img" | grep -q .; then
       # `docker rmi` fails if a container still references the image, which is
@@ -262,6 +316,44 @@ echo "== starting postgres + redis"
 $COMPOSE up -d postgres redis
 $COMPOSE ps postgres redis
 
+# --- 3a. the runtime role's password must be the one on the database -------
+# The env file names a password for the restricted runtime role. If the role
+# ALREADY EXISTS in the database — which is the case on any host that has run
+# a previous deploy, and always the case after the upgrade path above wrote a
+# fresh password — then the env file and the database disagree, and the API
+# cannot log in at all.
+#
+# Migration 0006 does not repair this: it only alters the role when its
+# ATTRIBUTES have drifted, and it runs once, so a password that was set
+# correctly at creation is never revisited. The symptom is a readiness check
+# that never passes, with the reason buried in the API's log.
+#
+# So the password is applied explicitly, here, where the database is running.
+# This is the one cluster-wide write the deploy performs, and it is
+# deliberate: the runtime role's password is a secret this deployment owns,
+# and it has to be the one the API presents.
+if [ -n "${PZ_RLS_ROLE_PASSWORD:-}" ]; then
+  echo "== applying the runtime role's password to the database"
+  PW="$PZ_RLS_ROLE_PASSWORD"
+  # The character class is the one the migration runner enforces, because the
+  # value is substituted into SQL text.
+  case "$PW" in
+    *[!A-Za-z0-9_.-]*)
+      echo "   FAIL: PZ_RLS_ROLE_PASSWORD must match [A-Za-z0-9_.-] (it is substituted into SQL)." >&2
+      exit 1
+      ;;
+  esac
+  # format('%L') quotes the value as a SQL literal, so the substitution is
+  # safe regardless of the password's content.
+  $COMPOSE exec -T postgres psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -v ON_ERROR_STOP=1 -c \
+    "DO \$\$ BEGIN
+       IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pz_app') THEN
+         EXECUTE format('ALTER ROLE pz_app WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB PASSWORD %L', '$PW');
+       END IF;
+     END \$\$;" 2>&1 | sed 's/^/   /' || true
+  echo "   ok"
+fi
+
 echo "== migrations${SEED:+ + seed}"
 # The migrate one-shot runs while the previous api/worker may still be
 # serving. Migration 0006 is additive (it creates policies and a role, and
@@ -275,6 +367,48 @@ echo "== starting api, worker, web, edge"
 $COMPOSE up -d api worker web edge
 sleep 6
 $COMPOSE ps
+
+# The observability stack is started in the same breath as the config it
+# reads. Rendering the Alertmanager configuration and Prometheus scrape token
+# and then not starting the containers that consume them leaves the alerting
+# path inert while the repository claims it works — which is the state this
+# deployment was in before.
+#
+# It is a compose PROFILE, so it does not start with the core services; it is
+# started explicitly here, and only when the deployment has the configuration
+# those containers need.
+if [ -f run/alertmanager.yml ] && [ -f run/pz_metrics_token ]; then
+  echo "== starting the observability stack (prometheus, alertmanager)"
+  # The secrets are staged into a named volume FIRST, by a one-shot container
+  # that runs as root inside its own namespace. Prometheus and Alertmanager
+  # both run as `nobody`, and a bind mount carries the host's ownership into
+  # the container — so a file that is mode 0600 and owned by the deploying
+  # user is unreadable to them. The deploying user cannot chown it either
+  # (it is unprivileged), so the copy is what makes the files readable.
+  $COMPOSE --profile observability up -d observability-secrets
+  $COMPOSE --profile observability run --rm observability-secrets 2>&1 | sed 's/^/   /'
+  $COMPOSE --profile observability up -d prometheus alertmanager
+  sleep 8
+  $COMPOSE --profile observability ps prometheus alertmanager
+  # A container that is restarting has not started. Prometheus and
+  # Alertmanager both crash-looped once because their configuration was
+  # unreadable, and a crash loop looks like "running" in a status column.
+  for svc in prometheus alertmanager; do
+    state=$($COMPOSE --profile observability ps -q "$svc" | head -1)
+    if [ -n "$state" ]; then
+      restarts=$($COMPOSE --profile observability ps --format '{{.Status}}' "$svc" 2>/dev/null | head -1)
+      case "$restarts" in
+        *Restarting*)
+          echo "   FAIL: $svc is crash-looping." >&2
+          $COMPOSE --profile observability logs --tail=10 "$svc" 2>&1 | sed 's/^/     /' >&2
+          exit 1
+          ;;
+      esac
+    fi
+  done
+else
+  echo "== observability configuration was not rendered; skipping prometheus/alertmanager" >&2
+fi
 
 # --- 5. smoke through the edge --------------------------------------------
 # --resolve pins the hostname to loopback so the request takes the same path a
@@ -322,19 +456,69 @@ fi
 # The direct check: as the runtime role, a query with no tenant context must
 # see zero tenant rows. This is the property the whole design rests on, and it
 # is the one thing a configuration check cannot tell you.
-ISOLATION_CHECK=$(
-  $COMPOSE exec -T postgres psql -U pz_app -d "$PZ_PG_DB" -t -A -c \
-    "SELECT count(*) FROM audit_events;" 2>&1 | tr -d '[:space:]' || echo "error"
-)
-if [ "$ISOLATION_CHECK" = "0" ]; then
-  echo "   ok: the pz_app role sees 0 audit rows with no tenant context"
-elif [ "$ISOLATION_CHECK" = "error" ]; then
-  echo "   WARN: could not run the isolation probe against the live database" >&2
-  echo "         $(printf '%s' "$ISOLATION_CHECK" | head -c 200)" >&2
+#
+# FIRST the check must be MEANINGFUL. A deployment that has never served a
+# request has an EMPTY audit_events table, and "the runtime role sees zero
+# rows" is then trivially true — it proves nothing, because there was nothing
+# to hide. So the probe first establishes that there IS a row the role must
+# not see: the ADMIN role has to see at least one. Only then does a zero
+# count from the runtime role mean anything.
+#
+# The output is captured WITHOUT piping through `tr` and WITHOUT `|| echo
+# "error"`, because under `set -o pipefail` that construction captured the
+# whitespace-stripped error TEXT with "error" appended to it — so the error
+# branch was unreachable and a connection failure was reported as
+# "pz_app sees psql:error:...error audit rows", which is a misleading
+# message about row-level security when the real problem was a bad password.
+#
+# Step 1: is there anything to hide? The admin role is exempt from row-level
+# security, so it sees every row. If IT sees none, then "the runtime role
+# sees none" is vacuous and the check below would be reporting a pass that
+# proves nothing.
+ADMIN_VISIBLE=$($COMPOSE exec -T postgres psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -t -A -c \
+  "SELECT count(*) FROM audit_events;" 2>/dev/null | tr -d '[:space:]' || echo "")
+if printf '%s' "$ADMIN_VISIBLE" | grep -Eq '^[0-9]+$' && [ "$ADMIN_VISIBLE" -gt 0 ]; then
+  echo "   the database holds $ADMIN_VISIBLE audit row(s), so a zero count below is meaningful"
 else
-  echo "   FAIL: the pz_app role sees $ISOLATION_CHECK audit rows with no tenant context." >&2
-  echo "         Row-level security is NOT applied to the runtime role." >&2
-  exit 1
+  echo "   NOTE: the database holds no audit rows yet, so the zero count below" >&2
+  echo "         shows only that there is nothing to leak. Isolation is still" >&2
+  echo "         enforced by the policies; this probe cannot prove it until" >&2
+  echo "         there is traffic." >&2
+fi
+
+# Step 2: the actual probe. The output is captured WITHOUT piping through `tr`
+# and WITHOUT `|| echo "error"`, because under `set -o pipefail` that
+# construction captured the whitespace-stripped error TEXT with "error"
+# appended to it — so the error branch was unreachable and a connection
+# failure was reported as "pz_app sees psql:error:...error audit rows", which
+# is a misleading message about row-level security when the real problem was a
+# bad password.
+#
+# So the exit status decides the branch, and the value is checked for being a
+# number before it is compared to zero.
+if ISOLATION_OUT=$($COMPOSE exec -T postgres psql -U pz_app -d "$PZ_PG_DB" -t -A -c \
+  "SELECT count(*) FROM audit_events;" 2>&1); then
+  ISOLATION_CHECK=$(printf '%s' "$ISOLATION_OUT" | tr -d '[:space:]')
+else
+  ISOLATION_CHECK=""
+  echo "   WARN: could not run the isolation probe against the live database" >&2
+  printf '         %s\n' "$(printf '%s' "$ISOLATION_OUT" | head -c 300)" >&2
+  echo "         This is a connection or authentication problem, NOT a row-level" >&2
+  echo "         security failure. Check that pz_app's password matches" >&2
+  echo "         PZ_RLS_ROLE_PASSWORD in the env file." >&2
+fi
+
+if [ -n "$ISOLATION_CHECK" ]; then
+  if ! printf '%s' "$ISOLATION_CHECK" | grep -Eq '^[0-9]+$'; then
+    echo "   WARN: the isolation probe returned something that is not a count" >&2
+    printf '         %s\n' "$(printf '%s' "$ISOLATION_OUT" | head -c 300)" >&2
+  elif [ "$ISOLATION_CHECK" = "0" ]; then
+    echo "   ok: the pz_app role sees 0 audit rows with no tenant context"
+  else
+    echo "   FAIL: the pz_app role sees $ISOLATION_CHECK audit rows with no tenant context." >&2
+    echo "         Row-level security is NOT applied to the runtime role." >&2
+    exit 1
+  fi
 fi
 
 echo

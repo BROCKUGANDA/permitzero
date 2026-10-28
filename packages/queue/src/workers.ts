@@ -29,6 +29,12 @@ export type WorkerEvent =
   | { kind: 'dead_lettered'; queue: QueueName; jobId: string; errorClass: string; attempts: number }
   | { kind: 'handler_error'; queue: QueueName; jobId: string; errorClass: string }
   | { kind: 'dlq_redriven'; queue: QueueName; jobId: string; errorClass: string }
+  /**
+   * The redrive happened, but the record of it did not land. The dead letter
+   * is still eligible, so the next pass will find it again; the stable id of
+   * the redriven job is what keeps that from becoming a second delivery.
+   */
+  | { kind: 'dlq_redrive_incomplete'; queue: QueueName; jobId: string; errorClass: string }
   | { kind: 'dlq_sweep_failed'; errorClass: string };
 
 /**
@@ -93,7 +99,81 @@ export interface Workers {
   start(): void;
   stop(): Promise<void>;
   close(): Promise<void>;
+  /**
+   * Run one dead-letter sweep pass and report how many dead letters it
+   * redrove.
+   *
+   * It is exposed because a sweep that only runs on a timer cannot be
+   * tested, cannot be triggered by an operator, and cannot be reasoned
+   * about: the thing that decides whether an event is delivered twice has
+   * to be callable on its own.
+   */
+  sweepOnce(): Promise<number>;
   readonly counts: Record<string, number>;
+}
+
+/** The name of the job that records a completed redrive. */
+const REDRIVEN_MARKER_NAME = 'redriven';
+
+/**
+ * How many dead-letter jobs one sweep pass reads.
+ *
+ * The pass reads the whole dead-letter queue rather than a window at its
+ * head, because the record of a completed redrive is the marker job written
+ * beside its dead letter: a window finds the dead letter and misses the
+ * marker, and a missed marker is a second delivery of an event that was
+ * already delivered. The cap keeps one pass from reading an unbounded
+ * queue, and a queue at the cap is a queue the sweep refuses to guess at.
+ */
+const DLQ_SCAN_LIMIT = 1_000;
+
+/**
+ * A job id segment that is safe to put inside a BullMQ job id.
+ *
+ * BullMQ refuses a custom job id that contains a colon unless the id has
+ * exactly three colon-separated parts, and the id of a job that came off a
+ * queue can contain anything at all -- the BullMQ adapter falls back to
+ * "<queue>:<name>:<attempt>" when a job carries no id of its own.
+ * Percent-encoding keeps the identity (the mapping is injective) and takes
+ * the colons out.
+ */
+function encodeJobIdSegment(value: string): string {
+  return encodeURIComponent(value);
+}
+
+/**
+ * The id of the job a redrive puts back on its source queue.
+ *
+ * The identity comes from the dead letter and not from the clock. A redrive
+ * that is retried after a partial failure has to land on the SAME job, or
+ * the queue has no way to recognise the second copy as the first one: an id
+ * built from `Date.now()` is a new id every time, and a queue that treats
+ * job ids as unique has nothing to refuse.
+ */
+function redriveTargetJobId(sourceQueue: QueueName, sourceJobId: string): string {
+  return `redrive:${sourceQueue}:${encodeJobIdSegment(sourceJobId)}`;
+}
+
+/**
+ * The id of the marker that records a completed redrive.
+ *
+ * Stable for the same reason the target's id is: the marker is the sweep's
+ * memory of what it has already done, and a memory with a fresh id in it is
+ * not a memory at all -- every retry would write a new marker and the sweep
+ * would never see the old one.
+ */
+function redriveMarkerJobId(sourceQueue: QueueName, sourceJobId: string): string {
+  return `dlq-redriven:${sourceQueue}:${encodeJobIdSegment(sourceJobId)}`;
+}
+
+/** Remove a job if the queue can. A queue that cannot says so. */
+async function removeJob(queue: QueueLike, jobId: string | undefined): Promise<boolean> {
+  if (!jobId || typeof queue.remove !== 'function') return false;
+  try {
+    return await queue.remove(jobId);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -190,7 +270,7 @@ export function createWorkers(deps: WorkerDeps): Workers {
             attempts: job.attempt,
             deadLetteredAt: new Date().toISOString(),
           },
-          { jobId: `dlq:${queue}:${job.id}` },
+          { jobId: `dlq:${queue}:${encodeJobIdSegment(job.id)}` },
         );
       } catch {
         // A DLQ that cannot accept the job must not make the original look
@@ -227,8 +307,12 @@ export function createWorkers(deps: WorkerDeps): Workers {
    *   · it redrives only first-generation dead letters — a redriven job that
    *     fails again stays dead, because a sweep that requeues its own output
    *     forever is a loop wearing a recovery hat;
-   *   · it redrives a bounded number per pass, and remembers what it already
-   *     redriven so a second pass does not publish the same event twice.
+   *   · it redrives a bounded number per pass;
+   *   · and it remembers what it already redrove — in the QUEUE, not in the
+   *     process. A dead letter is eligible until something says otherwise,
+   *     and the "otherwise" has to outlive the process: a set in memory is
+   *     empty after a restart, so every dead letter it forgets is delivered
+   *     a second time.
    */
   const sweepOptions: Required<DlqSweepOptions> | null =
     deps.dlqSweep === false
@@ -238,19 +322,65 @@ export function createWorkers(deps: WorkerDeps): Workers {
           redriveAfterMs: deps.dlqSweep?.redriveAfterMs ?? 15 * 60_000,
           batchSize: deps.dlqSweep?.batchSize ?? 10,
         };
+  /**
+   * A fast path over the durable record, not the record itself.
+   *
+   * The queue is the record (see the sweep below); this only saves a pass
+   * from re-reading a dead letter it has already handled in this process. It
+   * is bounded because it is a cache, and it is safe to forget an entry
+   * because the record it caches is still there.
+   */
   const alreadyRedriven = new Set<string>();
   let sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   async function sweepDeadLetters(): Promise<number> {
     if (!deps.dlq || !deps.audit || !sweepOptions) return 0;
     const target = deps.dlq;
-    // Look at more than the pass may redrive: the window is also full of the
-    // jobs this sweep has already handled, and of the `redriven` markers the
-    // redrive itself leaves behind.
-    const jobs = await target.getJobs(['waiting'], 0, Math.max(0, sweepOptions.batchSize * 10 - 1));
+    // The whole dead-letter queue is read, not a window at its head. The
+    // record of a completed redrive is the marker job written beside its
+    // dead letter, and a window at the head finds the dead letter and
+    // misses the marker: a missed marker is a second delivery of an event
+    // that was already delivered.
+    const listing = await target.getJobs(['waiting'], 0, DLQ_SCAN_LIMIT - 1);
+    const truncated = listing.length >= DLQ_SCAN_LIMIT;
+
+    // The durable record. Every dead letter that has already been redriven
+    // has a marker beside it, and the marker names the dead letter it
+    // belongs to. The record lives in the queue, so it survives a restart,
+    // which is the whole point: a memory of what THIS PROCESS redrove is
+    // empty after the process dies, and the dead letter it forgot is
+    // published again.
+    const redrivenSources = new Set<string>();
+    for (const job of listing) {
+      if (job.name !== REDRIVEN_MARKER_NAME) continue;
+      const marker = (job.data ?? {}) as Record<string, unknown>;
+      const sourceJobId = marker['sourceJobId'];
+      if (typeof sourceJobId === 'string') redrivenSources.add(sourceJobId);
+    }
+
+    if (truncated && typeof target.remove !== 'function') {
+      // The queue is bigger than one pass can read, so the record of what
+      // has already been redriven cannot be read either. Redriving now
+      // would risk publishing a second copy of an event that was already
+      // delivered, so the pass does nothing and says so. A duplicate
+      // delivery is worse than a late one: the handler is idempotent, but
+      // the audit trail of a doubled event is not.
+      //
+      // A queue that CAN remove is not held back by this: there the
+      // removal of the dead letter is the record, not the marker, and the
+      // stable id of the redriven job refuses the second copy that a
+      // missed marker would otherwise cause.
+      emit({ kind: 'dlq_sweep_failed', errorClass: 'DLQ_SCAN_TRUNCATED' });
+      return 0;
+    }
+
     let redriven = 0;
-    for (const job of jobs) {
+    for (const job of listing) {
       if (job.name !== 'dead_letter') continue;
+      // A bounded pass. The queue may still be broken, and a sweep that
+      // empties the whole dead-letter queue into a broken queue turns a
+      // recovery into an outage.
+      if (redriven >= sweepOptions.batchSize) break;
       const payload = (job.data ?? {}) as Record<string, unknown>;
       const sourceQueue = payload['sourceQueue'];
       const sourceJobId = payload['sourceJobId'];
@@ -260,6 +390,8 @@ export function createWorkers(deps: WorkerDeps): Workers {
       // Only the first generation. A redriven job carries a `redrive:` id, and
       // redriving it again would be the sweep chasing its own tail.
       if (sourceJobId.startsWith('redrive:')) continue;
+      // Already done, and the record of it outlived this process.
+      if (redrivenSources.has(sourceJobId)) continue;
       if (alreadyRedriven.has(sourceJobId)) continue;
       const deadLetteredAt = Date.parse(typeof payload['deadLetteredAt'] === 'string' ? payload['deadLetteredAt'] : '');
       if (!Number.isFinite(deadLetteredAt)) continue;
@@ -282,19 +414,33 @@ export function createWorkers(deps: WorkerDeps): Workers {
           },
           operatorId: 'system:dlq-sweep',
           reason: 'automatic dead-letter sweep: the downstream cause has had time to be fixed',
+          // The dead letter's own id, so the redrive can take it out of the
+          // queue. A dead letter that is still there is still eligible, and
+          // an eligible dead letter is redriven again after the next
+          // restart.
+          sourceDlqJobId: job.id,
         });
         if (result.redriven) {
           alreadyRedriven.add(sourceJobId);
-          // The set is a memory of what this process already redrove, so it
-          // is bounded: the oldest entries are the ones whose dead letter has
-          // been sitting in the queue longest, and the queue itself is the
-          // durable record.
           if (alreadyRedriven.size > 500) {
             const oldest = alreadyRedriven.values().next();
             if (!oldest.done) alreadyRedriven.delete(oldest.value);
           }
           redriven += 1;
           emit({ kind: 'dlq_redriven', queue: sourceQueue, jobId: sourceJobId, errorClass });
+          if (!result.markerWritten) {
+            // The work is back on the queue, but the record of the redrive
+            // did not land. The next pass will find this dead letter again
+            // -- the stable id of the redriven job is what keeps that from
+            // becoming a second delivery -- and the operator should know
+            // that the record is missing.
+            emit({
+              kind: 'dlq_redrive_incomplete',
+              queue: sourceQueue,
+              jobId: sourceJobId,
+              errorClass: 'DLQ_MARKER_NOT_WRITTEN',
+            });
+          }
         }
       } catch (err) {
         // The sweep is best-effort: a dead letter that cannot be redriven now
@@ -335,6 +481,9 @@ export function createWorkers(deps: WorkerDeps): Workers {
       }
       await Promise.all(workers.map((w) => w.close()));
     },
+    async sweepOnce() {
+      return sweepDeadLetters();
+    },
     get counts() {
       return { ...counts };
     },
@@ -353,10 +502,48 @@ export class RetryableJobError extends Error {
 }
 
 /**
+ * The outcome of a redrive.
+ *
+ * The two flags say what a redrive that did not finish cleanly left behind.
+ * `markerWritten` is the durable record that the redrive happened;
+ * `sourceRemoved` says the dead letter it came from is gone, so it can
+ * never be selected again. Either one missing means the next pass has to be
+ * careful, and the caller has to be told.
+ */
+export interface RedriveResult {
+  /** The work is back on its queue. */
+  redriven: boolean;
+  /** The id of the job on the source queue. */
+  jobId?: string;
+  /** The durable record of the redrive was written. */
+  markerWritten: boolean;
+  /** The dead letter the redrive came from was removed from the queue. */
+  sourceRemoved: boolean;
+}
+
+/**
  * Audited manual redrive. Requires an operator reason, re-checks nothing itself
  * (the handler's idempotency check does that on redelivery), and emits an audit
  * event — Master Prompt §12.4: "Redrive process requires an operator reason,
  * checks current state and idempotency, and emits an audit event."
+ *
+ * The redrive is written to be retried safely, because it will be retried:
+ * the sweep runs again after a restart, and a restart is exactly when the
+ * process no longer knows what it already did. Two things make the retry
+ * harmless:
+ *
+ *   · the redriven job's id is the DEAD LETTER's identity and not a fresh
+ *     timestamp, so a retry lands on the same job and the queue refuses the
+ *     second copy (a queue that treats job ids as unique -- BullMQ does --
+ *     has nothing to publish the second time);
+ *   · the dead letter itself is removed once the redrive is done, so it is
+ *     no longer eligible for a redrive at all.
+ *
+ * The order is deliberate. The enqueue happens before the marker is
+ * written, because a marker that says "redriven" without a job behind it is
+ * a dead letter that is never delivered again; and the marker is written
+ * before the dead letter is removed, because a removed dead letter with no
+ * marker is a dead letter that is redriven twice.
  */
 export async function redriveFromDlq(deps: {
   dlq: QueueLike;
@@ -372,7 +559,17 @@ export async function redriveFromDlq(deps: {
   };
   operatorId: string;
   reason: string;
-}): Promise<{ redriven: boolean; jobId?: string }> {
+  /**
+   * The id of the dead-letter job itself, so the redrive can take it out of
+   * the queue.
+   *
+   * A dead letter that is still in the queue is a dead letter that is still
+   * eligible, and an eligible dead letter is redriven again after the next
+   * restart. Removing it is what turns "this has been dealt with" from a
+   * fact the process remembers into a fact the queue remembers.
+   */
+  sourceDlqJobId?: string;
+}): Promise<RedriveResult> {
   if (deps.job.tenantId) {
     await deps.audit.append({
       tenantId: deps.job.tenantId,
@@ -387,14 +584,43 @@ export async function redriveFromDlq(deps: {
     });
   }
   const added = await deps.target.add(deps.job.jobName, deps.job.data, {
-    jobId: `redrive:${deps.job.sourceJobId}:${Date.now()}`,
+    jobId: redriveTargetJobId(deps.job.sourceQueue, deps.job.sourceJobId),
   });
-  await deps.dlq.add(
-    'redriven',
-    { ...deps.job, redrivenBy: deps.operatorId },
-    {
-      jobId: `dlq-redriven:${deps.job.sourceJobId}:${Date.now()}`,
-    },
-  );
-  return { redriven: true, jobId: added.id };
+
+  // The marker is the sweep's durable record of this redrive, and its id is
+  // stable for the same reason the target's is: a marker with a fresh id in
+  // it is a new marker every time, and the sweep would never find the old
+  // one. A queue that refuses a duplicate job id therefore refuses the
+  // second marker as well.
+  let markerWritten = false;
+  try {
+    await deps.dlq.add(
+      REDRIVEN_MARKER_NAME,
+      { ...deps.job, redrivenBy: deps.operatorId },
+      {
+        jobId: redriveMarkerJobId(deps.job.sourceQueue, deps.job.sourceJobId),
+      },
+    );
+    markerWritten = true;
+  } catch {
+    // The work is already on the queue. The marker is the record that says
+    // so, and the sweep reports the missing record; the redrive itself has
+    // happened and must not be repeated.
+  }
+
+  // The dead letter goes away with the redrive. This is the durable half of
+  // the dedupe: after a restart there is no memory of this pass to consult,
+  // and a dead letter that is still in the queue is still eligible.
+  const sourceRemoved = await removeJob(deps.dlq, deps.sourceDlqJobId);
+
+  // The marker was only ever needed while the dead letter was still there:
+  // it is what tells the next pass that the redrive already happened. With
+  // the dead letter gone the marker says nothing that the queue does not
+  // already say, and a queue that fills up with markers is a queue the
+  // sweep cannot read.
+  if (sourceRemoved && markerWritten) {
+    await removeJob(deps.dlq, redriveMarkerJobId(deps.job.sourceQueue, deps.job.sourceJobId));
+  }
+
+  return { redriven: true, jobId: added.id, markerWritten, sourceRemoved };
 }

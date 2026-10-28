@@ -27,9 +27,29 @@ export interface QueueJobSummary {
 /** Minimal structural view of a BullMQ queue. */
 export interface QueueLike {
   name: string;
+  /**
+   * Add a job.
+   *
+   * A job id, when given, is the job's identity: a queue that treats job
+   * ids as unique REFUSES a second job with an id it already holds instead
+   * of publishing it twice (BullMQ does exactly this). That is what makes a
+   * retry of an enqueue safe, so the id a caller passes has to be the
+   * identity of the work and not a fresh value from the clock.
+   */
   add(jobName: string, data: unknown, opts?: Record<string, unknown>): Promise<{ id?: string }>;
   getJobCounts(): Promise<Record<string, number>>;
   getJobs(statuses: ('waiting' | 'delayed' | 'active')[], start?: number, end?: number): Promise<QueueJobSummary[]>;
+  /**
+   * Remove a job by id, if the backend can.
+   *
+   * The dead-letter sweep needs this. A dead letter whose redrive has
+   * finished is still eligible until something says otherwise, and the
+   * something has to outlive the process: a queue's own retention model is
+   * the only durable record of "this has been dealt with" that a restart
+   * cannot lose. A port that cannot remove reports that it could not, and
+   * the sweep falls back to the marker it writes into the queue.
+   */
+  remove?(jobId: string): Promise<boolean>;
   close(): Promise<void>;
 }
 

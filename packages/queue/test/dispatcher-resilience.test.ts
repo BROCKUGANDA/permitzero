@@ -263,14 +263,21 @@ describe('the dead-letter sweep', () => {
         },
       },
     ];
+    // The dead-letter queue keeps what is written to it, so the record of a
+    // completed redrive is visible to the next pass -- and to the next
+    // process. A fake that only ever returned the dead letter would make
+    // the sweep's dedupe look like it worked when it was only the memory of
+    // the process that had redriven it.
+    const dlqMarkers: QueueJobSummary[] = [];
     const dlq: QueueLike = {
       name: QUEUE_NAMES.deadLetter,
       add: async (jobName, data) => {
         redriven.push({ jobName, data });
+        if (jobName === 'redriven') dlqMarkers.push({ id: 'dlq_marker', name: jobName, data });
         return { id: 'dlq_marker' };
       },
       getJobCounts: async () => ({}),
-      getJobs: async () => dlqJobs,
+      getJobs: async () => [...dlqJobs, ...dlqMarkers],
       close: async () => undefined,
     };
     const target: QueueLike = {

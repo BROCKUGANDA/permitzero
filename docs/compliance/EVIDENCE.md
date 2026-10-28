@@ -22,7 +22,7 @@ Statuses: `implemented` (control exists, is wired, and is tested), `partial`
 status: implemented
 sources: SOC 2 CC6.1, CC6.6; OWASP Agentic (identity/privilege abuse)
 claim: The deployed API connects as the restricted `pz_app` role, not as the schema owner, so row-level security applies to the traffic that actually serves tenants. The deployment script refuses to start without a runtime URL that names `pz_app`, and verifies the property against the live database rather than the configuration: after the rollout, a query as the runtime role with no tenant context set must return zero rows.
-evidence: infra/deploy/deploy-vps.sh:92 expect:DATABASE_URL_RUNTIME; infra/deploy/deploy-vps.sh:301 expect:tenant isolation in the running deployment
+evidence: infra/deploy/deploy-vps.sh:126 expect:DATABASE_URL_RUNTIME=postgres; infra/deploy/deploy-vps.sh:435 expect:verifying tenant isolation in the running deployment
 tests: packages/db/test/rls.test.ts; apps/api/test/tenant-isolation.test.ts
 note: The first version of the deployment script wrote `DATABASE_URL` but not `DATABASE_URL_RUNTIME`, and the application falls back to the admin URL when the latter is unset — so the deployed API ran as the schema owner, which row-level security does not bind, and every tenant row was reachable without a tenant context. The deployment now generates a random password for the restricted role, points the runtime URL at it, refuses to start if the two do not agree, and checks the live database after the rollout. Verified on the running deployment: 31 policies, 22/22 tenant tables enforced, and a cross-tenant read as `pz_app` returns zero rows.
 
@@ -35,11 +35,11 @@ evidence: infra/migrations/0006_row_level_security.sql:254 expect:CREATE POLICY 
 tests: packages/db/test/rls.test.ts; apps/api/test/tenant-isolation.test.ts
 gap: —
 
-### BLIND-WRITE-SCOPE — the escape hatch opens a READ, not a WRITE
+### BLIND-WRITE-SCOPE — the escape hatch opens a READ, and one bounded WRITE
 
 status: implemented
 sources: SOC 2 CC6.1, CC6.6; OWASP Agentic (identity/privilege abuse)
-claim: The `pz.tenant_blind` flag opens SELECT on the five door tables and the delivery backlog, and nothing else. It cannot insert, update or delete a `users` row of any tenant, and it cannot change any column of an outbox row outside the three the cross-tenant claim moves.
+claim: The `pz.tenant_blind` flag opens SELECT on the five door tables and the delivery backlog, and one bounded UPDATE: the three claim columns of an outbox row, which the cross-tenant claim genuinely needs. It cannot insert, update or delete a `users` row of any tenant, and it cannot change any other column of an outbox row.
 evidence: infra/migrations/0007_rls_write_scope.sql:70 expect:CREATE POLICY tenant_membership ON public.users; infra/migrations/0007_rls_write_scope.sql:104 expect:CREATE POLICY dispatch_claim ON public.outbox_events; infra/migrations/0007_rls_write_scope.sql:125 expect:pz_outbox_events_claim_scope
 tests: packages/db/test/rls.test.ts | the blind flag does NOT open the WRITE path on the door and delivery tables; packages/db/test/rls.test.ts | the blind flag may read, and may not write
 note: `0006` gave the blind flag `FOR ALL` policies on `users` and `outbox_events`, which is a write grant rather than a read grant — a blind transaction could have rewritten another tenant's identity record. `0007` narrows both, and the column-level half of the rule is enforced by a trigger, because a row-level policy cannot express which COLUMNS a statement may change.
@@ -222,14 +222,14 @@ sources: SOC 2 CC7.2; MAS SAFR (monitoring)
 claim: Decision latency, availability and outbox lag are exposed with a bucket at the SLO boundary, evaluated with multi-window multi-burn-rate logic, and shipped as Prometheus rules plus a dashboard; the report exits non-zero when an objective is breached OR when it measured nothing.
 evidence: packages/observability/src/slos.ts:234 expect:SLOS; packages/observability/src/slos.ts:120 expect:burnRateForBudgetSpend; packages/observability/src/metrics.ts:32 expect:DECISION_BUCKETS_SECONDS; apps/api/src/observability.ts:215 expect:verifyAuditChains; apps/api/src/model.ts:85 expect:breakerStateValue
 tests: packages/observability/test/observability.test.ts; packages/observability/test/alert-rules.test.ts; apps/api/test/observability.test.ts
-gap: The alert rules evaluate and route through an Alertmanager, but the receiver is a webhook whose URL is deployment configuration — no PagerDuty or Slack integration is wired, and the webhook is unset by default, in which case alerts are evaluated and dropped. The `permit-single-use` objective is enforced by a conditional UPDATE and a unique constraint rather than by a scrapeable series, so it is reported as NOT_SCRAPEABLE instead of being turned into a permanently red gate.
+gap: The alert rules evaluate and route through an Alertmanager, which is started by the deployment along with Prometheus, and the scrape target is confirmed up (`lastError` empty) with all nine rules loaded. The RECEIVER is a webhook whose URL is deployment configuration — no PagerDuty or Slack integration is wired, and the webhook is unset by default, in which case alerts are evaluated and then dropped. The `permit-single-use` objective is enforced by a conditional UPDATE and a unique constraint rather than by a scrapeable series, so it is reported as NOT_SCRAPEABLE instead of being turned into a permanently red gate.
 
 ### CHANGE-CONTROL — the gate is CI, not a promise
 
 status: partial
 sources: SOC 2 CC8.1
 claim: CI is configured to run typecheck, lint, the full suite, build, format, the strict SLO report against a live stack, gitleaks, the dependency gate, the compliance evidence gate and the resilience drill on every push, and `main` is protected so a change cannot reach it without those checks passing.
-evidence: .github/workflows/ci.yml:41 expect:verify; infra/migrations/0001_init.sql:26 expect:CREATE TABLE IF NOT EXISTS tenants; .github/workflows/auto-promote.yml:1 expect:Auto-promote; .github/workflows/deploy.yml:1 expect:Deploy
+evidence: .github/workflows/ci.yml:209 expect:verify -- --strict; infra/migrations/0001_init.sql:26 expect:CREATE TABLE IF NOT EXISTS tenants; .github/workflows/auto-promote.yml:1 expect:Auto-promote; .github/workflows/deploy.yml:1 expect:Deploy
 tests: scripts/verify.mjs
 gap: The gates run on a SELF-HOSTED runner, because this account's hosted runners are refused with "your account is locked due to a billing issue" — a hosted-runner run would not start at all, so a hosted-only workflow would report green forever without running a step. That is an account billing state, not a repository setting, and it is the one thing here that only a person with payment access can clear. The runner is on the deploy host, which also runs the production stack and four other projects. Auto-promotion is limited to Dependabot's own dependency bumps: a human-authored change is merged by a human, because auto-merging one would let a push to a branch bypass review.
 
@@ -238,7 +238,7 @@ gap: The gates run on a SELF-HOSTED runner, because this account's hosted runner
 status: absent
 sources: SOC 2 CC6.7; ISO 27001 (cryptography)
 claim: Nothing in this repository encrypts data at rest.
-evidence: infra/docker-compose.yml:32 expect:healthcheck
+evidence: infra/docker-compose.yml:44 expect:healthcheck:
 tests:
 gap: Left to the database platform (managed Postgres volume encryption / TDE). No implementation, no configuration, no evidence. Stated rather than implied by "secure by default".
 
