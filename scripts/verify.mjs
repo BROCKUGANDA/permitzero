@@ -9,9 +9,15 @@
  * Rules this file holds itself to:
  *   · Every step runs for real. Nothing here swallows a non-zero exit.
  *   · A skipped step is printed as SKIPPED with the reason, never folded into
- *     "passed". `--strict` turns any skip into a failure, which is what CI
- *     should use.
- *   · Exit code is 0 only when every required step passed.
+ *     "passed".
+ *   · "Skipped" and "not applicable here" are different statements, so each step
+ *     says which one it is. A step that cannot apply — the live demo scenario
+ *     with no running stack to drive, the secret scan on a machine without
+ *     gitleaks — is not required, and skipping it does not fail the gate. A
+ *     step that was required and could not run is a hole in the gate, so
+ *     `--strict` turns that skip into a failure, which is what CI should use.
+ *   · Exit code is 0 only when every step that ran passed. `--strict` adds one
+ *     more condition to that: no required step may have been skipped.
  *
  * Usage:
  *   node scripts/verify.mjs                 typecheck, lint, unit/integration,
@@ -21,10 +27,10 @@
  *   node scripts/verify.mjs --live URL      run the demo scenario against a
  *                                           running stack (proves the deployed
  *                                           product, not just the code)
- *   node scripts/verify.mjs --strict        a skipped required step fails
+ *   node scripts/verify.mjs --strict        a required step that was skipped
+ *                                           fails the gate
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -92,14 +98,46 @@ if (liveUrl) {
 // documented. Skipping this step is how a control map becomes decoration.
 add('compliance evidence gate', 'node', ['scripts/compliance-gate.mjs'], { required: true });
 
+// The dependency gate decides whether a tree has findings by parsing what npm
+// printed, and npm reports its own failures in JSON as well. Its parser is
+// checked against those shapes before it is allowed to judge a tree: it once
+// mistook npm's error envelope for an empty report and announced a clean tree
+// it had never seen.
+add('dependency gate self-check', 'node', ['scripts/audit-gate.mjs', '--self-test'], { required: true });
+
 add('format check', 'npx', ['prettier', '--check', '**/*.{ts,tsx,js,jsx,json,md,css,yml,yaml}'], {
   required: true,
 });
 
-if (existsSync(path.join(root, 'infra', 'deploy', 'permitzero.env'))) {
-  add('secret scan', 'npx', ['--no', 'gitleaks', 'detect', '--source', '.', '--no-git', '--redact', '--exit-code', '1'], {
+/**
+ * Is gitleaks actually installed on this machine?
+ *
+ * The secret scan used to be added to the list only when
+ * `infra/deploy/permitzero.env` existed, and the step it added carried a skip
+ * reason saying gitleaks was not installed. Those are two unrelated facts: the
+ * deploy file is a fact about a deployment, the binary is a fact about the
+ * machine running the gate. Asking about the file told the gate nothing about
+ * whether it could scan, and the skip reason then described a machine that was
+ * never consulted. So the question is put to the machine.
+ */
+function gitleaksAvailable() {
+  const probe = spawnSync('gitleaks', ['version'], {
+    cwd: root,
+    stdio: 'ignore',
+    shell: process.platform === 'win32',
+  });
+  return !probe.error && probe.status === 0;
+}
+
+const gitleaksArgs = ['detect', '--source', '.', '--no-git', '--redact', '--exit-code', '1'];
+if (gitleaksAvailable()) {
+  // The same command `npm run secret:scan` runs, so the local gate and the CI
+  // step are the same scan rather than two things that look alike.
+  add('secret scan', 'gitleaks', gitleaksArgs, { required: true });
+} else {
+  add('secret scan', 'gitleaks', gitleaksArgs, {
     required: false,
-    skip: 'gitleaks is not installed locally; the deploy host runs it',
+    skip: 'gitleaks is not installed on this machine; CI runs the same scan in its secret-scan job',
   });
 }
 
@@ -108,7 +146,10 @@ const startedAll = Date.now();
 
 for (const step of steps) {
   if (step.skip) {
-    results.push({ name: step.name, status: 'SKIPPED', detail: step.skip, ms: 0 });
+    // `required` travels with the result, because the strict decision is made
+    // after every step has run: a skip is only a hole in the gate when the step
+    // it skipped was one the gate was counting on.
+    results.push({ name: step.name, status: 'SKIPPED', detail: step.skip, ms: 0, required: step.required });
     console.log(`\n── ${step.name}: SKIPPED (${step.skip})`);
     continue;
   }
@@ -122,7 +163,7 @@ for (const step of steps) {
   });
   const ms = Date.now() - started;
   if (res.error) {
-    results.push({ name: step.name, status: 'FAIL', detail: res.error.message, ms });
+    results.push({ name: step.name, status: 'FAIL', detail: res.error.message, ms, required: step.required });
     continue;
   }
   results.push({
@@ -130,6 +171,7 @@ for (const step of steps) {
     status: res.status === 0 ? 'PASS' : 'FAIL',
     detail: res.status === 0 ? '' : `exit ${res.status}`,
     ms,
+    required: step.required,
   });
 }
 
@@ -138,12 +180,20 @@ console.log('\n' + '─'.repeat(56));
 console.log('verify summary');
 console.log('─'.repeat(56));
 for (const r of results) {
-  console.log(`${r.status.padEnd(8)} ${r.name.padEnd(width)} ${(r.ms / 1000).toFixed(1)}s ${r.detail}`);
+  const required = r.required ? '' : ' (optional)';
+  console.log(`${r.status.padEnd(8)} ${r.name.padEnd(width)} ${(r.ms / 1000).toFixed(1)}s ${r.detail}${required}`);
 }
 console.log('─'.repeat(56));
 
 const failed = results.filter((r) => r.status === 'FAIL');
-const skippedRequired = results.filter((r) => r.status === 'SKIPPED' && strict);
+// Only a required step that was skipped is a hole in the gate. An optional step
+// that was skipped — the live demo scenario with no stack to drive, the secret
+// scan on a machine without gitleaks — was never counted on, so counting its
+// skip here would fail a gate over a check the caller was told would not apply.
+// The bug this replaces failed every `--strict` run for exactly that reason:
+// CI ran `verify -- --strict` and was permanently red over a step marked
+// `required: false`.
+const skippedRequired = results.filter((r) => r.status === 'SKIPPED' && r.required && strict);
 const elapsed = ((Date.now() - startedAll) / 1000).toFixed(1);
 
 if (failed.length > 0) {
@@ -151,8 +201,11 @@ if (failed.length > 0) {
   process.exit(1);
 }
 if (skippedRequired.length > 0) {
-  console.log(`FAILED (strict): ${skippedRequired.length} step(s) were skipped (${elapsed}s)`);
+  const names = skippedRequired.map((r) => r.name).join(', ');
+  console.log(`FAILED (strict): ${skippedRequired.length} required step(s) were skipped — ${names} (${elapsed}s)`);
   process.exit(1);
 }
 const skipped = results.filter((r) => r.status === 'SKIPPED').length;
-console.log(`PASSED: ${results.filter((r) => r.status === 'PASS').length}/${results.length} steps, ${skipped} skipped (${elapsed}s)`);
+console.log(
+  `PASSED: ${results.filter((r) => r.status === 'PASS').length}/${results.length} steps, ${skipped} skipped (${elapsed}s)`,
+);

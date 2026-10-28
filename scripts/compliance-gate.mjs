@@ -49,6 +49,21 @@ const REQUIRED_ABSENT = [
   'PENETRATION-TEST-AND-INDEPENDENT-REVIEW',
 ];
 
+/**
+ * The alert runbooks.
+ *
+ * Every alert rule points at `docs/incidents.md#<anchor>`, and a paged
+ * engineer who follows a dead link at 03:00 has no runbook at all. The file
+ * existed and the anchors did not, which is the worst version of this: the
+ * rules looked complete.
+ *
+ * So the anchors are checked here. The list is derived from the alert rules
+ * themselves rather than duplicated here, so adding an alert without writing
+ * its runbook fails this gate instead of shipping a broken link.
+ */
+const ALERT_RULES_FILE = path.join(root, 'infra', 'observability', 'prometheus', 'rules', 'permitzero-alerts.yml');
+const RUNBOOK_FILE = path.join(root, 'docs', 'incidents.md');
+
 const failures = [];
 const fail = (where, message) => failures.push(`${where}: ${message}`);
 
@@ -222,6 +237,34 @@ function main() {
   }
   for (const [framework, hits] of frameworkHits) {
     if (hits === 0) fail('map', `no control cites ${framework}, but the README claims coverage of it`);
+  }
+
+  // Every runbook link an alert rule carries must resolve to a heading in the
+  // runbook file. A rule that points nowhere is an alert with no procedure,
+  // and the person woken by it is the one who finds out.
+  if (!existsSync(RUNBOOK_FILE)) {
+    fail('runbooks', `docs/incidents.md is missing; every alert rule points at it`);
+  } else if (existsSync(ALERT_RULES_FILE)) {
+    const rules = readFileSync(ALERT_RULES_FILE, 'utf8');
+    const runbook = readFileSync(RUNBOOK_FILE, 'utf8');
+    const anchors = new Set(
+      [...runbook.matchAll(/^#{2,3}\s+(.+)$/gm)].map((m) =>
+        m[1]
+          .toLowerCase()
+          .replace(/[^a-z0-9\s-]/g, '')
+          .trim()
+          .replace(/\s+/g, '-'),
+      ),
+    );
+    const referenced = [...rules.matchAll(/runbook:\s*'docs\/incidents\.md#([a-z0-9-]+)'/g)].map((m) => m[1]);
+    if (referenced.length === 0) {
+      fail('runbooks', 'no alert rule references docs/incidents.md; the runbook may have been renamed');
+    }
+    for (const anchor of new Set(referenced)) {
+      if (!anchors.has(anchor)) {
+        fail('runbooks', `docs/incidents.md has no section for the "${anchor}" anchor that the alert rules link to`);
+      }
+    }
   }
 
   if (verbose) {
