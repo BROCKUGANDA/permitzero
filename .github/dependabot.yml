@@ -1,0 +1,88 @@
+# Dependabot configuration.
+#
+# Two kinds of update, handled differently because they carry different risk:
+#
+#   · Security updates are never grouped and never delayed. A grouped
+#     security bump hides an advisory behind a diff that touches four
+#     unrelated packages, which is exactly when a security fix gets
+#     skipped.
+#   · Version updates are grouped, so one PR moves one coherent set of
+#     packages. The repository's own dependency gate (npm run audit:gate)
+#     decides whether the result is acceptable, and the auto-promote
+#     workflow merges the PR once that gate is green.
+#
+# The `applies-to` key is what separates the two: without it, every entry
+# would apply to both kinds of update, and the version-update groups would
+# silently start batching security fixes too.
+version: 2
+
+updates:
+  # --- npm: version updates, grouped by workspace ---------------------------
+  # Each group covers one workspace so a bump in the web console cannot be
+  # bundled with a bump in the database package. A grouped PR that mixes
+  # unrelated packages is harder to review and harder to revert.
+  - package-ecosystem: npm
+    directory: /
+    open-pull-requests-limit: 5
+    schedule:
+      interval: weekly
+    labels: ['dependencies']
+    commit-message:
+      prefix: 'chore(deps):'
+    applies-to:
+      - version-updates
+    groups:
+      api:
+        patterns: ['@permitzero/api', 'fastify*', '@fastify/*']
+      web:
+        patterns: ['@permitzero/web', 'next', 'react', 'react-dom']
+      db:
+        patterns: ['@permitzero/db', 'drizzle-orm', 'drizzle-kit', 'postgres']
+      policy:
+        patterns: ['@permitzero/policy', '@permitzero/schemas', 'zod']
+      observability:
+        patterns: ['@permitzero/observability', 'prom-client']
+      tooling:
+        patterns:
+          - 'typescript'
+          - 'eslint'
+          - 'prettier'
+          - 'vitest'
+          - '@vitest/*'
+          - 'tsx'
+          - '@types/*'
+
+  # --- npm: security updates, alone and immediately -------------------------
+  # No groups and no delay. The grouping above would otherwise batch a
+  # security fix together with unrelated version bumps, and the fix would
+  # have to be reviewed inside someone else's diff.
+  - package-ecosystem: npm
+    directory: /
+    open-pull-requests-limit: 5
+    schedule:
+      interval: daily
+    labels: ['dependencies', 'security']
+    commit-message:
+      prefix: 'chore(deps):'
+    applies-to:
+      - security-updates
+
+  # --- GitHub Actions: version updates --------------------------------------
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: ['dependencies']
+    commit-message:
+      prefix: 'chore(ci):'
+    applies-to:
+      - version-updates
+
+  # --- GitHub Actions: security updates -------------------------------------
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: ['dependencies', 'security']
+    applies-to:
+      - security-updates

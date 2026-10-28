@@ -5,11 +5,106 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+# A new push supersedes an in-flight run for the same ref. The deploy job is
+# excluded deliberately: it has its own concurrency group and cancelling it
+# halfway would leave the old containers down.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
 
 jobs:
   verify:
-    name: Verify (typecheck, lint, tests, build, format)
-    runs-on: ubuntu-latest
+    name: Verify (typecheck, lint, tests, build, format, gates)
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+    steps:
+      # The order below is a dependency chain, not a preference: the environment
+      # file first, then the schema and the seed data, then the verify gate
+      # (typecheck, lint, the suite, the build, the format check and the
+      # evidence-map gate), and only then the checks that need a running stack.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Write the CI environment
+        run: |
+          cp .env.example .env
+          sed -i 's|^DATABASE_URL=.*|DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/permitzero|' .env
+          sed -i 's|^DATABASE_URL_TEST=.*|DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:5432/permitzero_test|' .env
+          sed -i 's|^REDIS_URL=.*|REDIS_URL=redis://127.0.0.1:6379|' .env
+          # The RLS role's password is substituted into migration 0006 as SQL
+          # text. CI uses a fixed value because the database is thrown away
+          # after the run, but it must match what the runtime role uses or
+          # every tenant-isolation assertion would pass while proving nothing.
+          sed -i 's|^PZ_RLS_ROLE_PASSWORD=.*|PZ_RLS_ROLE_PASSWORD=pz_app_ci|' .env
+
+      - run: npm run db:migrate
+      - run: npm run db:seed
+
+      # typecheck, lint at --max-warnings=0, the full suite, the production
+      # build, the compliance evidence gate and the format check.
+      - run: npm run verify -- --strict
+
+      - name: Secret scan (gitleaks)
+        # The scanner is not on every runner image, and a step that cannot run
+        # is a step that reports a failure it never measured. The dedicated
+        # secret-scan job below always runs it — that action installs the
+        # binary itself — so a runner without gitleaks has the scan covered
+        # rather than red.
+        run: |
+          if command -v gitleaks > /dev/null 2>&1; then
+            npm run secret:scan
+          else
+            echo "gitleaks is not installed on this runner; the secret-scan job scans the history"
+          fi
+
+      # Dependency vulnerabilities, gated by named exception rather than by a
+      # threshold that the current tree already fails. Fails on anything that
+      # is not individually justified in infra/security/dependency-exceptions.json,
+      # and on a listed exception whose review date has passed.
+      - run: npm run audit:gate
+
+      # docs/compliance/EVIDENCE.md is the file a reviewer reads to check the
+      # README's claims, so CI resolves every citation in it and refuses a map
+      # whose documented absences have been quietly deleted or relabelled.
+      - run: npm run compliance:gate
+
+      # The outage drill runs against the CI Postgres/Redis services, so the
+      # resilience claims in the README are measured on every push.
+      - run: npm run drill:resilience
+        env:
+          DATABASE_URL_TEST: postgres://postgres:postgres@127.0.0.1:5432/permitzero_test
+          PZ_RLS_ROLE_PASSWORD: pz_app_ci
+
+  slo:
+    name: SLO report (live scrape, strict)
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    needs: verify
     services:
       postgres:
         image: postgres:17
@@ -26,39 +121,124 @@ jobs:
         ports: ['6379:6379']
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
+
       - run: npm ci
-      - run: cp .env.example .env
-      - run: |
-          sed -i 's/^DATABASE_URL=.*/DATABASE_URL=postgres:\/\/postgres:postgres@127.0.0.1:5432\/permitzero/' .env
-          sed -i 's/^DATABASE_URL_TEST=.*/DATABASE_URL_TEST=postgres:\/\/postgres:postgres@127.0.0.1:5432\/permitzero_test/' .env
-          sed -i 's/^REDIS_URL=.*/REDIS_URL=redis:\/\/127.0.0.1:6379/' .env
+
+      - name: Write the CI environment
+        run: |
+          cp .env.example .env
+          sed -i 's|^DATABASE_URL=.*|DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/permitzero|' .env
+          sed -i 's|^DATABASE_URL_TEST=.*|DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:5432/permitzero_test|' .env
+          sed -i 's|^REDIS_URL=.*|REDIS_URL=redis://127.0.0.1:6379|' .env
+          sed -i 's|^PZ_RLS_ROLE_PASSWORD=.*|PZ_RLS_ROLE_PASSWORD=pz_app_ci|' .env
+          # The SLO report refuses to scrape an unauthenticated /metrics, and
+          # the endpoint is not registered at all without a token.
+          echo "METRICS_TOKEN=ci-metrics-token" >> .env
+
       - run: npm run db:migrate
       - run: npm run db:seed
-      - run: npm run verify -- --strict
-      - run: npm run secret:scan
-      # Dependency vulnerabilities, gated by named exception rather than by a
-      # threshold that the current tree already fails. Fails on anything that is
-      # not individually justified in infra/security/dependency-exceptions.json,
-      # and on a listed exception whose review date has passed.
-      - run: npm run audit:gate
-      # docs/compliance/EVIDENCE.md is the file a reviewer reads to check the
-      # README's claims, so CI resolves every citation in it and refuses a map whose
-      # documented absences have been quietly deleted or relabelled.
-      - run: npm run compliance:gate
-      # The outage drill runs against the CI Postgres/Redis services, so the
-      # resilience claims in the README are measured on every push.
-      - run: npm run drill:resilience
+
+      - name: Start the API
         env:
-          DATABASE_URL_TEST: postgres://postgres:postgres@127.0.0.1:5432/permitzero_test
-          PZ_RLS_ROLE_PASSWORD: pz_app_dev
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/permitzero
+          DATABASE_URL_RUNTIME: postgres://pz_app:pz_app_ci@127.0.0.1:5432/permitzero
+          REDIS_URL: redis://127.0.0.1:6379
+          PERMIT_SIGNING_KEY: ci-permit-signing-key-0123456789
+          AUDIT_HMAC_KEY: ci-audit-hmac-key-0123456789abcdef
+          METRICS_TOKEN: ci-metrics-token
+          PORT: '8080'
+          HOST: 127.0.0.1
+        run: |
+          # `setsid` gives the API its own process group. `npm run` starts the
+          # API as a child of a shell, so killing the npm process alone would
+          # leave the API listening on the port for the rest of the job — and a
+          # leftover server is a stack the next step cannot tell from the one it
+          # just started.
+          setsid npm run start:api > /tmp/pz-api.log 2>&1 &
+          echo "API_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for readiness
+        run: |
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health/ready || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "API is ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "API did not become ready; last log lines:" >&2
+          tail -40 /tmp/pz-api.log >&2 || true
+          exit 1
+
+      - name: Drive traffic so the rates are not vacuous
+        run: |
+          # The report is explicit that an endpoint with no observed traffic makes
+          # every rate meaningless, and the decision-latency objective needs an
+          # actual decision rather than a liveness answer. So this drives real
+          # intakes with the seeded agent credential: the body comes from the
+          # repository's own load workload, so the request shape cannot drift
+          # from the one the API accepts, and an unauthenticated request would
+          # only add a 401 to the counter.
+          cat > /tmp/pz-slo-traffic.mjs <<'NODE'
+          import { pathToFileURL } from 'node:url';
+
+          const repo = process.env.GITHUB_WORKSPACE ?? process.cwd();
+          const { loadCredentials, intakeBody } = await import(
+            pathToFileURL(`${repo}/scripts/lib/load-workload.mjs`).href
+          );
+          const { agentId, token } = loadCredentials(repo);
+          const base = 'http://127.0.0.1:8080';
+          let decided = 0;
+          for (let i = 0; i < 5; i += 1) {
+            const res = await fetch(`${base}/v1/actions`, {
+              method: 'POST',
+              headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+              body: intakeBody(agentId, i),
+            });
+            const text = await res.text();
+            console.log(`intake ${i}: HTTP ${res.status}`);
+            if (res.ok) decided += 1;
+            else console.log(text.slice(0, 300));
+          }
+          if (decided === 0) {
+            console.error('the API decided nothing; the report below would be measuring an empty stack');
+            process.exit(1);
+          }
+          NODE
+          npx tsx /tmp/pz-slo-traffic.mjs
+
+      - name: SLO report
+        env:
+          # The same token the API was started with. A literal here would be one
+          # more place for the two to drift apart, and a scrape with the wrong
+          # token answers 401 — which the report would report as a stack it
+          # could not measure.
+          METRICS_TOKEN: ci-metrics-token
+        run: npm run slo:report -- --url http://127.0.0.1:8080 --token "$METRICS_TOKEN" --strict
+
+      - name: Stop the API
+        if: always()
+        # The whole group first, then the process itself, then anything still
+        # answering to the API's command line: `npm run` starts the API as a
+        # grandchild, so any one of those three can be the one holding the
+        # port. A gate that leaves a server behind is a gate that can make the
+        # next measurement wrong. The bracket in the pattern keeps the matcher
+        # from matching its own command line.
+        run: |
+          kill -- -"$API_PID" 2>/dev/null || true
+          kill "$API_PID" 2>/dev/null || true
+          pkill -f '[s]rc/server.ts' 2>/dev/null || true
 
   secret-scan:
     name: Secret scan (gitleaks)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:

@@ -1,0 +1,80 @@
+name: Auto-promote
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# One promotion attempt per PR at a time. Without this, three pushes in a
+# minute start three merge attempts and GitHub's auto-merge queue rejects
+# the extras.
+concurrency:
+  group: auto-promote-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  promote:
+    name: Enable auto-merge when the gates are green
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - name: Check whether this pull request is eligible
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+
+          # --- 1. the pull request must target the protected branch ---------
+          if [ "$BASE" != "main" ]; then
+            echo "not targeting main ($BASE); not promoting"
+            exit 0
+          fi
+
+          # --- 2. only Dependabot's dependency bumps are auto-promoted -----
+          # A human-authored change is merged by a human. Auto-merging those
+          # would let a push to a branch bypass review, which is the opposite
+          # of what branch protection is for. Dependabot's bumps are
+          # mechanical, and they are the ones that actually rot when nobody
+          # merges them.
+          AUTHOR=$(gh pr view "$PR" --json author --jq '.author.login')
+          if [ "$AUTHOR" != "dependabot[bot]" ]; then
+            echo "author is $AUTHOR, not dependabot[bot]; not promoting"
+            exit 0
+          fi
+
+          # --- 3. the draft flag blocks promotion --------------------------
+          if [ "$(gh pr view "$PR" --json isDraft --jq '.isDraft')" = "true" ]; then
+            echo "pull request is a draft; not promoting"
+            exit 0
+          fi
+
+          # --- 4. every required check must have passed on THIS commit ----
+          # Not "the checks are green" in general, but green at this exact
+          # SHA. A check that passed on an earlier commit says nothing about
+          # the code being merged.
+          echo "required checks for $HEAD:"
+          gh api "repos/${{ github.repository }}/commits/$HEAD/check-runs" \
+            --jq '.check_runs[] | "  \(.name): \(.conclusion // .status)"'
+
+          FAILED=$(gh api "repos/${{ github.repository }}/commits/$HEAD/check-runs" \
+            --jq '[.check_runs[] | select(.status != "completed" or .conclusion != "success")] | length')
+          if [ "$FAILED" -ne 0 ]; then
+            echo "$FAILED check(s) are not passing; not promoting"
+            exit 0
+          fi
+
+          # --- 5. enable auto-merge ----------------------------------------
+          # `gh pr merge --auto` registers the merge with GitHub rather than
+          # merging immediately: GitHub merges it once the branch protection
+          # rules are satisfied, which includes the required status checks.
+          # If the merge cannot happen, the request stays queued and GitHub
+          # tells us why.
+          echo "enabling auto-merge"
+          gh pr merge "$PR" --squash --auto --delete-branch \
+            || echo "auto-merge could not be enabled; GitHub will report the reason on the pull request"

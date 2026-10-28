@@ -1,0 +1,73 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy
+        required: false
+        default: staging
+
+# One deploy at a time per environment, and never cancel a running one: a
+# deploy cancelled halfway has already removed the old containers and not yet
+# started the new ones.
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || 'staging' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to ${{ github.event.inputs.environment || 'staging' }}
+    runs-on: ${{ vars.DEPLOY_RUNNER || 'self-hosted' }}
+    environment:
+      name: ${{ github.event.inputs.environment || 'staging' }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The deploy builds images from a known commit, so the tree that
+          # ships is the tree that was verified. A shallow clone is enough
+          # and keeps the runner's disk usage down — this box is shared.
+          fetch-depth: 1
+
+      - name: Confirm the commit is the one that passed CI
+        run: |
+          set -euo pipefail
+          echo "deploying ${{ github.sha }}"
+
+      - name: Deploy
+        env:
+          PZ_DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # The runner's working directory is the checked-out tree. The
+          # deployment script builds from it and keeps its own secrets in
+          # infra/deploy/permitzero.env on the host, which is gitignored and
+          # never leaves the machine.
+          ./infra/deploy/deploy-vps.sh
+
+      - name: Verify the deployment
+        run: |
+          set -euo pipefail
+          # The script already verified readiness and tenant isolation from
+          # inside the compose network. This is the second opinion from
+          # outside, through the edge, exactly as a visitor would arrive.
+          for i in $(seq 1 30); do
+            code=$(curl -sk -o /tmp/pz-verify.json -w '%{http_code}' \
+              --resolve permitzero.svalley.tech:8450:127.0.0.1 \
+              https://permitzero.svalley.tech:8450/health/ready || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "readiness: $(cat /tmp/pz-verify.json)"
+              exit 0
+            fi
+            echo "attempt $i: /health/ready returned $code"
+            sleep 5
+          done
+          echo "the deployment did not become ready" >&2
+          cat /tmp/pz-verify.json >&2 2>/dev/null || true
+          exit 1
