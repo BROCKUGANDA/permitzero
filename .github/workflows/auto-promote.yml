@@ -23,17 +23,20 @@ on:
 # pushes in a minute start three merge attempts and GitHub's auto-merge queue
 # rejects the extras.
 #
-# The group is keyed on the pull request, because that is what the two
-# triggers must agree on. The `pull_request` trigger knows the number
-# directly; the `workflow_run` trigger has to look it up from the completed
-# run, and a concurrency group cannot do a lookup. So the group falls back to
-# the run's id for that path.
+# The group is keyed on the pull request when the event names one directly.
 #
-# Keying on the head commit instead — which is what this did — put the two
-# attempts for ONE pull request into two different groups, because a
+# A workflow-level concurrency group is evaluated before any step runs, so it
+# cannot know the pull request number for a `workflow_run` event — that number
+# has to be looked up from the completed run, which is a step. So the
+# workflow_run path falls back to the run's id, and the SERIALISATION that
+# actually matters happens in the job below, whose concurrency group IS keyed
+# by the resolved pull request number. Both attempts for one pull request
+# therefore reach `gh pr merge` one at a time.
+#
+# Keying on the head commit — which is what an earlier version did — put the
+# two attempts for ONE pull request into two different groups, because a
 # `pull_request` CI run is made against a merge ref and its SHA is not the
-# pull request's head. Both attempts then reached `gh pr merge` for the same
-# pull request, and the second was rejected.
+# pull request's head.
 concurrency:
   group: auto-promote-${{ github.event.pull_request.number || github.event.workflow_run.id }}
   cancel-in-progress: true
@@ -43,10 +46,16 @@ permissions:
   pull-requests: write
   # The gate reads the check runs of the head commit.
   checks: read
+  # The gate also reads the COMPLETED RUN to find which pull request it
+  # belonged to. Without this the lookup is refused and every promotion
+  # silently stops — a permission error and "there was nothing to promote"
+  # look the same from the outside, which is why the lookup's failure is now
+  # reported rather than swallowed.
+  actions: read
 
 jobs:
-  promote:
-    name: Enable auto-merge when the gates are green
+  resolve:
+    name: Resolve the pull requests to promote
     # A fork pull request may not run on the self-hosted runner. This
     # workflow holds a write token, and on the pull_request path the
     # workflow file itself comes from the pull request's merge ref — so a
@@ -57,6 +66,8 @@ jobs:
     # job checks out or runs repository code.
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
+    outputs:
+      prs: ${{ steps.targets.outputs.prs }}
     steps:
       - name: Resolve the pull requests to consider
         id: targets
@@ -72,6 +83,11 @@ jobs:
           # pull_request-triggered run silently skipped every pull request
           # whose repository could not be inferred.
           GH_REPO: ${{ github.repository }}
+          # The same repository, under the name the `gh api` path uses. `gh`
+          # reads GH_REPO for its own default, but the URL in the command is
+          # built by the shell, and an undefined variable there is a step that
+          # aborts before it can do anything.
+          REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -119,8 +135,16 @@ jobs:
           # it would make this step fail in a way that looks like "there was
           # nothing to promote", and a gate that cannot run is
           # indistinguishable from a gate that decided not to act.
-          PICKED=$(gh api "repos/$REPO/actions/runs/$RUN_ID" \
-            --jq '[.pull_requests[]?.number] | join(" ")' 2>/dev/null || echo "")
+          #
+          # A FAILED lookup is reported as a failure, not as "there was
+          # nothing to promote". The two are different facts, and conflating
+          # them means a transient API error silently stops every promotion.
+          if ! PICKED=$(gh api "repos/$REPO/actions/runs/$RUN_ID" \
+            --jq '[.pull_requests[]?.number] | join(" ")' 2>&1); then
+            echo "could not read the completed run $RUN_ID" >&2
+            printf '         %s\n' "$PICKED" >&2
+            exit 1
+          fi
           if [ -z "$PICKED" ]; then
             echo "the completed run was not associated with a pull request; nothing to promote"
             echo "prs=" >> "$GITHUB_OUTPUT"
@@ -130,15 +154,35 @@ jobs:
           echo "prs=$PRS" >> "$GITHUB_OUTPUT"
           echo "considering pull request(s) $PRS"
 
+  promote:
+    name: Enable auto-merge when the gates are green
+    needs: resolve
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    # The serialisation that actually matters, keyed by the pull request the
+    # RESOLVE step found.
+    #
+    # The workflow-level group cannot do this: it is evaluated before any step
+    # runs, so for a workflow_run event it does not yet know which pull
+    # request the completed run belonged to. Keying it by the run's id instead
+    # puts the run-triggered attempt and the pull-request-triggered attempt
+    # for the SAME pull request in two different groups, and both reach
+    # `gh pr merge` — the second of which GitHub rejects, leaving the
+    # rejection in a log nobody reads.
+    #
+    # So the promotion itself is a separate job whose concurrency group IS the
+    # pull request number. Two attempts for one pull request now queue; two
+    # attempts for two different pull requests do not.
+    concurrency:
+      group: auto-promote-pr-${{ needs.resolve.outputs.prs }}
+      cancel-in-progress: false
+    steps:
       - name: Check whether these pull requests are eligible
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # The repository every `gh` call is about. See the note in the
-          # resolution step: without it, `gh` infers the repository from a
-          # git remote that may not exist on this runner.
           GH_REPO: ${{ github.repository }}
           REPO: ${{ github.repository }}
-          PRS: ${{ steps.targets.outputs.prs }}
+          PRS: ${{ needs.resolve.outputs.prs }}
         run: |
           set -euo pipefail
 
