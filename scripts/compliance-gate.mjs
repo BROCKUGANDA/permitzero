@@ -145,13 +145,17 @@ function checkEvidence(control, entry) {
     return null;
   }
   const lines = readFileSync(absolute, 'utf8').split('\n');
-  if (parsed.line < 1 || parsed.line > lines.length) {
+  const isDocument = /\.(md|mdx)$/i.test(parsed.file);
+  const outOfRange = parsed.line < 1 || parsed.line > lines.length;
+  if (outOfRange && !(isDocument && parsed.expect)) {
     fail(where, `${parsed.file}:${parsed.line} is outside the file (${lines.length} lines)`);
     return null;
   }
   if (!parsed.expect) return { file: parsed.file, line: parsed.line };
-  const window = lines.slice(Math.max(0, parsed.line - 9), parsed.line + 8).join('\n');
-  if (window.includes(parsed.expect)) return { file: parsed.file, line: parsed.line };
+  if (!outOfRange) {
+    const window = lines.slice(Math.max(0, parsed.line - 9), parsed.line + 8).join('\n');
+    if (window.includes(parsed.expect)) return { file: parsed.file, line: parsed.line };
+  }
 
   // The cited line has moved, but the TEXT is still in the file.
   //
@@ -166,21 +170,35 @@ function checkEvidence(control, entry) {
   // reported as a distinct, actionable finding rather than as a broken
   // citation — and, unlike the stale-line case, it does not fail the build
   // when the file is a document whose wording is what is being evidenced.
-  const elsewhere = lines.findIndex((l) => l.includes(parsed.expect));
-  if (elsewhere !== -1) {
-    if (/\.(md|mdx)$/i.test(parsed.file)) {
-      // A document citation: the claim holds, the line number drifted.
-      // The line is corrected in place and reported, so the map stays
-      // accurate without turning a prose edit into a red build.
+  //
+  // When the token appears MORE THAN ONCE, the match is ambiguous: the gate
+  // cannot tell which occurrence was meant, and silently rewriting the
+  // citation to the first one would persist the wrong evidence. That case
+  // fails, with the candidates listed so the owner can point at the right
+  // one.
+  const matches = [];
+  lines.forEach((l, i) => {
+    if (l.includes(parsed.expect)) matches.push(i + 1);
+  });
+  if (matches.length === 1) {
+    const [only] = matches;
+    if (isDocument) {
       note(
         where,
-        `${parsed.file}:${parsed.line} no longer contains "${parsed.expect}" — it moved to line ${elsewhere + 1}; the citation was updated`,
+        `${parsed.file}:${parsed.line} no longer contains "${parsed.expect}" — it moved to line ${only}; the citation was updated`,
       );
-      return { file: parsed.file, line: elsewhere + 1 };
+      return { file: parsed.file, line: only };
     }
     fail(
       where,
-      `${parsed.file}:${parsed.line} no longer contains "${parsed.expect}" (it is now at line ${elsewhere + 1}) — the code moved and the citation is stale`,
+      `${parsed.file}:${parsed.line} no longer contains "${parsed.expect}" (it is now at line ${only}) — the code moved and the citation is stale`,
+    );
+    return null;
+  }
+  if (matches.length > 1) {
+    fail(
+      where,
+      `${parsed.file}:${parsed.line} does not contain "${parsed.expect}", and it now appears on ${matches.length} lines (${matches.join(', ')}) — point the citation at the one you mean`,
     );
     return null;
   }

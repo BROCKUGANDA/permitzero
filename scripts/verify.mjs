@@ -129,15 +129,25 @@ function gitleaksAvailable() {
   return !probe.error && probe.status === 0;
 }
 
+// The local gate scans the WORKING TREE.
+//
+// It is a file scan, not a history scan, and it says so: `npm run
+// secret:scan` scans the history, because a developer's clone has one, while
+// this gate runs in whatever tree it was invoked from — which may be a
+// shallow checkout, where `git log -p` has no history to walk. A history scan
+// over a shallow clone examines almost nothing while looking like it
+// examined everything.
+//
+// The history is scanned by the dedicated CI job, which checks the repository
+// out with `fetch-depth: 0` for exactly that reason. Between the two, every
+// committed secret is covered: the tree here, the history there.
 const gitleaksArgs = ['detect', '--source', '.', '--no-git', '--redact', '--exit-code', '1'];
 if (gitleaksAvailable()) {
-  // The same command `npm run secret:scan` runs, so the local gate and the CI
-  // step are the same scan rather than two things that look alike.
-  add('secret scan', 'gitleaks', gitleaksArgs, { required: true });
+  add('secret scan (working tree)', 'gitleaks', gitleaksArgs, { required: true });
 } else {
-  add('secret scan', 'gitleaks', gitleaksArgs, {
+  add('secret scan (working tree)', 'gitleaks', gitleaksArgs, {
     required: false,
-    skip: 'gitleaks is not installed on this machine; CI runs the same scan in its secret-scan job',
+    skip: 'gitleaks is not installed on this machine; CI scans the history in its secret-scan job',
   });
 }
 

@@ -308,7 +308,7 @@ npm test                   # vitest (unit + integration)
 npm run typecheck
 npm run lint
 npm run verify             # the release gate, in one command
-npm run secret:scan        # gitleaks (working tree)
+npm run secret:scan        # gitleaks over the git history
 ```
 
 ### Model connectivity check

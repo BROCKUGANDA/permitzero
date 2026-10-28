@@ -166,6 +166,18 @@ function redriveMarkerJobId(sourceQueue: QueueName, sourceJobId: string): string
   return `dlq-redriven:${sourceQueue}:${encodeJobIdSegment(sourceJobId)}`;
 }
 
+/**
+ * The key that identifies "this dead letter, in this queue".
+ *
+ * A job id is only unique within its queue, so the queue is part of the
+ * identity. Keying on the id alone means a completed redrive in one queue
+ * silences a dead letter of the same id in another — which has never been
+ * redriven and never will be.
+ */
+function redriveSourceKey(sourceQueue: string, sourceJobId: string): string {
+  return `${sourceQueue}::${sourceJobId}`;
+}
+
 /** Remove a job if the queue can. A queue that cannot says so. */
 async function removeJob(queue: QueueLike, jobId: string | undefined): Promise<boolean> {
   if (!jobId || typeof queue.remove !== 'function') return false;
@@ -350,12 +362,21 @@ export function createWorkers(deps: WorkerDeps): Workers {
     // which is the whole point: a memory of what THIS PROCESS redrove is
     // empty after the process dies, and the dead letter it forgot is
     // published again.
+    //
+    // The record is keyed by the SOURCE QUEUE AND THE SOURCE JOB ID, not by
+    // the job id alone. Two different queues can hold dead letters with the
+    // same job id — the id is only unique within its queue — and keying on
+    // the id alone means one queue's completed redrive silences another
+    // queue's dead letter that has never been redriven at all.
     const redrivenSources = new Set<string>();
     for (const job of listing) {
       if (job.name !== REDRIVEN_MARKER_NAME) continue;
       const marker = (job.data ?? {}) as Record<string, unknown>;
+      const sourceQueue = marker['sourceQueue'];
       const sourceJobId = marker['sourceJobId'];
-      if (typeof sourceJobId === 'string') redrivenSources.add(sourceJobId);
+      if (typeof sourceQueue === 'string' && typeof sourceJobId === 'string') {
+        redrivenSources.add(redriveSourceKey(sourceQueue, sourceJobId));
+      }
     }
 
     if (truncated && typeof target.remove !== 'function') {
@@ -390,9 +411,12 @@ export function createWorkers(deps: WorkerDeps): Workers {
       // Only the first generation. A redriven job carries a `redrive:` id, and
       // redriving it again would be the sweep chasing its own tail.
       if (sourceJobId.startsWith('redrive:')) continue;
-      // Already done, and the record of it outlived this process.
-      if (redrivenSources.has(sourceJobId)) continue;
-      if (alreadyRedriven.has(sourceJobId)) continue;
+      // Already done, and the record of it outlived this process. The key
+      // includes the source queue, because a job id is only unique within
+      // its own queue.
+      const sourceKey = redriveSourceKey(sourceQueue, sourceJobId);
+      if (redrivenSources.has(sourceKey)) continue;
+      if (alreadyRedriven.has(sourceKey)) continue;
       const deadLetteredAt = Date.parse(typeof payload['deadLetteredAt'] === 'string' ? payload['deadLetteredAt'] : '');
       if (!Number.isFinite(deadLetteredAt)) continue;
       if (Date.now() - deadLetteredAt < sweepOptions.redriveAfterMs) continue;
@@ -421,7 +445,7 @@ export function createWorkers(deps: WorkerDeps): Workers {
           sourceDlqJobId: job.id,
         });
         if (result.redriven) {
-          alreadyRedriven.add(sourceJobId);
+          alreadyRedriven.add(sourceKey);
           if (alreadyRedriven.size > 500) {
             const oldest = alreadyRedriven.values().next();
             if (!oldest.done) alreadyRedriven.delete(oldest.value);

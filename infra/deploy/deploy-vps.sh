@@ -194,8 +194,20 @@ if [ -f "$ENV_FILE" ] && ! grep -q '^DATABASE_URL_RUNTIME=' "$ENV_FILE"; then
   echo "   upgraded"
 fi
 
+# The env file is sourced by ABSOLUTE path.
+#
+# It used to be sourced as `"./$ENV_FILE"`, which only works while ENV_FILE is
+# relative to the tree. Once PZ_STATE_DIR points the file outside the tree —
+# which the deployment workflow always does — that prefix turns an absolute
+# path into a relative one, the source fails, and the whole deploy aborts
+# under `set -e` before it has built or migrated anything.
+ENV_FILE_ABSOLUTE="$ROOT/$ENV_FILE"
+case "$ENV_FILE" in
+  /*) ENV_FILE_ABSOLUTE="$ENV_FILE" ;;
+esac
+
 # shellcheck disable=SC1090
-set -a; . "./$ENV_FILE"; set +a
+set -a; . "$ENV_FILE_ABSOLUTE"; set +a
 HOSTNAME_PZ=$(echo "${PZ_HOSTNAMES}" | cut -d" " -f1)
 
 # --- 1b. preflight: tenant isolation must be enabled ------------------------
@@ -345,12 +357,34 @@ if [ -n "${PZ_RLS_ROLE_PASSWORD:-}" ]; then
   esac
   # format('%L') quotes the value as a SQL literal, so the substitution is
   # safe regardless of the password's content.
-  $COMPOSE exec -T postgres psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -v ON_ERROR_STOP=1 -c \
-    "DO \$\$ BEGIN
-       IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pz_app') THEN
-         EXECUTE format('ALTER ROLE pz_app WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB PASSWORD %L', '$PW');
-       END IF;
-     END \$\$;" 2>&1 | sed 's/^/   /' || true
+  #
+  # The failure is FATAL, and it is retried while Postgres finishes starting.
+  # This step used to end in `|| true` followed by an unconditional "ok", so a
+  # wrong database name, a wrong admin user, or a Postgres that had not yet
+  # accepted connections all printed success — and the only symptom was the
+  # API failing to log in minutes later. That is exactly the failure this
+  # step exists to prevent, so it now reports what actually happened.
+  PW_APPLIED=0
+  for attempt in 1 2 3 4 5; do
+    if $COMPOSE exec -T postgres psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -v ON_ERROR_STOP=1 -c \
+      "DO \$\$ BEGIN
+         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pz_app') THEN
+           EXECUTE format('ALTER ROLE pz_app WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB PASSWORD %L', '$PW');
+         END IF;
+       END \$\$;" 2>&1 | sed 's/^/   /'; then
+      PW_APPLIED=1
+      break
+    fi
+    echo "   attempt $attempt: could not reach the database as $PZ_PG_USER; retrying" >&2
+    sleep 3
+  done
+  if [ "$PW_APPLIED" -ne 1 ]; then
+    echo "   FAIL: could not apply the runtime role's password." >&2
+    echo "         The API would present a password the database does not accept," >&2
+    echo "         and would fail to start. Fix the database connection or the" >&2
+    echo "         admin credentials before deploying." >&2
+    exit 1
+  fi
   echo "   ok"
 fi
 
@@ -496,29 +530,36 @@ fi
 #
 # So the exit status decides the branch, and the value is checked for being a
 # number before it is compared to zero.
+#
+# A probe that CANNOT RUN is a failure, not a warning. The script's contract
+# is that it fails the deploy unless it has measured the property — so a
+# deploy that could not reach the database must not report success while
+# having measured nothing. That is the same reason the workflow's own
+# verification step exits non-zero when its probe fails.
 if ISOLATION_OUT=$($COMPOSE exec -T postgres psql -U pz_app -d "$PZ_PG_DB" -t -A -c \
   "SELECT count(*) FROM audit_events;" 2>&1); then
   ISOLATION_CHECK=$(printf '%s' "$ISOLATION_OUT" | tr -d '[:space:]')
 else
-  ISOLATION_CHECK=""
-  echo "   WARN: could not run the isolation probe against the live database" >&2
+  echo "   FAIL: could not run the isolation probe against the live database" >&2
   printf '         %s\n' "$(printf '%s' "$ISOLATION_OUT" | head -c 300)" >&2
   echo "         This is a connection or authentication problem, NOT a row-level" >&2
   echo "         security failure. Check that pz_app's password matches" >&2
   echo "         PZ_RLS_ROLE_PASSWORD in the env file." >&2
+  exit 1
 fi
 
-if [ -n "$ISOLATION_CHECK" ]; then
-  if ! printf '%s' "$ISOLATION_CHECK" | grep -Eq '^[0-9]+$'; then
-    echo "   WARN: the isolation probe returned something that is not a count" >&2
-    printf '         %s\n' "$(printf '%s' "$ISOLATION_OUT" | head -c 300)" >&2
-  elif [ "$ISOLATION_CHECK" = "0" ]; then
-    echo "   ok: the pz_app role sees 0 audit rows with no tenant context"
-  else
-    echo "   FAIL: the pz_app role sees $ISOLATION_CHECK audit rows with no tenant context." >&2
-    echo "         Row-level security is NOT applied to the runtime role." >&2
-    exit 1
-  fi
+if ! printf '%s' "$ISOLATION_CHECK" | grep -Eq '^[0-9]+$'; then
+  echo "   FAIL: the isolation probe returned something that is not a count" >&2
+  printf '         %s\n' "$(printf '%s' "$ISOLATION_OUT" | head -c 300)" >&2
+  exit 1
+fi
+
+if [ "$ISOLATION_CHECK" = "0" ]; then
+  echo "   ok: the pz_app role sees 0 audit rows with no tenant context"
+else
+  echo "   FAIL: the pz_app role sees $ISOLATION_CHECK audit rows with no tenant context." >&2
+  echo "         Row-level security is NOT applied to the runtime role." >&2
+  exit 1
 fi
 
 echo

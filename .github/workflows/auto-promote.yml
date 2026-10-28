@@ -58,12 +58,23 @@ jobs:
         id: targets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The repository every `gh` call is about.
+          #
+          # Without it, `gh` infers the repository from the git remote of the
+          # current directory — so the command only worked because a checkout
+          # happened to be lying there. On a fresh runner, or after the host
+          # janitor cleared the runner's work directory, there is no remote,
+          # `gh` fails, and the step aborts under `set -e`. It also meant a
+          # pull_request-triggered run silently skipped every pull request
+          # whose repository could not be inferred.
+          GH_REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           RUN_EVENT: ${{ github.event.workflow_run.event }}
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
         run: |
           set -euo pipefail
 
@@ -83,25 +94,37 @@ jobs:
 
           # The workflow_run payload names a commit, not a pull request, so
           # the pull request is found by asking for the open ones whose head
-          # IS that commit. The head branch is matched as well, because the
-          # commit in the payload and the pull request's head commit are not
-          # guaranteed to be the same one: a pull_request run is made against
-          # a merge ref, and the payload may name either side of it.
+          # IS that commit.
           #
-          # Matching the branch cannot promote the wrong pull request: the
-          # author test below still has to pass, and the check gate runs
-          # against the pull request's CURRENT head commit.
+          # The head commit is matched FIRST and on its own, because it is an
+          # identity: it names one commit and one pull request.
+          #
+          # The branch name is only consulted when the commit does not match,
+          # and even then the branch name alone is NOT an identity — a fork
+          # can create a branch with the same name as an open Dependabot
+          # branch, and matching on the name alone would let a fork's CI run
+          # select an unrelated pull request and enable its auto-merge. The
+          # repository has to match as well, and the author and check gates
+          # below still have to pass for the pull request that was selected.
           #
           # The matching is done here and not inside the jq program, because
           # a branch name is allowed to contain characters that would have to
           # be quoted into a filter — and a filter that does not parse is a
           # resolution that quietly finds nothing.
-          RAW=$(gh pr list --state open --limit 100 --json number,headRefOid,headRefName \
-            --jq '.[] | [.number, .headRefOid, .headRefName] | join(" ")')
+          RAW=$(gh pr list --state open --limit 100 --json number,headRefOid,headRefName,headRepository,headRepositoryOwner \
+            --jq '.[] | [.number, .headRefOid, .headRefName, .headRepository.name, .headRepositoryOwner.login] | join(" ")')
           PICKED=""
-          while read -r NUM HEAD_OID HEAD_NAME; do
+          while read -r NUM HEAD_OID HEAD_NAME HEAD_REPO HEAD_OWNER; do
             [ -n "$NUM" ] || continue
-            if [ "$HEAD_OID" = "$RUN_HEAD_SHA" ] || [ "$HEAD_NAME" = "$RUN_HEAD_BRANCH" ]; then
+            if [ "$HEAD_OID" = "$RUN_HEAD_SHA" ]; then
+              # The commit IS this pull request's head. That is an identity.
+              PICKED="$PICKED $NUM"
+              continue
+            fi
+            # The commit does not match, so the only remaining signal is the
+            # branch name — and a branch name only means something within the
+            # repository that owns it.
+            if [ "$HEAD_NAME" = "$RUN_HEAD_BRANCH" ] && [ "$HEAD_OWNER" = "$RUN_HEAD_REPO" ]; then
               PICKED="$PICKED $NUM"
             fi
           done <<< "$RAW"
@@ -117,6 +140,10 @@ jobs:
       - name: Check whether these pull requests are eligible
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The repository every `gh` call is about. See the note in the
+          # resolution step: without it, `gh` infers the repository from a
+          # git remote that may not exist on this runner.
+          GH_REPO: ${{ github.repository }}
           REPO: ${{ github.repository }}
           PRS: ${{ steps.targets.outputs.prs }}
         run: |

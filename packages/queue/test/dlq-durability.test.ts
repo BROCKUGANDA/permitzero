@@ -199,4 +199,60 @@ describe('the dead-letter sweep does not deliver an event twice', () => {
     // And the operator is told that the record of the redrive is missing.
     expect(events.some((event) => event.kind === 'dlq_redrive_incomplete')).toBe(true);
   });
+
+  it("does not let one queue's redrive silence another queue's dead letter", async () => {
+    // A job id is unique only WITHIN its queue. Two queues can hold dead
+    // letters with the same id, and they are different events.
+    //
+    // So the record of "this has been redriven" has to name the queue as
+    // well as the job. Keyed on the job id alone, the completed redrive in
+    // one queue silences the other queue's dead letter — which has never
+    // been redriven and, without this test, never would be.
+    const dlq = makeQueue(QUEUE_NAMES.deadLetter, { canRemove: false });
+    const outboxTarget = makeQueue(QUEUE_NAMES.outbox, { canRemove: false });
+    const replayTarget = makeQueue(QUEUE_NAMES.replay, { canRemove: false });
+
+    // The same job id, dead-lettered from two different queues.
+    dlq.jobs.push(deadLetter('job_1'));
+    const replayDeadLetter = deadLetter('job_1');
+    dlq.jobs.push({
+      ...replayDeadLetter,
+      id: `dlq:${QUEUE_NAMES.replay}:job_1`,
+      data: {
+        ...(replayDeadLetter.data as Record<string, unknown>),
+        sourceQueue: QUEUE_NAMES.replay,
+      },
+    });
+
+    const build = () =>
+      createWorkers({
+        queues: [QUEUE_NAMES.outbox, QUEUE_NAMES.replay],
+        handlers: {
+          [QUEUE_NAMES.outbox]: async () => ({ outcome: 'DONE' as const }),
+          [QUEUE_NAMES.replay]: async () => ({ outcome: 'DONE' as const }),
+        },
+        workerFactory: (name: string) => ({
+          start: () => undefined,
+          stop: async () => undefined,
+          close: async () => undefined,
+          process: () => undefined,
+          queue: name === QUEUE_NAMES.replay ? replayTarget : outboxTarget,
+        }),
+        dlq,
+        audit: { append: async () => undefined },
+        dlqSweep: { intervalMs: 60_000, redriveAfterMs: 0, batchSize: 10 },
+        onEvent: () => undefined,
+      });
+
+    // BOTH dead letters are redriven, because they are different events
+    // that happen to share an id.
+    expect(await build().sweepOnce()).toBe(2);
+    expect(outboxTarget.jobs.filter((job) => job.name === 'action.decided')).toHaveLength(1);
+    expect(replayTarget.jobs.filter((job) => job.name === 'action.decided')).toHaveLength(1);
+
+    // And a restart does not redrive either of them again.
+    expect(await build().sweepOnce()).toBe(0);
+    expect(outboxTarget.jobs.filter((job) => job.name === 'action.decided')).toHaveLength(1);
+    expect(replayTarget.jobs.filter((job) => job.name === 'action.decided')).toHaveLength(1);
+  });
 });
