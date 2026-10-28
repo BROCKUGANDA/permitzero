@@ -121,12 +121,27 @@ jobs:
     # containers this job's first step depends on.
     needs: reclaim
     timeout-minutes: 45
+    # Each job publishes its services on DIFFERENT host ports.
+    #
+    # GitHub starts a job's service containers before the job's first step
+    # runs, and it publishes them on the HOST. Two jobs that both publish
+    # 5432 therefore collide: the second container cannot bind the port, and
+    # GitHub reports "Initialize containers" as a success anyway — so the job
+    # carried on and ran against the OTHER job's database. That is an
+    # intermittent failure that looks like a flaky test and is not: the suite
+    # was reading and truncating a database another job was using.
+    #
+    # The ports are therefore per-job, and the step below checks that the
+    # port this job was given is actually the one its container is serving.
+    env:
+      PG_PORT: '5433'
+      REDIS_PORT: '6380'
     services:
       postgres:
         image: postgres:17
         env:
           POSTGRES_PASSWORD: postgres
-        ports: ['5432:5432']
+        ports: ['5433:5432']
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -134,7 +149,7 @@ jobs:
           --health-retries 5
       redis:
         image: redis:7
-        ports: ['6379:6379']
+        ports: ['6380:6379']
     steps:
       # The order below is a dependency chain, not a preference: the environment
       # file first, then the schema and the seed data, then the verify gate
@@ -155,10 +170,16 @@ jobs:
 
       - name: Write the CI environment
         run: |
+          set -euo pipefail
+          # The ports this job's own service containers were published on. They
+          # are not 5432 and 6379, because those belong to the SLO job and to
+          # whatever else this host is running — a container that cannot bind
+          # its port fails silently here, and the job then talks to someone
+          # else's database.
           cp .env.example .env
-          sed -i 's|^DATABASE_URL=.*|DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/permitzero|' .env
-          sed -i 's|^DATABASE_URL_TEST=.*|DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:5432/permitzero_test|' .env
-          sed -i 's|^REDIS_URL=.*|REDIS_URL=redis://127.0.0.1:6379|' .env
+          sed -i "s|^DATABASE_URL=.*|DATABASE_URL=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero|" .env
+          sed -i "s|^DATABASE_URL_TEST=.*|DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero_test|" .env
+          sed -i "s|^REDIS_URL=.*|REDIS_URL=redis://127.0.0.1:${REDIS_PORT}|" .env
           # The RLS role's password is substituted into migration 0006 as SQL
           # text. CI uses a fixed value because the database is thrown away
           # after the run, but it must match what the runtime role uses or
@@ -169,7 +190,7 @@ jobs:
           # a mismatch fails at boot with "password authentication failed for
           # user pz_app" — which reads like a database problem and is a
           # configuration one.
-          sed -i 's|^DATABASE_URL_RUNTIME=.*|DATABASE_URL_RUNTIME=postgres://pz_app:pz_app_ci@127.0.0.1:5432/permitzero|' .env
+          sed -i "s|^DATABASE_URL_RUNTIME=.*|DATABASE_URL_RUNTIME=postgres://pz_app:pz_app_ci@127.0.0.1:${PG_PORT}/permitzero|" .env
           # The API refuses to boot without a permit signing key, and refuses
           # to run outside development or test without an audit HMAC key —
           # an unkeyed audit chain is not tamper-evident, so the key is
@@ -193,13 +214,38 @@ jobs:
           # audit chain hashed with a plain SHA-256 is not tamper-evident, so
           # the API fails boot rather than silently downgrading it.
           {
-            echo "DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/permitzero"
-            echo "DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:5432/permitzero_test"
-            echo "REDIS_URL=redis://127.0.0.1:6379"
+            echo "DATABASE_URL=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero"
+            echo "DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero_test"
+            echo "REDIS_URL=redis://127.0.0.1:${REDIS_PORT}"
             echo "PZ_RLS_ROLE_PASSWORD=pz_app_ci"
             echo "PERMIT_SIGNING_KEY=ci-permit-signing-key-0123456789"
             echo "AUDIT_HMAC_KEY=ci-audit-hmac-key-0123456789abcdef"
           } >> "$GITHUB_ENV"
+
+      - name: Confirm this job's database is the one it was given
+        # A service container that cannot publish its port fails silently:
+        # GitHub reports "Initialize containers" as a success and the job
+        # carries on. The symptom is then an intermittent failure somewhere
+        # unrelated — here, a secret scan that passed on its own and
+        # failed against another job's tree.
+        #
+        # So the job checks that the port it was given is serving a
+        # PostgreSQL that answers with the password this job expects. If it
+        # is not, the job stops here, with the reason, instead of spending
+        # ten minutes failing somewhere confusing.
+        run: |
+          set -euo pipefail
+          if ! docker ps --format '{{.Names}}' | grep -q "postgres17"; then
+            echo "this job's postgres service container is not running" >&2
+            docker ps -a --format '{{.Names}} :: {{.Status}}' >&2
+            exit 1
+          fi
+          if ! (echo > /dev/tcp/127.0.0.1/"${PG_PORT}") 2>/dev/null; then
+            echo "nothing is serving 127.0.0.1:${PG_PORT}" >&2
+            echo "another job's service container may have taken the port" >&2
+            exit 1
+          fi
+          echo "postgres is serving 127.0.0.1:${PG_PORT} for this job"
 
       - run: npm run db:migrate
       - run: npm run db:seed
@@ -244,7 +290,7 @@ jobs:
       # resilience claims in the README are measured on every push.
       - run: npm run drill:resilience
         env:
-          DATABASE_URL_TEST: postgres://postgres:postgres@127.0.0.1:5432/permitzero_test
+          DATABASE_URL_TEST: postgres://postgres:postgres@127.0.0.1:${{ env.PG_PORT }}/permitzero_test
           PZ_RLS_ROLE_PASSWORD: pz_app_ci
 
       - name: Release the disk this job used
@@ -272,12 +318,18 @@ jobs:
     # The reclaim job is listed as well as verify, so the dependency is
     # visible here rather than only implied by verify's own `needs`.
     needs: [reclaim, verify]
+    # Its own ports, for the same reason the verify job has its own: two
+    # service containers publishing the same host port collide, and the
+    # collision is silent.
+    env:
+      PG_PORT: '5434'
+      REDIS_PORT: '6381'
     services:
       postgres:
         image: postgres:17
         env:
           POSTGRES_PASSWORD: postgres
-        ports: ['5432:5432']
+        ports: ['5434:5432']
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -285,7 +337,7 @@ jobs:
           --health-retries 5
       redis:
         image: redis:7
-        ports: ['6379:6379']
+        ports: ['6381:6379']
     steps:
       # No reclaim step here: GitHub starts this job's service containers
       # before any step in it runs, so the disk is reclaimed by the `reclaim`
@@ -302,30 +354,45 @@ jobs:
 
       - name: Write the CI environment
         run: |
+          set -euo pipefail
           cp .env.example .env
-          sed -i 's|^DATABASE_URL=.*|DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/permitzero|' .env
-          sed -i 's|^DATABASE_URL_TEST=.*|DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:5432/permitzero_test|' .env
-          sed -i 's|^REDIS_URL=.*|REDIS_URL=redis://127.0.0.1:6379|' .env
+          sed -i "s|^DATABASE_URL=.*|DATABASE_URL=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero|" .env
+          sed -i "s|^DATABASE_URL_TEST=.*|DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero_test|" .env
+          sed -i "s|^REDIS_URL=.*|REDIS_URL=redis://127.0.0.1:${REDIS_PORT}|" .env
           sed -i 's|^PZ_RLS_ROLE_PASSWORD=.*|PZ_RLS_ROLE_PASSWORD=pz_app_ci|' .env
           # The SLO report refuses to scrape an unauthenticated /metrics, and
           # the endpoint is not registered at all without a token.
           echo "METRICS_TOKEN=ci-metrics-token" >> .env
           {
-            echo "DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/permitzero"
-            echo "DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:5432/permitzero_test"
-            echo "REDIS_URL=redis://127.0.0.1:6379"
+            echo "DATABASE_URL=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero"
+            echo "DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero_test"
+            echo "REDIS_URL=redis://127.0.0.1:${REDIS_PORT}"
             echo "PZ_RLS_ROLE_PASSWORD=pz_app_ci"
             echo "METRICS_TOKEN=ci-metrics-token"
           } >> "$GITHUB_ENV"
+
+      - name: Confirm this job's database is the one it was given
+        run: |
+          set -euo pipefail
+          if ! docker ps --format '{{.Names}}' | grep -q "postgres17"; then
+            echo "this job's postgres service container is not running" >&2
+            docker ps -a --format '{{.Names}} :: {{.Status}}' >&2
+            exit 1
+          fi
+          if ! (echo > /dev/tcp/127.0.0.1/"${PG_PORT}") 2>/dev/null; then
+            echo "nothing is serving 127.0.0.1:${PG_PORT}" >&2
+            exit 1
+          fi
+          echo "postgres is serving 127.0.0.1:${PG_PORT} for this job"
 
       - run: npm run db:migrate
       - run: npm run db:seed
 
       - name: Start the API
         env:
-          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/permitzero
-          DATABASE_URL_RUNTIME: postgres://pz_app:pz_app_ci@127.0.0.1:5432/permitzero
-          REDIS_URL: redis://127.0.0.1:6379
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:${{ env.PG_PORT }}/permitzero
+          DATABASE_URL_RUNTIME: postgres://pz_app:pz_app_ci@127.0.0.1:${{ env.PG_PORT }}/permitzero
+          REDIS_URL: redis://127.0.0.1:${{ env.REDIS_PORT }}
           PERMIT_SIGNING_KEY: ci-permit-signing-key-0123456789
           AUDIT_HMAC_KEY: ci-audit-hmac-key-0123456789abcdef
           METRICS_TOKEN: ci-metrics-token

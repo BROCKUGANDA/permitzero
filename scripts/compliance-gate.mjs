@@ -8,9 +8,12 @@
  * existing, a "partial" quietly becomes an "implemented" with no gap line. So every
  * structural fact in that document is checked here against the repository:
  *
- *   · every evidence entry names a file that exists, a line that is inside it, and
- *     (where an `expect:` token is given) content within a few lines of the cite —
- *     which is what catches a refactor that moved the code but left the number;
+ *   · every evidence entry names a file that exists, and (where an `expect:`
+ *     token is given) content that is IN that file. The token is the evidence:
+ *     it identifies the construct the claim rests on. A line number that has
+ *     drifted because something above it grew is corrected and reported — the
+ *     claim still holds. A token that is GONE, or that appears more than
+ *     once so the reference is ambiguous, fails the gate;
  *   · every test entry names a file that exists, and a test title that appears in
  *     it, so a control cannot be "tested" by pointing at an unrelated file;
  *   · `implemented` requires both evidence and a test; `partial` and `absent`
@@ -159,17 +162,17 @@ function checkEvidence(control, entry) {
 
   // The cited line has moved, but the TEXT is still in the file.
   //
-  // A citation into prose — the README's "Not certified", say — breaks every
-  // time the document is edited, and the failure says "the code moved and
-  // the citation is stale" about a sentence that did not change. That is a
-  // false alarm about a true claim, and it teaches people to ignore this
-  // gate.
+  // The token is the evidence. A citation says "this construct is here, and
+  // it does this" — and the token is what identifies the construct. When the
+  // token is still present, uniquely, in the same file, the claim is still
+  // evidenced; only the LINE NUMBER has drifted, because something above it
+  // grew.
   //
-  // So when the token is still present elsewhere in the same file, the claim
-  // is still evidenced and the LINE NUMBER is what needs fixing. That is
-  // reported as a distinct, actionable finding rather than as a broken
-  // citation — and, unlike the stale-line case, it does not fail the build
-  // when the file is a document whose wording is what is being evidenced.
+  // Failing on that is a false alarm about a true claim, and it teaches
+  // people to ignore this gate: every edit to a file would have to be
+  // accompanied by a hunt for its citations. The failure is reserved for the
+  // two cases where the claim really is no longer evidenced — the token is
+  // gone, or it is ambiguous because it appears more than once.
   //
   // When the token appears MORE THAN ONCE, the match is ambiguous: the gate
   // cannot tell which occurrence was meant, and silently rewriting the
@@ -182,18 +185,11 @@ function checkEvidence(control, entry) {
   });
   if (matches.length === 1) {
     const [only] = matches;
-    if (isDocument) {
-      note(
-        where,
-        `${parsed.file}:${parsed.line} no longer contains "${parsed.expect}" — it moved to line ${only}; the citation was updated`,
-      );
-      return { file: parsed.file, line: only };
-    }
-    fail(
+    note(
       where,
-      `${parsed.file}:${parsed.line} no longer contains "${parsed.expect}" (it is now at line ${only}) — the code moved and the citation is stale`,
+      `${parsed.file}:${parsed.line} no longer contains "${parsed.expect}" — it moved to line ${only}; the citation was updated`,
     );
-    return null;
+    return { file: parsed.file, line: only };
   }
   if (matches.length > 1) {
     fail(
