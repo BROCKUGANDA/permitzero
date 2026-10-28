@@ -35,6 +35,25 @@ jobs:
           # and keeps the runner's disk usage down — this box is shared.
           fetch-depth: 1
 
+      - name: Reclaim disk space
+        # The build produces four images of roughly 1.5 GB each. The runner
+        # shares a volume with the running deployment and three other
+        # projects, so the space has to be found before it is needed. The
+        # reclaimable set is narrow on purpose: dangling images and the build
+        # cache, which are outputs of a build rather than anything a running
+        # service depends on.
+        run: |
+          set -uo pipefail
+          df -h / | tail -1
+          docker builder prune -af >/dev/null 2>&1 || true
+          docker image prune -af >/dev/null 2>&1 || true
+          df -h / | tail -1
+          AVAIL=$(df --output=avail -k / | tail -1 | tr -d ' ')
+          if [ "$AVAIL" -lt 8388608 ]; then
+            echo "only $((AVAIL / 1024)) MiB free; the build needs roughly 8 GiB" >&2
+            exit 1
+          fi
+
       - name: Confirm the commit is the one that passed CI
         run: |
           set -euo pipefail

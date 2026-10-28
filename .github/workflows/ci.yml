@@ -41,6 +41,36 @@ jobs:
       # file first, then the schema and the seed data, then the verify gate
       # (typecheck, lint, the suite, the build, the format check and the
       # evidence-map gate), and only then the checks that need a running stack.
+      - name: Reclaim disk space
+        # This runner is the deploy host, which also serves four other
+        # projects. A CI job that fills the disk takes the production stack
+        # down with it -- and that is not hypothetical: the first run of this
+        # workflow filled a 96 GB volume to 100% and every service on the box
+        # started failing.
+        #
+        # So the job makes room for itself BEFORE it needs it, and reports how
+        # much room it found. The reclaimable set is deliberately narrow:
+        # dangling images and the build cache, which are outputs of a build
+        # rather than anything a running service depends on.
+        run: |
+          set -uo pipefail
+          echo "=== disk before ==="
+          df -h / | tail -1
+          docker builder prune -af >/dev/null 2>&1 || true
+          docker image prune -af >/dev/null 2>&1 || true
+          # Remove the service containers a previous job left behind. They are
+          # named by a hash prefix, which is how the runner names them.
+          for c in $(docker ps -a --format '{{.Names}}' | grep -E '^[0-9a-f]{32}_'); do
+            docker rm -f "$c" >/dev/null 2>&1 || true
+          done
+          echo "=== disk after ==="
+          df -h / | tail -1
+          AVAIL=$(df --output=avail -k / | tail -1 | tr -d ' ')
+          if [ "$AVAIL" -lt 8388608 ]; then
+            echo "only $((AVAIL / 1024)) MiB free; this job needs roughly 8 GiB" >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -100,6 +130,18 @@ jobs:
           DATABASE_URL_TEST: postgres://postgres:postgres@127.0.0.1:5432/permitzero_test
           PZ_RLS_ROLE_PASSWORD: pz_app_ci
 
+      - name: Release the disk this job used
+        # A job that leaves its node_modules and its checkout behind is a job
+        # that makes the NEXT job fail. The runner reuses its work directory,
+        # so the space has to go back.
+        if: always()
+        run: |
+          set -uo pipefail
+          rm -rf "${GITHUB_WORKSPACE:-.}/node_modules" 2>/dev/null || true
+          docker builder prune -af >/dev/null 2>&1 || true
+          docker image prune -af >/dev/null 2>&1 || true
+          df -h / | tail -1
+
   slo:
     name: SLO report (live scrape, strict)
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
@@ -120,6 +162,25 @@ jobs:
         image: redis:7
         ports: ['6379:6379']
     steps:
+      - name: Reclaim disk space
+        # The same reason as the verify job, and the same risk: this runner
+        # is the deploy host, and the previous job on it may have left
+        # images behind.
+        run: |
+          set -uo pipefail
+          df -h / | tail -1
+          docker builder prune -af >/dev/null 2>&1 || true
+          docker image prune -af >/dev/null 2>&1 || true
+          for c in $(docker ps -a --format '{{.Names}}' | grep -E '^[0-9a-f]{32}_'); do
+            docker rm -f "$c" >/dev/null 2>&1 || true
+          done
+          df -h / | tail -1
+          AVAIL=$(df --output=avail -k / | tail -1 | tr -d ' ')
+          if [ "$AVAIL" -lt 8388608 ]; then
+            echo "only $((AVAIL / 1024)) MiB free; this job needs roughly 8 GiB" >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -235,14 +296,50 @@ jobs:
           kill "$API_PID" 2>/dev/null || true
           pkill -f '[s]rc/server.ts' 2>/dev/null || true
 
+      - name: Release the disk this job used
+        if: always()
+        run: |
+          set -uo pipefail
+          rm -rf "${GITHUB_WORKSPACE:-.}/node_modules" 2>/dev/null || true
+          docker builder prune -af >/dev/null 2>&1 || true
+          docker image prune -af >/dev/null 2>&1 || true
+          df -h / | tail -1
+
   secret-scan:
     name: Secret scan (gitleaks)
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The gitleaks binary is installed directly rather than through
+      # gitleaks/gitleaks-action.
+      #
+      # The action uploads its report as a workflow artifact, and this
+      # account's artifact storage quota is exhausted — so the upload failed
+      # and took the whole job with it, even though the scan itself had
+      # found nothing. A scan that cannot store its output is a scan whose
+      # result nobody will look at, and one that fails the build for a
+      # reason that has nothing to do with secrets.
+      #
+      # Running the binary directly has no artifact step at all: the exit
+      # code is the result, and the output is in the job log where a person
+      # reading a failed job will actually see it.
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          VERSION=8.24.3
+          URL="https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
+          curl -fsSL "$URL" -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Scan for secrets
+        run: |
+          set -euo pipefail
+          # `--redact` so a detected secret is never echoed into the log.
+          # The exit code is the verdict: 1 means a leak was found.
+          gitleaks detect --source . --redact --no-git --verbose --exit-code 1
