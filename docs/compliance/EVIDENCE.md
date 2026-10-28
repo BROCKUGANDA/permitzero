@@ -229,7 +229,7 @@ gap: The alert rules evaluate and route through an Alertmanager, which is starte
 status: partial
 sources: SOC 2 CC8.1
 claim: CI is configured to run typecheck, lint, the full suite, build, format, the strict SLO report against a live stack, gitleaks, the dependency gate, the compliance evidence gate and the resilience drill on every push, and `main` is protected so a change cannot reach it without those checks passing.
-evidence: .github/workflows/ci.yml:209 expect:verify -- --strict; infra/migrations/0001_init.sql:26 expect:CREATE TABLE IF NOT EXISTS tenants; .github/workflows/auto-promote.yml:1 expect:Auto-promote; .github/workflows/deploy.yml:1 expect:Deploy
+evidence: .github/workflows/ci.yml:255 expect:verify -- --strict; infra/migrations/0001_init.sql:26 expect:CREATE TABLE IF NOT EXISTS tenants; .github/workflows/auto-promote.yml:1 expect:Auto-promote; .github/workflows/deploy.yml:1 expect:Deploy
 tests: scripts/verify.mjs
 gap: The gates run on a SELF-HOSTED runner, because this account's hosted runners are refused with "your account is locked due to a billing issue" — a hosted-runner run would not start at all, so a hosted-only workflow would report green forever without running a step. That is an account billing state, not a repository setting, and it is the one thing here that only a person with payment access can clear. The runner is on the deploy host, which also runs the production stack and four other projects. Auto-promotion is limited to Dependabot's own dependency bumps: a human-authored change is merged by a human, because auto-merging one would let a push to a branch bypass review.
 
