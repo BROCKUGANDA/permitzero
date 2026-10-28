@@ -96,6 +96,12 @@ jobs:
           # after the run, but it must match what the runtime role uses or
           # every tenant-isolation assertion would pass while proving nothing.
           sed -i 's|^PZ_RLS_ROLE_PASSWORD=.*|PZ_RLS_ROLE_PASSWORD=pz_app_ci|' .env
+          # The API refuses to boot without a permit signing key, and refuses
+          # to run outside development or test without an audit HMAC key —
+          # an unkeyed audit chain is not tamper-evident, so the key is
+          # required rather than defaulted.
+          sed -i 's|^PERMIT_SIGNING_KEY=.*|PERMIT_SIGNING_KEY=ci-permit-signing-key-0123456789|' .env
+          sed -i 's|^AUDIT_HMAC_KEY=.*|AUDIT_HMAC_KEY=ci-audit-hmac-key-0123456789abcdef|' .env
 
           # The same values are exported to the environment as well as written
           # to the file.
@@ -106,11 +112,19 @@ jobs:
           # cannot silently fall back to a passwordless URL and fail with
           # "password authentication failed" — which is what happened the
           # first time this workflow ran for real.
+          # The signing and hashing keys the API refuses to boot without.
+          # The drill builds a real API, so it needs them too.
+          #
+          # AUDIT_HMAC_KEY is not optional outside development and test: an
+          # audit chain hashed with a plain SHA-256 is not tamper-evident, so
+          # the API fails boot rather than silently downgrading it.
           {
             echo "DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/permitzero"
             echo "DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:5432/permitzero_test"
             echo "REDIS_URL=redis://127.0.0.1:6379"
             echo "PZ_RLS_ROLE_PASSWORD=pz_app_ci"
+            echo "PERMIT_SIGNING_KEY=ci-permit-signing-key-0123456789"
+            echo "AUDIT_HMAC_KEY=ci-audit-hmac-key-0123456789abcdef"
           } >> "$GITHUB_ENV"
 
       - run: npm run db:migrate
