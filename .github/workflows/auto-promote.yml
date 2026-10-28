@@ -19,19 +19,23 @@ on:
     workflows: [CI]
     types: [completed]
 
-# One promotion attempt per PR at a time. Without this, three pushes in a
-# minute start three merge attempts and GitHub's auto-merge queue rejects
-# the extras.
+# One promotion attempt per pull request at a time. Without this, three
+# pushes in a minute start three merge attempts and GitHub's auto-merge queue
+# rejects the extras.
 #
-# The group is keyed on the HEAD COMMIT rather than on the pull request
-# number, because the two triggers do not agree on what identifies the pull
-# request: `github.event.pull_request.number` is empty on the workflow_run
-# path, so a group keyed on it would put the two attempts for one pull
-# request in two different groups. The head commit is the same value in
-# both — the pull request's head SHA on one path, the CI run's head SHA on
-# the other — so both attempts for one pull request land in one group.
+# The group is keyed on the pull request, because that is what the two
+# triggers must agree on. The `pull_request` trigger knows the number
+# directly; the `workflow_run` trigger has to look it up from the completed
+# run, and a concurrency group cannot do a lookup. So the group falls back to
+# the run's id for that path.
+#
+# Keying on the head commit instead — which is what this did — put the two
+# attempts for ONE pull request into two different groups, because a
+# `pull_request` CI run is made against a merge ref and its SHA is not the
+# pull request's head. Both attempts then reached `gh pr merge` for the same
+# pull request, and the second was rejected.
 concurrency:
-  group: auto-promote-${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
+  group: auto-promote-${{ github.event.pull_request.number || github.event.workflow_run.id }}
   cancel-in-progress: true
 
 permissions:
@@ -75,18 +79,10 @@ jobs:
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           RUN_HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
-          # The pull requests the completed run belonged to, as the
-          # workflow_run payload records them.
-          #
-          # This is the ONLY reliable link between the two events. The
-          # payload's `head_branch` and `head_sha` describe the DEFAULT
-          # BRANCH, not the pull request's branch — a `pull_request` run is
-          # made against a merge ref, so the workflow_run payload names
-          # `main` and the merge commit. Every run therefore looked like it
-          # was about a push to main, and no pull request was ever
-          # resolved. The `pull_requests` array is the one field that names
-          # the pull request the run actually belonged to.
-          RUN_PULL_REQUESTS: ${{ toJSON(github.event.workflow_run.pull_requests) }}
+          # The id of the completed run. The pull requests it belonged to are
+          # read back from it, because the workflow_run payload's branch and
+          # SHA describe the completed run rather than the pull request.
+          RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           set -euo pipefail
 
@@ -109,17 +105,22 @@ jobs:
           # request the run belonged to.
           #
           # Nothing else in the payload identifies it. `head_branch` and
-          # `head_sha` describe the DEFAULT BRANCH and the merge ref,
-          # because a `pull_request` run is made against a merge ref: every
-          # workflow_run event looked like a push to main, and matching on the
-          # branch name could therefore never find the pull request. It was
-          # also unsafe to try — a fork can name a branch after an open
-          # Dependabot branch, and a name is not an identity.
+          # `head_sha` describe the COMPLETED CI RUN: for a `pull_request` run
+          # that is the pull request's own branch and head commit, and for a
+          # push to main it is `main`. So the branch name cannot serve as the
+          # identity — a fork can name a branch after an open Dependabot
+          # branch, and a name is not an identity.
           #
           # The array is empty for a run that had no pull request, which is
           # exactly the push-to-main case: nothing to promote.
-          PICKED=$(printf '%s' "$RUN_PULL_REQUESTS" \
-            | jq -r 'if type == "array" then (map(.number) | join(" ")) else "" end' 2>/dev/null || echo "")
+          #
+          # The parsing is done by `gh`, which is already required and is
+          # present on every runner. A separate `jq` is not: a runner without
+          # it would make this step fail in a way that looks like "there was
+          # nothing to promote", and a gate that cannot run is
+          # indistinguishable from a gate that decided not to act.
+          PICKED=$(gh api "repos/$REPO/actions/runs/$RUN_ID" \
+            --jq '[.pull_requests[]?.number] | join(" ")' 2>/dev/null || echo "")
           if [ -z "$PICKED" ]; then
             echo "the completed run was not associated with a pull request; nothing to promote"
             echo "prs=" >> "$GITHUB_OUTPUT"
