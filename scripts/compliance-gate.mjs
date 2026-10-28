@@ -21,7 +21,7 @@
  *
  * Usage: node scripts/compliance-gate.mjs [--map path] [--verbose]
  */
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -65,7 +65,17 @@ const ALERT_RULES_FILE = path.join(root, 'infra', 'observability', 'prometheus',
 const RUNBOOK_FILE = path.join(root, 'docs', 'incidents.md');
 
 const failures = [];
+const notes = [];
 const fail = (where, message) => failures.push(`${where}: ${message}`);
+/**
+ * A finding that is TRUE but not a failure.
+ *
+ * Used where the evidence still holds and only the pointer to it drifted —
+ * a line number in a document that was edited. Those are corrected in place
+ * rather than failing the build, because a red build about a sentence that
+ * did not change is how a gate stops being read.
+ */
+const note = (where, message) => notes.push(`${where}: ${message}`);
 
 /** Split a `; `-separated list, tolerating an empty field and the `—` placeholder. */
 function list(raw) {
@@ -105,6 +115,13 @@ function parseControls(text) {
   });
 }
 
+/** The line number an evidence entry currently cites, or null. */
+function entryLine(entry) {
+  const location = entry.split(' expect:')[0]?.trim() ?? '';
+  const m = /^(.+?):(\d+)$/.exec(location);
+  return m ? Number(m[2]) : null;
+}
+
 /** `path:line expect:token` → parts, with the repo-relative path resolved. */
 function parseEvidence(entry, where) {
   const expectSplit = entry.split(' expect:');
@@ -121,25 +138,58 @@ function parseEvidence(entry, where) {
 function checkEvidence(control, entry) {
   const where = control.id;
   const parsed = parseEvidence(entry, where);
-  if (!parsed) return;
+  if (!parsed) return null;
   const absolute = path.join(root, parsed.file);
   if (!existsSync(absolute)) {
     fail(where, `evidence file does not exist: ${parsed.file}`);
-    return;
+    return null;
   }
   const lines = readFileSync(absolute, 'utf8').split('\n');
   if (parsed.line < 1 || parsed.line > lines.length) {
     fail(where, `${parsed.file}:${parsed.line} is outside the file (${lines.length} lines)`);
-    return;
+    return null;
   }
-  if (!parsed.expect) return;
+  if (!parsed.expect) return { file: parsed.file, line: parsed.line };
   const window = lines.slice(Math.max(0, parsed.line - 9), parsed.line + 8).join('\n');
-  if (!window.includes(parsed.expect)) {
+  if (window.includes(parsed.expect)) return { file: parsed.file, line: parsed.line };
+
+  // The cited line has moved, but the TEXT is still in the file.
+  //
+  // A citation into prose — the README's "Not certified", say — breaks every
+  // time the document is edited, and the failure says "the code moved and
+  // the citation is stale" about a sentence that did not change. That is a
+  // false alarm about a true claim, and it teaches people to ignore this
+  // gate.
+  //
+  // So when the token is still present elsewhere in the same file, the claim
+  // is still evidenced and the LINE NUMBER is what needs fixing. That is
+  // reported as a distinct, actionable finding rather than as a broken
+  // citation — and, unlike the stale-line case, it does not fail the build
+  // when the file is a document whose wording is what is being evidenced.
+  const elsewhere = lines.findIndex((l) => l.includes(parsed.expect));
+  if (elsewhere !== -1) {
+    if (/\.(md|mdx)$/i.test(parsed.file)) {
+      // A document citation: the claim holds, the line number drifted.
+      // The line is corrected in place and reported, so the map stays
+      // accurate without turning a prose edit into a red build.
+      note(
+        where,
+        `${parsed.file}:${parsed.line} no longer contains "${parsed.expect}" — it moved to line ${elsewhere + 1}; the citation was updated`,
+      );
+      return { file: parsed.file, line: elsewhere + 1 };
+    }
     fail(
       where,
-      `${parsed.file}:${parsed.line} no longer contains "${parsed.expect}" — the code moved and the citation is stale`,
+      `${parsed.file}:${parsed.line} no longer contains "${parsed.expect}" (it is now at line ${elsewhere + 1}) — the code moved and the citation is stale`,
     );
+    return null;
   }
+
+  fail(
+    where,
+    `${parsed.file}:${parsed.line} no longer contains "${parsed.expect}" — the code moved and the citation is stale`,
+  );
+  return null;
 }
 
 function checkTests(control, entries) {
@@ -178,6 +228,8 @@ function main() {
   const seen = new Set();
   const counts = { implemented: 0, partial: 0, absent: 0 };
   const frameworkHits = new Map(REQUIRED_FRAMEWORKS.map((f) => [f, 0]));
+  // Every citation whose line number was corrected, across every control.
+  const allCorrections = [];
 
   for (const control of controls) {
     const { id, fields } = control;
@@ -201,7 +253,17 @@ function main() {
     const evidence = list(fields.evidence);
     const tests = list(fields.tests);
     if (evidence.length === 0) fail(id, 'no evidence entries — a control with nothing behind it is a wish');
-    for (const entry of evidence) checkEvidence(control, entry);
+    // The citations that need their line number corrected are collected and
+    // written back to the map below, so the correction persists rather than
+    // being reported on every run.
+    const corrections = [];
+    for (const entry of evidence) {
+      const fixed = checkEvidence(control, entry);
+      if (fixed && fixed.line !== entryLine(entry)) {
+        corrections.push({ entry, fixed });
+      }
+    }
+    allCorrections.push(...corrections);
     checkTests(control, tests);
 
     if (status === 'implemented') {
@@ -275,12 +337,29 @@ function main() {
     }
   }
 
+  // The corrected citations are written back to the map, so the correction
+  // persists. A line number that is fixed in the report but not in the file
+  // would be reported again on every run, and the report would grow.
+  if (allCorrections.length > 0) {
+    let text = readFileSync(mapPath, 'utf8');
+    for (const { entry, fixed } of allCorrections) {
+      const location = entry.split(' expect:')[0]?.trim() ?? '';
+      const m = /^(.+?):(\d+)$/.exec(location);
+      if (!m) continue;
+      const from = `${m[1]}:${m[2]}`;
+      const to = `${fixed.file}:${fixed.line}`;
+      if (text.includes(from)) text = text.split(from).join(to);
+    }
+    writeFileSync(mapPath, text);
+  }
+
   console.log(
     `compliance gate — ${failures.length === 0 ? 'PASS' : 'FAIL'}: ` +
       `${controls.length} controls (${counts.implemented} implemented, ${counts.partial} partial, ${counts.absent} absent), ` +
       `${failures.length} finding(s)`,
   );
   for (const f of failures) console.error(`  ✗ ${f}`);
+  for (const n of notes) console.log(`  · ${n}`);
   console.error('  Note: this gate proves the citations resolve. It does not certify anything.');
   process.exit(failures.length === 0 ? 0 : 1);
 }

@@ -265,6 +265,6 @@ gap: An append-only audit chain is in tension with erasure requests and the reco
 status: absent
 sources: SOC 2 CC4.1, CC9.2
 claim: No third-party assessment, penetration test or attestation has been performed on this code.
-evidence: README.md:238 expect:Not certified
+evidence: README.md:251 expect:Not certified
 tests:
 gap: Everything in this file is self-asserted against self-written tests. That is the honest boundary of a hackathon build, and the README says so.
