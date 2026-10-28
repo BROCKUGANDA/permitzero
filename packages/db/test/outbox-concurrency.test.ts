@@ -18,7 +18,11 @@ import {
   claimOutboxEvents,
   closeDb,
   createDb,
+  getOutboxEvent,
   insertOutboxEvent,
+  markOutboxDead,
+  markOutboxFailed,
+  markOutboxPublished,
   resetDb,
   seed,
   type Db,
@@ -190,5 +194,49 @@ describe('concurrent outbox claiming', () => {
     const all = await claimOutboxEvents(db.db, 10, now);
     expect(all).toHaveLength(4);
     expect(new Set(all.map((r) => r.tenantId)).size).toBe(2);
+  });
+});
+
+/**
+ * A published row is delivery history, and the stale writer is the interesting
+ * case: a dispatcher whose lease expired still believes it owns the row, and
+ * its `markFailed` arrives after a peer published it.
+ *
+ * Before the `status <> 'PUBLISHED'` guard, that write hit the freeze trigger
+ * from 0005 and THREW — which escaped `publishRow`, aborted the whole batch,
+ * left the remaining claimed rows leased for a minute, and was swallowed by
+ * the dispatcher's empty catch. The guard turns the same situation into a
+ * no-op that reports itself.
+ */
+describe('a published row is terminal', () => {
+  it('is not moved back to FAILED or DEAD by a stale dispatcher', async () => {
+    const [tenantA] = tenants();
+    await drainOutbox();
+    await seedRows(1, tenantA);
+    const claimed = await claimOutboxEvents(db.db, 1, now);
+    const id = claimed[0]?.id ?? '';
+    expect(id).not.toBe('');
+    expect(await markOutboxPublished(db.db, id, now, tenantA)).toBe(true);
+
+    // The stale dispatcher, still holding its claim.
+    expect(await markOutboxFailed(db.db, id, 'STALE', new Date(now.getTime() + 1_000), tenantA)).toBe(false);
+    expect(await markOutboxDead(db.db, id, 'STALE', tenantA)).toBe(false);
+
+    const row = await getOutboxEvent(db.db, id);
+    expect(row?.status).toBe('PUBLISHED');
+  });
+
+  it('is not moved by a writer that names another tenant', async () => {
+    const [tenantA, tenantB] = tenants();
+    await drainOutbox();
+    await seedRows(1, tenantA);
+    const claimed = await claimOutboxEvents(db.db, 1, now);
+    const id = claimed[0]?.id ?? '';
+
+    // The id is unique per tenant, so a writer that names the wrong tenant
+    // must find nothing rather than move the row.
+    expect(await markOutboxFailed(db.db, id, 'WRONG_TENANT', new Date(now.getTime() + 1_000), tenantB)).toBe(false);
+    const row = await getOutboxEvent(db.db, id);
+    expect(row?.status).toBe('PENDING');
   });
 });

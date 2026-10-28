@@ -22,6 +22,23 @@ global:
 rule_files:
   - rules/permitzero-alerts.yml
 
+# Alert routing.
+#
+# Without this block Prometheus evaluates every rule and then does nothing
+# with the result: the rules are a filing cabinet, not an alerting system.
+# The receiver is a webhook whose URL comes from the environment, so this
+# committed file carries no endpoint and no credential.
+#
+# `send_resolved: true` matters more than it looks. An alert that fires at
+# 03:00 and never clears is an alert the on-call learns to ignore, and an
+# alert that clears without telling anyone is an outage nobody notices
+# ending.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+      timeout: 10s
+
 scrape_configs:
   - job_name: permitzero-api
     metrics_path: /metrics

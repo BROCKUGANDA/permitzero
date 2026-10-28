@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Registry } from 'prom-client';
 import {
+  DECISION_BUCKETS_SECONDS,
   SLOS,
   budgetConsumed,
   burnRate,
@@ -269,16 +270,54 @@ describe('metrics registry', () => {
     expect(await a.scrape()).toContain('pz_executions_total{outcome="SUCCEEDED"} 1');
   });
 
-  it('histogram buckets are ordered and cover the SLO threshold', () => {
+  it('histogram buckets are ordered and cover the SLO threshold', async () => {
+    // The threshold is read from the SLO rather than typed in, so moving the
+    // objective without adding a bucket at the new boundary fails here instead
+    // of quietly making the objective uncomputable from the exposition.
+    const slo = sloById('decision-latency');
+    const thresholdSeconds = (slo?.thresholdMs ?? 0) / 1000;
+    expect(thresholdSeconds).toBeGreaterThan(0);
+
     const metrics = createMetrics({ registry: new Registry(), processMetrics: false });
-    metrics.decisionDuration.observe({ decision: 'ALLOW' }, 1.4);
-    metrics.decisionDuration.observe({ decision: 'ALLOW' }, 1.6);
-    return metrics.scrape().then((text) => {
-      // 1.5s is the latency SLO threshold; a bucket straddling it is what makes
-      // the objective computable from the exposition at all.
-      expect(text).toContain('le="1"');
-      expect(text).toContain('le="2.5"');
-      expect(text).toContain('pz_decision_duration_seconds_count');
-    });
+    metrics.decisionDuration.observe({ decision: 'ALLOW' }, thresholdSeconds - 0.1);
+    metrics.decisionDuration.observe({ decision: 'ALLOW' }, thresholdSeconds + 0.1);
+
+    const text = await metrics.scrape();
+    // 1.5s is the latency SLO threshold; a bucket straddling it is what makes
+    // the objective computable from the exposition at all.
+    expect(text).toContain(`le="${thresholdSeconds}"`);
+    expect(text).toContain('pz_decision_duration_seconds_count');
+    // The bucket at the threshold separates the two observations: one below it,
+    // two at or below it. Read from the next bucket up, both of them would
+    // count as compliant and the objective would be fiction.
+    const bucketAt = (le: number): RegExp =>
+      new RegExp(`pz_decision_duration_seconds_bucket\\{[^}]*le="${le}"[^}]*\\} \\d+`);
+    expect(text).toMatch(bucketAt(thresholdSeconds));
+    const thresholdCount = Number(/(\d+)\s*$/.exec(bucketAt(thresholdSeconds).exec(text)?.[0] ?? '')?.[1] ?? -1);
+    expect(thresholdCount).toBe(1);
+    const nextBucket = DECISION_BUCKETS_SECONDS.find((b) => b > thresholdSeconds);
+    expect(nextBucket).toBeDefined();
+    const nextCount = Number(/(\d+)\s*$/.exec(bucketAt(nextBucket as number).exec(text)?.[0] ?? '')?.[1] ?? -1);
+    expect(nextCount).toBe(2);
+    expect(text).toMatch(/pz_decision_duration_seconds_count\{[^}]*\} 2/);
+
+    // The declared buckets are strictly increasing, so a bucket added out of
+    // order cannot shadow the one the SLO reads.
+    const declared = DECISION_BUCKETS_SECONDS;
+    expect([...declared].sort((a, b) => a - b)).toEqual(declared);
+    expect(declared).toContain(thresholdSeconds);
+  });
+
+  it('publishes the outbox row age and the queue job age as different series', async () => {
+    // Two quantities that mean different things must not share a name. The row
+    // age is the delivery-lag signal; the job age is the broker queue's own
+    // backlog. A dispatcher that is wedged leaves the first growing and the
+    // second at zero, which is exactly the situation a shared name hides.
+    const metrics = createMetrics({ registry: new Registry(), processMetrics: false });
+    metrics.outboxOldestAgeSeconds.set(42);
+    metrics.outboxOldestJobAgeSeconds.set(0);
+    const text = await metrics.scrape();
+    expect(text).toContain('pz_outbox_oldest_unpublished_age_seconds 42');
+    expect(text).toContain('pz_outbox_oldest_job_age_seconds 0');
   });
 });

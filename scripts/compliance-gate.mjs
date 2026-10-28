@@ -21,7 +21,7 @@
  *
  * Usage: node scripts/compliance-gate.mjs [--map path] [--verbose]
  */
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -49,8 +49,33 @@ const REQUIRED_ABSENT = [
   'PENETRATION-TEST-AND-INDEPENDENT-REVIEW',
 ];
 
+/**
+ * The alert runbooks.
+ *
+ * Every alert rule points at `docs/incidents.md#<anchor>`, and a paged
+ * engineer who follows a dead link at 03:00 has no runbook at all. The file
+ * existed and the anchors did not, which is the worst version of this: the
+ * rules looked complete.
+ *
+ * So the anchors are checked here. The list is derived from the alert rules
+ * themselves rather than duplicated here, so adding an alert without writing
+ * its runbook fails this gate instead of shipping a broken link.
+ */
+const ALERT_RULES_FILE = path.join(root, 'infra', 'observability', 'prometheus', 'rules', 'permitzero-alerts.yml');
+const RUNBOOK_FILE = path.join(root, 'docs', 'incidents.md');
+
 const failures = [];
+const notes = [];
 const fail = (where, message) => failures.push(`${where}: ${message}`);
+/**
+ * A finding that is TRUE but not a failure.
+ *
+ * Used where the evidence still holds and only the pointer to it drifted —
+ * a line number in a document that was edited. Those are corrected in place
+ * rather than failing the build, because a red build about a sentence that
+ * did not change is how a gate stops being read.
+ */
+const note = (where, message) => notes.push(`${where}: ${message}`);
 
 /** Split a `; `-separated list, tolerating an empty field and the `—` placeholder. */
 function list(raw) {
@@ -90,6 +115,13 @@ function parseControls(text) {
   });
 }
 
+/** The line number an evidence entry currently cites, or null. */
+function entryLine(entry) {
+  const location = entry.split(' expect:')[0]?.trim() ?? '';
+  const m = /^(.+?):(\d+)$/.exec(location);
+  return m ? Number(m[2]) : null;
+}
+
 /** `path:line expect:token` → parts, with the repo-relative path resolved. */
 function parseEvidence(entry, where) {
   const expectSplit = entry.split(' expect:');
@@ -106,25 +138,76 @@ function parseEvidence(entry, where) {
 function checkEvidence(control, entry) {
   const where = control.id;
   const parsed = parseEvidence(entry, where);
-  if (!parsed) return;
+  if (!parsed) return null;
   const absolute = path.join(root, parsed.file);
   if (!existsSync(absolute)) {
     fail(where, `evidence file does not exist: ${parsed.file}`);
-    return;
+    return null;
   }
   const lines = readFileSync(absolute, 'utf8').split('\n');
-  if (parsed.line < 1 || parsed.line > lines.length) {
+  const isDocument = /\.(md|mdx)$/i.test(parsed.file);
+  const outOfRange = parsed.line < 1 || parsed.line > lines.length;
+  if (outOfRange && !(isDocument && parsed.expect)) {
     fail(where, `${parsed.file}:${parsed.line} is outside the file (${lines.length} lines)`);
-    return;
+    return null;
   }
-  if (!parsed.expect) return;
-  const window = lines.slice(Math.max(0, parsed.line - 9), parsed.line + 8).join('\n');
-  if (!window.includes(parsed.expect)) {
+  if (!parsed.expect) return { file: parsed.file, line: parsed.line };
+  if (!outOfRange) {
+    const window = lines.slice(Math.max(0, parsed.line - 9), parsed.line + 8).join('\n');
+    if (window.includes(parsed.expect)) return { file: parsed.file, line: parsed.line };
+  }
+
+  // The cited line has moved, but the TEXT is still in the file.
+  //
+  // A citation into prose — the README's "Not certified", say — breaks every
+  // time the document is edited, and the failure says "the code moved and
+  // the citation is stale" about a sentence that did not change. That is a
+  // false alarm about a true claim, and it teaches people to ignore this
+  // gate.
+  //
+  // So when the token is still present elsewhere in the same file, the claim
+  // is still evidenced and the LINE NUMBER is what needs fixing. That is
+  // reported as a distinct, actionable finding rather than as a broken
+  // citation — and, unlike the stale-line case, it does not fail the build
+  // when the file is a document whose wording is what is being evidenced.
+  //
+  // When the token appears MORE THAN ONCE, the match is ambiguous: the gate
+  // cannot tell which occurrence was meant, and silently rewriting the
+  // citation to the first one would persist the wrong evidence. That case
+  // fails, with the candidates listed so the owner can point at the right
+  // one.
+  const matches = [];
+  lines.forEach((l, i) => {
+    if (l.includes(parsed.expect)) matches.push(i + 1);
+  });
+  if (matches.length === 1) {
+    const [only] = matches;
+    if (isDocument) {
+      note(
+        where,
+        `${parsed.file}:${parsed.line} no longer contains "${parsed.expect}" — it moved to line ${only}; the citation was updated`,
+      );
+      return { file: parsed.file, line: only };
+    }
     fail(
       where,
-      `${parsed.file}:${parsed.line} no longer contains "${parsed.expect}" — the code moved and the citation is stale`,
+      `${parsed.file}:${parsed.line} no longer contains "${parsed.expect}" (it is now at line ${only}) — the code moved and the citation is stale`,
     );
+    return null;
   }
+  if (matches.length > 1) {
+    fail(
+      where,
+      `${parsed.file}:${parsed.line} does not contain "${parsed.expect}", and it now appears on ${matches.length} lines (${matches.join(', ')}) — point the citation at the one you mean`,
+    );
+    return null;
+  }
+
+  fail(
+    where,
+    `${parsed.file}:${parsed.line} no longer contains "${parsed.expect}" — the code moved and the citation is stale`,
+  );
+  return null;
 }
 
 function checkTests(control, entries) {
@@ -163,6 +246,8 @@ function main() {
   const seen = new Set();
   const counts = { implemented: 0, partial: 0, absent: 0 };
   const frameworkHits = new Map(REQUIRED_FRAMEWORKS.map((f) => [f, 0]));
+  // Every citation whose line number was corrected, across every control.
+  const allCorrections = [];
 
   for (const control of controls) {
     const { id, fields } = control;
@@ -186,7 +271,17 @@ function main() {
     const evidence = list(fields.evidence);
     const tests = list(fields.tests);
     if (evidence.length === 0) fail(id, 'no evidence entries — a control with nothing behind it is a wish');
-    for (const entry of evidence) checkEvidence(control, entry);
+    // The citations that need their line number corrected are collected and
+    // written back to the map below, so the correction persists rather than
+    // being reported on every run.
+    const corrections = [];
+    for (const entry of evidence) {
+      const fixed = checkEvidence(control, entry);
+      if (fixed && fixed.line !== entryLine(entry)) {
+        corrections.push({ entry, fixed });
+      }
+    }
+    allCorrections.push(...corrections);
     checkTests(control, tests);
 
     if (status === 'implemented') {
@@ -224,6 +319,34 @@ function main() {
     if (hits === 0) fail('map', `no control cites ${framework}, but the README claims coverage of it`);
   }
 
+  // Every runbook link an alert rule carries must resolve to a heading in the
+  // runbook file. A rule that points nowhere is an alert with no procedure,
+  // and the person woken by it is the one who finds out.
+  if (!existsSync(RUNBOOK_FILE)) {
+    fail('runbooks', `docs/incidents.md is missing; every alert rule points at it`);
+  } else if (existsSync(ALERT_RULES_FILE)) {
+    const rules = readFileSync(ALERT_RULES_FILE, 'utf8');
+    const runbook = readFileSync(RUNBOOK_FILE, 'utf8');
+    const anchors = new Set(
+      [...runbook.matchAll(/^#{2,3}\s+(.+)$/gm)].map((m) =>
+        m[1]
+          .toLowerCase()
+          .replace(/[^a-z0-9\s-]/g, '')
+          .trim()
+          .replace(/\s+/g, '-'),
+      ),
+    );
+    const referenced = [...rules.matchAll(/runbook:\s*'docs\/incidents\.md#([a-z0-9-]+)'/g)].map((m) => m[1]);
+    if (referenced.length === 0) {
+      fail('runbooks', 'no alert rule references docs/incidents.md; the runbook may have been renamed');
+    }
+    for (const anchor of new Set(referenced)) {
+      if (!anchors.has(anchor)) {
+        fail('runbooks', `docs/incidents.md has no section for the "${anchor}" anchor that the alert rules link to`);
+      }
+    }
+  }
+
   if (verbose) {
     for (const control of controls) {
       console.log(
@@ -232,12 +355,38 @@ function main() {
     }
   }
 
+  // The corrected citations are written back to the map, so the correction
+  // persists. A line number that is fixed in the report but not in the file
+  // would be reported again on every run, and the report would grow.
+  //
+  // The replacement is SCOPED to the whole evidence entry — the path, the
+  // line AND the `expect:` token — and never to the bare `path:line`. A bare
+  // location is a PREFIX of every longer line number that shares its
+  // digits: correcting `README.md:25` by replacing that string would also
+  // rewrite `README.md:251`, silently moving a citation the gate had
+  // validated against a different file. The gate would then be editing the
+  // evidence it is supposed to be checking.
+  if (allCorrections.length > 0) {
+    let text = readFileSync(mapPath, 'utf8');
+    for (const { entry, fixed } of allCorrections) {
+      const location = entry.split(' expect:')[0]?.trim() ?? '';
+      const m = /^(.+?):(\d+)$/.exec(location);
+      if (!m) continue;
+      // The full entry, with the same `expect:` suffix it already carries.
+      const from = entry;
+      const to = `${fixed.file}:${fixed.line} expect:${entry.split(' expect:')[1]?.trim() ?? ''}`.replace(/\s+$/, '');
+      if (text.includes(from)) text = text.split(from).join(to);
+    }
+    writeFileSync(mapPath, text);
+  }
+
   console.log(
     `compliance gate — ${failures.length === 0 ? 'PASS' : 'FAIL'}: ` +
       `${controls.length} controls (${counts.implemented} implemented, ${counts.partial} partial, ${counts.absent} absent), ` +
       `${failures.length} finding(s)`,
   );
   for (const f of failures) console.error(`  ✗ ${f}`);
+  for (const n of notes) console.log(`  · ${n}`);
   console.error('  Note: this gate proves the citations resolve. It does not certify anything.');
   process.exit(failures.length === 0 ? 0 : 1);
 }

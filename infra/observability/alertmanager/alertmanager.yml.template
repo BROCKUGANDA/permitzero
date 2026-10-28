@@ -1,0 +1,64 @@
+# ---------------------------------------------------------------------------
+# PermitZero — Alertmanager configuration TEMPLATE.
+#
+# The deployment script substitutes __PZ_ALERT_WEBHOOK_URL__ and writes the
+# result to run/alertmanager.yml, which is gitignored. Keeping the URL out of
+# this committed file means the alerting destination is deployment
+# configuration rather than something baked into the repository.
+#
+# Prometheus evaluates the rules; this decides what happens when one fires.
+# Without a receiver, a `severity: page` rule produces no page, and the
+# alerting posture is a file nobody reads.
+#
+# The routing is deliberately simple: severity decides the destination, and
+# the receiver is one webhook rather than a PagerDuty integration. A webhook
+# endpoint is enough to prove the path works end to end, and a vendor
+# integration would put a credential in the compose file for no operational
+# gain at this stage.
+# ---------------------------------------------------------------------------
+
+route:
+  # A page waits for nothing. A ticket is grouped so a single incident that
+  # trips five rules produces one notification rather than five.
+  group_by: ['alertname', 'slo']
+  group_wait: 10s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: webhook
+
+  routes:
+    # Zero-tolerance objectives page immediately and are never grouped with
+    # anything else: a page that arrives bundled with a latency ticket is
+    # a page that gets read as a ticket.
+    - matchers:
+        - severity = "page"
+      receiver: webhook
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 30m
+      continue: false
+
+    - matchers:
+        - severity = "ticket"
+      receiver: webhook
+      group_wait: 30s
+      group_interval: 10m
+      repeat_interval: 12h
+
+# A notification that cannot be delivered is an outage of the alerting path
+# itself, and it must be visible somewhere other than the alerting path.
+inhibit_rules:
+  # A broken audit chain is the root cause of many other symptoms. When it
+  # fires, the downstream noise it causes should not page as well.
+  - source_matchers:
+      - alertname = "PermitZeroAuditChainBroken"
+    target_matchers:
+      - severity = "ticket"
+    equal: ['product']
+
+receivers:
+  - name: webhook
+    webhook_configs:
+      - url: __PZ_ALERT_WEBHOOK_URL__
+        send_resolved: true
+        max_alerts: 0
