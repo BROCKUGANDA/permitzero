@@ -96,6 +96,12 @@ jobs:
           # after the run, but it must match what the runtime role uses or
           # every tenant-isolation assertion would pass while proving nothing.
           sed -i 's|^PZ_RLS_ROLE_PASSWORD=.*|PZ_RLS_ROLE_PASSWORD=pz_app_ci|' .env
+          # The runtime URL has to name the SAME password as the role the
+          # migration creates. The template ships the development default, and
+          # a mismatch fails at boot with "password authentication failed for
+          # user pz_app" — which reads like a database problem and is a
+          # configuration one.
+          sed -i 's|^DATABASE_URL_RUNTIME=.*|DATABASE_URL_RUNTIME=postgres://pz_app:pz_app_ci@127.0.0.1:5432/permitzero|' .env
           # The API refuses to boot without a permit signing key, and refuses
           # to run outside development or test without an audit HMAC key —
           # an unkeyed audit chain is not tamper-evident, so the key is
@@ -254,9 +260,23 @@ jobs:
           PERMIT_SIGNING_KEY: ci-permit-signing-key-0123456789
           AUDIT_HMAC_KEY: ci-audit-hmac-key-0123456789abcdef
           METRICS_TOKEN: ci-metrics-token
-          PORT: '8080'
+          # A port of this project's own choosing, not 8080.
+          #
+          # The runner is a shared host: another project's Caddy already
+          # listens on 127.0.0.1:8080, so an API started there dies with
+          # EADDRINUSE and the readiness wait times out on a server that
+          # never started. The port is checked before the API is launched, so
+          # the failure says "the port is taken" rather than "the API did
+          # not become ready" sixty seconds later.
+          PORT: '8181'
           HOST: 127.0.0.1
         run: |
+          set -euo pipefail
+          if ss -ltn | grep -q ":${PORT} "; then
+            echo "port ${PORT} is already in use on this host" >&2
+            ss -ltnp | grep ":${PORT} " >&2 || true
+            exit 1
+          fi
           # `setsid` gives the API its own process group. `npm run` starts the
           # API as a child of a shell, so killing the npm process alone would
           # leave the API listening on the port for the rest of the job — and a
@@ -267,8 +287,9 @@ jobs:
 
       - name: Wait for readiness
         run: |
+          set -uo pipefail
           for i in $(seq 1 60); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health/ready || echo 000)
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8181/health/ready || echo 000)
             if [ "$code" = "200" ]; then
               echo "API is ready after ${i}s"
               exit 0
@@ -296,7 +317,7 @@ jobs:
             pathToFileURL(`${repo}/scripts/lib/load-workload.mjs`).href
           );
           const { agentId, token } = loadCredentials(repo);
-          const base = 'http://127.0.0.1:8080';
+          const base = 'http://127.0.0.1:8181';
           let decided = 0;
           for (let i = 0; i < 5; i += 1) {
             const res = await fetch(`${base}/v1/actions`, {
@@ -323,7 +344,7 @@ jobs:
           # token answers 401 — which the report would report as a stack it
           # could not measure.
           METRICS_TOKEN: ci-metrics-token
-        run: npm run slo:report -- --url http://127.0.0.1:8080 --token "$METRICS_TOKEN" --strict
+        run: npm run slo:report -- --url http://127.0.0.1:8181 --token "$METRICS_TOKEN" --strict
 
       - name: Stop the API
         if: always()

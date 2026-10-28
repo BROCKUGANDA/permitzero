@@ -54,20 +54,39 @@ jobs:
             exit 1
           fi
 
-      - name: Confirm the commit is the one that passed CI
+      - name: Copy the verified tree onto the host
+        # The deployment lives in a fixed directory on this host, and that
+        # directory holds the env file with the permit signing key and the
+        # audit HMAC key. Those two values must not change: rotating the
+        # signing key invalidates every permit already issued, and rotating
+        # the audit key breaks the existing audit chain.
+        #
+        # So the source is copied over and the env file is left alone. The
+        # script's own upgrade path adds the settings an older host is
+        # missing, without touching the ones it already has.
         run: |
           set -euo pipefail
-          echo "deploying ${{ github.sha }}"
+          DEPLOY_DIR="${PZ_DEPLOY_DIR:-$HOME/permitzero}"
+          echo "deploying ${{ github.sha }} to $DEPLOY_DIR"
+          mkdir -p "$DEPLOY_DIR"
+          # --delete keeps the target a faithful copy of the verified commit,
+          # so a file removed from the repository is removed from the host
+          # too. The excludes are the two things that belong to the host
+          # rather than to the repository: the env file and the runtime
+          # state the seed writes.
+          rsync -a --delete \
+            --exclude '.git' \
+            --exclude 'infra/deploy/permitzero.env' \
+            --exclude 'storage/' \
+            --exclude 'node_modules/' \
+            "${GITHUB_WORKSPACE}/" "$DEPLOY_DIR/"
+          echo "tree copied"
+          ls "$DEPLOY_DIR/infra/migrations/" | tail -3
 
       - name: Deploy
-        env:
-          PZ_DEPLOY_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # The runner's working directory is the checked-out tree. The
-          # deployment script builds from it and keeps its own secrets in
-          # infra/deploy/permitzero.env on the host, which is gitignored and
-          # never leaves the machine.
+          cd "${PZ_DEPLOY_DIR:-$HOME/permitzero}"
           ./infra/deploy/deploy-vps.sh
 
       - name: Verify the deployment
@@ -90,3 +109,22 @@ jobs:
           echo "the deployment did not become ready" >&2
           cat /tmp/pz-verify.json >&2 2>/dev/null || true
           exit 1
+
+      - name: Verify tenant isolation from the database
+        # The deployment script checks this from inside the compose network.
+        # This checks it again, from outside, against the running container —
+        # because the property is about the database, and the only way to be
+        # sure is to ask the database what a runtime role with no tenant
+        # context can see.
+        run: |
+          set -euo pipefail
+          cd "${PZ_DEPLOY_DIR:-$HOME/permitzero}"
+          COMPOSE="docker compose --env-file infra/deploy/permitzero.env -f infra/docker-compose.yml"
+          ROWS=$($COMPOSE exec -T postgres psql -U pz_app -d "$PZ_PG_DB" -t -A -c \
+            "SELECT count(*) FROM audit_events;" 2>&1 | tr -d '[:space:]')
+          echo "audit rows visible to the runtime role with no tenant context: $ROWS"
+          if [ "$ROWS" != "0" ]; then
+            echo "the deployment does NOT enforce tenant isolation" >&2
+            exit 1
+          fi
+          echo "tenant isolation verified from the database"
