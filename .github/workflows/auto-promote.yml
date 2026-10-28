@@ -19,19 +19,26 @@ on:
     workflows: [CI]
     types: [completed]
 
-# One promotion attempt per PR at a time. Without this, three pushes in a
-# minute start three merge attempts and GitHub's auto-merge queue rejects
-# the extras.
+# One promotion attempt per pull request at a time. Without this, three
+# pushes in a minute start three merge attempts and GitHub's auto-merge queue
+# rejects the extras.
 #
-# The group is keyed on the HEAD COMMIT rather than on the pull request
-# number, because the two triggers do not agree on what identifies the pull
-# request: `github.event.pull_request.number` is empty on the workflow_run
-# path, so a group keyed on it would put the two attempts for one pull
-# request in two different groups. The head commit is the same value in
-# both — the pull request's head SHA on one path, the CI run's head SHA on
-# the other — so both attempts for one pull request land in one group.
+# The group is keyed on the pull request when the event names one directly.
+#
+# A workflow-level concurrency group is evaluated before any step runs, so it
+# cannot know the pull request number for a `workflow_run` event — that number
+# has to be looked up from the completed run, which is a step. So the
+# workflow_run path falls back to the run's id, and the SERIALISATION that
+# actually matters happens in the job below, whose concurrency group IS keyed
+# by the resolved pull request number. Both attempts for one pull request
+# therefore reach `gh pr merge` one at a time.
+#
+# Keying on the head commit — which is what an earlier version did — put the
+# two attempts for ONE pull request into two different groups, because a
+# `pull_request` CI run is made against a merge ref and its SHA is not the
+# pull request's head.
 concurrency:
-  group: auto-promote-${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
+  group: auto-promote-${{ github.event.pull_request.number || github.event.workflow_run.id }}
   cancel-in-progress: true
 
 permissions:
@@ -39,10 +46,16 @@ permissions:
   pull-requests: write
   # The gate reads the check runs of the head commit.
   checks: read
+  # The gate also reads the COMPLETED RUN to find which pull request it
+  # belonged to. Without this the lookup is refused and every promotion
+  # silently stops — a permission error and "there was nothing to promote"
+  # look the same from the outside, which is why the lookup's failure is now
+  # reported rather than swallowed.
+  actions: read
 
 jobs:
-  promote:
-    name: Enable auto-merge when the gates are green
+  resolve:
+    name: Resolve the pull requests to promote
     # A fork pull request may not run on the self-hosted runner. This
     # workflow holds a write token, and on the pull_request path the
     # workflow file itself comes from the pull request's merge ref — so a
@@ -53,6 +66,8 @@ jobs:
     # job checks out or runs repository code.
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
+    outputs:
+      prs: ${{ steps.targets.outputs.prs }}
     steps:
       - name: Resolve the pull requests to consider
         id: targets
@@ -68,6 +83,11 @@ jobs:
           # pull_request-triggered run silently skipped every pull request
           # whose repository could not be inferred.
           GH_REPO: ${{ github.repository }}
+          # The same repository, under the name the `gh api` path uses. `gh`
+          # reads GH_REPO for its own default, but the URL in the command is
+          # built by the shell, and an undefined variable there is a step that
+          # aborts before it can do anything.
+          REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -75,6 +95,10 @@ jobs:
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           RUN_HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          # The id of the completed run. The pull requests it belonged to are
+          # read back from it, because the workflow_run payload's branch and
+          # SHA describe the completed run rather than the pull request.
+          RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           set -euo pipefail
 
@@ -92,69 +116,73 @@ jobs:
             exit 0
           fi
 
-          # The workflow_run payload names a commit, not a pull request, so
-          # the pull request is found by asking for the open ones whose head
-          # IS that commit.
+          # The pull request is identified by the `pull_requests` array the
+          # workflow_run payload carries — the one field that names the pull
+          # request the run belonged to.
           #
-          # The head commit is matched FIRST and on its own, because it is an
-          # identity: it names one commit and one pull request.
+          # Nothing else in the payload identifies it. `head_branch` and
+          # `head_sha` describe the COMPLETED CI RUN: for a `pull_request` run
+          # that is the pull request's own branch and head commit, and for a
+          # push to main it is `main`. So the branch name cannot serve as the
+          # identity — a fork can name a branch after an open Dependabot
+          # branch, and a name is not an identity.
           #
-          # The branch name is only consulted when the commit does not match,
-          # and even then the branch name alone is NOT an identity — a fork
-          # can create a branch with the same name as an open Dependabot
-          # branch, and matching on the name alone would let a fork's CI run
-          # select an unrelated pull request and enable its auto-merge. The
-          # repository has to match as well, and the author and check gates
-          # below still have to pass for the pull request that was selected.
+          # The array is empty for a run that had no pull request, which is
+          # exactly the push-to-main case: nothing to promote.
           #
-          # The matching is done here and not inside the jq program, because
-          # a branch name is allowed to contain characters that would have to
-          # be quoted into a filter — and a filter that does not parse is a
-          # resolution that quietly finds nothing.
-          RAW=$(gh pr list --state open --limit 100 --json number,headRefOid,headRefName,headRepository,headRepositoryOwner \
-            --jq '.[] | [.number, .headRefOid, .headRefName, .headRepository.name, .headRepositoryOwner.login] | join(" ")')
-          PICKED=""
-          while read -r NUM HEAD_OID HEAD_NAME HEAD_REPO HEAD_OWNER; do
-            [ -n "$NUM" ] || continue
-            if [ "$HEAD_OID" = "$RUN_HEAD_SHA" ]; then
-              # The commit IS this pull request's head. That is an identity.
-              PICKED="$PICKED $NUM"
-              continue
-            fi
-            # The commit does not match, so the only remaining signal is the
-            # branch name — and a branch name only means something within the
-            # repository that owns it.
-            #
-            # The comparison is on the FULL repository name. The pull request
-            # API gives the owner as a login (`owner`) and the repository as
-            # a name (`repository`), while the workflow_run payload gives the
-            # repository as a full name (`owner/repository`). Comparing a
-            # login with a full name never matches, so the fallback could
-            # never resolve a pull request whose head had moved on since the
-            # run — and an updated pull request would silently never be
-            # promoted.
-            if [ "$HEAD_NAME" = "$RUN_HEAD_BRANCH" ] && [ "$HEAD_OWNER/$HEAD_REPO" = "$RUN_HEAD_REPO" ]; then
-              PICKED="$PICKED $NUM"
-            fi
-          done <<< "$RAW"
-          PRS=$(echo $PICKED)
-          if [ -z "$PRS" ]; then
-            echo "no open pull request has $RUN_HEAD_SHA as its head; nothing to promote"
+          # The parsing is done by `gh`, which is already required and is
+          # present on every runner. A separate `jq` is not: a runner without
+          # it would make this step fail in a way that looks like "there was
+          # nothing to promote", and a gate that cannot run is
+          # indistinguishable from a gate that decided not to act.
+          #
+          # A FAILED lookup is reported as a failure, not as "there was
+          # nothing to promote". The two are different facts, and conflating
+          # them means a transient API error silently stops every promotion.
+          if ! PICKED=$(gh api "repos/$REPO/actions/runs/$RUN_ID" \
+            --jq '[.pull_requests[]?.number] | join(" ")' 2>&1); then
+            echo "could not read the completed run $RUN_ID" >&2
+            printf '         %s\n' "$PICKED" >&2
+            exit 1
+          fi
+          if [ -z "$PICKED" ]; then
+            echo "the completed run was not associated with a pull request; nothing to promote"
             echo "prs=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          PRS=$(echo $PICKED)
           echo "prs=$PRS" >> "$GITHUB_OUTPUT"
           echo "considering pull request(s) $PRS"
 
+  promote:
+    name: Enable auto-merge when the gates are green
+    needs: resolve
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    # The serialisation that actually matters, keyed by the pull request the
+    # RESOLVE step found.
+    #
+    # The workflow-level group cannot do this: it is evaluated before any step
+    # runs, so for a workflow_run event it does not yet know which pull
+    # request the completed run belonged to. Keying it by the run's id instead
+    # puts the run-triggered attempt and the pull-request-triggered attempt
+    # for the SAME pull request in two different groups, and both reach
+    # `gh pr merge` — the second of which GitHub rejects, leaving the
+    # rejection in a log nobody reads.
+    #
+    # So the promotion itself is a separate job whose concurrency group IS the
+    # pull request number. Two attempts for one pull request now queue; two
+    # attempts for two different pull requests do not.
+    concurrency:
+      group: auto-promote-pr-${{ needs.resolve.outputs.prs }}
+      cancel-in-progress: false
+    steps:
       - name: Check whether these pull requests are eligible
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # The repository every `gh` call is about. See the note in the
-          # resolution step: without it, `gh` infers the repository from a
-          # git remote that may not exist on this runner.
           GH_REPO: ${{ github.repository }}
           REPO: ${{ github.repository }}
-          PRS: ${{ steps.targets.outputs.prs }}
+          PRS: ${{ needs.resolve.outputs.prs }}
         run: |
           set -euo pipefail
 
