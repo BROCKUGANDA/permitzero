@@ -52,17 +52,22 @@ jobs:
         # much room it found. The reclaimable set is deliberately narrow:
         # dangling images and the build cache, which are outputs of a build
         # rather than anything a running service depends on.
+        #
+        # It deliberately does NOT remove containers. The service containers
+        # this job is about to use are named by a hash prefix, exactly like
+        # the leftovers from an earlier job, so a cleanup that removed "the
+        # containers a previous job left behind" would remove this job's own
+        # database -- and the next step would fail to connect to a server
+        # that had just been deleted underneath it. Stale service containers
+        # are the host janitor's job (infra/deploy/disk-janitor.sh), which
+        # runs on a threshold and only touches containers old enough that no
+        # running job can be using them.
         run: |
           set -uo pipefail
           echo "=== disk before ==="
           df -h / | tail -1
           docker builder prune -af >/dev/null 2>&1 || true
           docker image prune -af >/dev/null 2>&1 || true
-          # Remove the service containers a previous job left behind. They are
-          # named by a hash prefix, which is how the runner names them.
-          for c in $(docker ps -a --format '{{.Names}}' | grep -E '^[0-9a-f]{32}_'); do
-            docker rm -f "$c" >/dev/null 2>&1 || true
-          done
           echo "=== disk after ==="
           df -h / | tail -1
           AVAIL=$(df --output=avail -k / | tail -1 | tr -d ' ')
@@ -163,17 +168,17 @@ jobs:
         ports: ['6379:6379']
     steps:
       - name: Reclaim disk space
-        # The same reason as the verify job, and the same risk: this runner
-        # is the deploy host, and the previous job on it may have left
-        # images behind.
+        # The same reason as the verify job, and the same caution: this
+        # runner is the deploy host, and the previous job on it may have left
+        # images behind. It does NOT remove containers — the service
+        # containers this job is about to use carry the same hash prefix as
+        # an earlier job's leftovers, and removing them would delete this
+        # job's own database. The host janitor handles stale ones.
         run: |
           set -uo pipefail
           df -h / | tail -1
           docker builder prune -af >/dev/null 2>&1 || true
           docker image prune -af >/dev/null 2>&1 || true
-          for c in $(docker ps -a --format '{{.Names}}' | grep -E '^[0-9a-f]{32}_'); do
-            docker rm -f "$c" >/dev/null 2>&1 || true
-          done
           df -h / | tail -1
           AVAIL=$(df --output=avail -k / | tail -1 | tr -d ' ')
           if [ "$AVAIL" -lt 8388608 ]; then

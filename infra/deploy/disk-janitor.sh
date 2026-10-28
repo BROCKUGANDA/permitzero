@@ -49,9 +49,25 @@ log "above threshold: reclaiming"
 # both on the next job, and a half-finished checkout is worth nothing.
 rm -rf "${RUNNER_DIR}"/_work/* 2>/dev/null || true
 
-# Service containers from a CI job are named by a hash prefix.
-for c in $(docker ps -a --format '{{.Names}}' | grep -E '^[0-9a-f]{32}_' || true); do
-  docker rm -f "$c" >/dev/null 2>&1 || true
+# Service containers from a CI job are named by a hash prefix. They are only
+# removed when they are OLD: a container that a job is currently using is
+# younger than this, and removing it would delete the database that job is
+# about to connect to. The threshold is well beyond any job's runtime.
+#
+# (A cleanup that removed "the containers a previous job left behind" by name
+# pattern alone would also remove the CURRENT job's service containers,
+# because the runner names them the same way. The age check is what makes
+# this safe.)
+STALE_CONTAINER_AGE="${PZ_STALE_CONTAINER_AGE:-3600}"
+for c in $(docker ps -a --format '{{.Names}}|{{.CreatedAt}}' | grep -E '^[0-9a-f]{32}_' || true); do
+  name="${c%%|*}"
+  created="${c#*|}"
+  epoch=$(date -d "$created" +%s 2>/dev/null || echo 0)
+  now=$(date +%s)
+  if [ "$epoch" -gt 0 ] && [ $((now - epoch)) -gt "$STALE_CONTAINER_AGE" ]; then
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    log "removed stale service container $name"
+  fi
 done
 
 docker builder prune -af >/dev/null 2>&1 || true
