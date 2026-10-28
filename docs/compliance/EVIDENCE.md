@@ -136,12 +136,12 @@ note: Correlation travels as an explicit `traceId` field on the calls that matte
 
 ### DEPENDENCY-TRANSPARENCY — the audit gate can fail
 
-status: implemented
+status: partial
 sources: SOC 2 CC7.1, CC8.1; OWASP (supply chain)
-claim: `npm audit` is run with an explicit, dated exception list; a finding that is not named in the file fails CI, and the gate refuses an exception whose advisory no longer exists.
+claim: `npm audit` runs in CI against an explicit, dated exception list; a production finding that is not named, reasoned and in-date fails the build, and an exception whose advisory has cleared is reported so the list cannot only ever grow. The list is currently empty: npm reports no advisory against a production dependency.
 evidence: scripts/audit-gate.mjs:26 expect:dependency-exceptions.json
 tests: scripts/audit-gate.mjs
-note: Exceptions are tracked, not resolved; each carries a re-review date in infra/security/dependency-exceptions.json.
+gap: Scope is `--omit=dev`, so advisories confined to devDependencies are outside the gate, and a stale exception is reported rather than failed. GitHub Dependabot reports 20 advisories (2 critical, 10 high, 8 moderate) on the default branch under its own wider source and scope; that gap is a property of the two tools, and it is recorded here rather than closed by quietly widening the gate's claim. No private-registry or provenance/SLSA attestation checking.
 
 ### SECRET-HYGIENE — no credential in the tree
 
@@ -192,10 +192,10 @@ gap: Alert routing (PagerDuty/slack) is not configured; the rules exist, the not
 
 status: partial
 sources: SOC 2 CC8.1
-claim: CI runs typecheck, lint, the full suite, build, format, the strict SLO report, gitleaks, the dependency gate and the resilience drill on every push, and migrations are ordered, versioned SQL tracked in `_migrations`.
+claim: CI is configured to run typecheck, lint, the full suite, build, format, the strict SLO report, gitleaks, the dependency gate, the compliance evidence gate and the resilience drill on every push, and migrations are ordered, versioned SQL tracked in `_migrations`.
 evidence: .github/workflows/ci.yml:41 expect:verify; infra/migrations/0001_init.sql:26 expect:CREATE TABLE IF NOT EXISTS tenants
 tests: scripts/verify.mjs
-gap: No protected-branch or required-reviewer evidence is captured in this repository, and there is no release-approval record.
+gap: No hosted CI run has ever executed here. Every run on `main` and on Dependabot pull requests finishes in about three seconds with no runner assigned, no steps and no logs (`runner_name` empty, zero steps via the Actions API), on push and pull_request events alike, so this list describes what the workflow does when a runner exists. Until that is fixed upstream, every gate above is verified locally on the development machine rather than by an independent hosted pipeline. No protected branch, required reviewer, or release-approval record either.
 
 ### ENCRYPTION-AT-REST — not built here
 
@@ -229,6 +229,6 @@ gap: An append-only audit chain is in tension with erasure requests and the reco
 status: absent
 sources: SOC 2 CC4.1, CC9.2
 claim: No third-party assessment, penetration test or attestation has been performed on this code.
-evidence: README.md:106 expect:Not certified
+evidence: README.md:212 expect:Not certified
 tests:
 gap: Everything in this file is self-asserted against self-written tests. That is the honest boundary of a hackathon build, and the README says so.
