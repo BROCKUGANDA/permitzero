@@ -6,6 +6,8 @@
  */
 export * from './names.js';
 export * from './types.js';
+export * from './deadline.js';
+export * from './circuit.js';
 export * from './dispatcher.js';
 export * from './workers.js';
 export * from './bullmq.js';

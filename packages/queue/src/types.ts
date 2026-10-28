@@ -2,10 +2,26 @@ import { DomainError, ErrorCode, toDomainError } from '@permitzero/domain';
 import { QUEUE_NAMES, type QueueName } from './names.js';
 
 /** Minimal structural view of ioredis, so tests can supply a real client and
- * the health probe does not need the concrete class. */
+ *  the health probe does not need the concrete class. */
 export interface RedisLike {
   status: string;
   ping(): Promise<string>;
+}
+
+/**
+ * A job as the queue ports expose it.
+ *
+ * `data` and `name` are here because the dead-letter sweep has to read what a
+ * dead job was carrying: a redrive that cannot see the payload is a redrive
+ * that publishes an empty job. Both are optional so a port implementation that
+ * only tracks timing still satisfies the shape.
+ */
+export interface QueueJobSummary {
+  id?: string;
+  name?: string;
+  timestamp?: number;
+  addedOn?: number;
+  data?: unknown;
 }
 
 /** Minimal structural view of a BullMQ queue. */
@@ -13,27 +29,22 @@ export interface QueueLike {
   name: string;
   add(jobName: string, data: unknown, opts?: Record<string, unknown>): Promise<{ id?: string }>;
   getJobCounts(): Promise<Record<string, number>>;
-  getJobs(
-    status: ('waiting' | 'delayed' | 'active')[],
-    start?: number,
-    end?: number,
-  ): Promise<{ timestamp?: number; addedOn?: number }[]>;
+  getJobs(statuses: ('waiting' | 'delayed' | 'active')[], start?: number, end?: number): Promise<QueueJobSummary[]>;
   close(): Promise<void>;
 }
 
 export interface QueueFactory {
   (name: QueueName): QueueLike;
-}
-
-export class QueueUnavailableError extends DomainError {
-  constructor(message = 'Queue backend unavailable.') {
-    super(message, {
-      code: ErrorCode.ENFORCEMENT_UNAVAILABLE,
-      httpStatus: 503,
-      retryable: true,
-    });
-    this.name = 'QueueUnavailableError';
-  }
+  /**
+   * False when the backend is known to be down.
+   *
+   * The dispatcher asks before it claims: a row that is claimed and cannot be
+   * published burns one of its attempts per poll, and a Redis outage that lasts
+   * longer than `maxAttempts` polls would park every committed event as DEAD.
+   * Not knowing is not the same as knowing — an implementation that cannot tell
+   * leaves this off, and the dispatcher assumes the backend is up.
+   */
+  available?(): boolean;
 }
 
 /**
@@ -64,7 +75,80 @@ export function outboxJobPayload(row: {
   };
 }
 
+export class QueueUnavailableError extends DomainError {
+  constructor(message = 'Queue backend unavailable.') {
+    super(message, {
+      code: ErrorCode.ENFORCEMENT_UNAVAILABLE,
+      httpStatus: 503,
+      retryable: true,
+    });
+    this.name = 'QueueUnavailableError';
+  }
+}
+
+/**
+ * The Redis circuit breaker is open: the backend was unreachable often enough
+ * that asking it again is worse than waiting for the breaker's reset window.
+ */
+export class QueueCircuitOpenError extends QueueUnavailableError {
+  constructor(message = 'Queue circuit breaker is open.') {
+    super(message);
+    this.name = 'QueueCircuitOpenError';
+  }
+}
+
+/**
+ * A queue command outlived its deadline.
+ *
+ * This is the failure the whole bounded-deadline design exists for. Without a
+ * deadline, a command against a dead Redis never rejects — it waits on a
+ * promise that will not settle — and the caller waits with it, forever.
+ */
+export class QueueTimeoutError extends Error {
+  readonly label: string;
+  readonly timeoutMs: number;
+  constructor(label: string, timeoutMs: number) {
+    super(`${label} did not complete within ${timeoutMs}ms.`);
+    this.name = 'QueueTimeoutError';
+    this.label = label;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * The outbox freeze trigger (`0005_credential_names_outbox_freeze.sql`)
+ * refuses to update a PUBLISHED row and raises `feature_not_supported`
+ * (SQLSTATE 0A000). That rejection is not a fault: it means a peer dispatcher
+ * published the row first, so the row is no longer ours to move. It is
+ * reported as `OUTBOX_ALREADY_CLAIMED` and treated as non-retryable, because
+ * retrying a row somebody else already delivered is how one event becomes two.
+ */
+function isOutboxFreezeRejection(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && current !== null && typeof current === 'object'; depth++) {
+    const candidate = current as { code?: unknown; message?: unknown };
+    if (candidate.code === '0A000') return true;
+    if (typeof candidate.message === 'string' && candidate.message.includes('feature_not_supported')) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 export function classifyQueueError(err: unknown): { retryable: boolean; errorClass: string } {
+  // Before the DomainError branch: these carry the queue's own vocabulary,
+  // which is what an operator reads in the event stream.
+  if (err instanceof QueueCircuitOpenError) {
+    return { retryable: true, errorClass: 'QUEUE_CIRCUIT_OPEN' };
+  }
+  if (err instanceof QueueTimeoutError) {
+    return { retryable: true, errorClass: 'QUEUE_TIMEOUT' };
+  }
+  if (err instanceof QueueUnavailableError) {
+    return { retryable: true, errorClass: 'QUEUE_UNAVAILABLE' };
+  }
+  if (isOutboxFreezeRejection(err)) {
+    return { retryable: false, errorClass: 'OUTBOX_ALREADY_CLAIMED' };
+  }
   if (err instanceof DomainError) {
     return { retryable: err.retryable, errorClass: String(err.code) };
   }
