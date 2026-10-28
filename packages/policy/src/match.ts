@@ -17,6 +17,7 @@
 import type { PolicyEvaluationInput } from '@permitzero/domain';
 import { PolicyOperator } from '@permitzero/schemas';
 import type { Condition, ConditionGroup, PolicyField, PolicyRule } from '@permitzero/schemas';
+import { effectiveEnvironment } from './environment.js';
 import type { InternalResolved } from './fields.js';
 
 export type Verdict = 'TRUE' | 'FALSE' | 'UNKNOWN';
@@ -71,7 +72,10 @@ export function ruleInScope(rule: PolicyRule, input: PolicyEvaluationInput): boo
     if (!scope.operations.includes(input.operation)) return false;
   }
   if (scope.environments !== undefined && scope.environments.length > 0) {
-    if (!scope.environments.includes(input.environment)) return false;
+    // The derived environment, never the one the request asked for: a caller
+    // who could name the environment could drop the protective rules that only
+    // apply to the environment they named.
+    if (!scope.environments.includes(effectiveEnvironment(input))) return false;
   }
   if (scope.agent_ids !== undefined && scope.agent_ids.length > 0) {
     if (!scope.agent_ids.includes(input.agent.agentId)) return false;

@@ -374,4 +374,46 @@ describe('intake', () => {
     expect(body.permit).toBeNull();
     await closeApp(t);
   });
+
+  it('derives the environment from the credential and refuses a claim that disagrees', async () => {
+    // The environment that scopes a policy used to be whatever the request
+    // body said, which made it a claim the caller controlled: naming DEMO
+    // dropped PRODUCTION-scoped protective rules out of scope, and naming
+    // PRODUCTION reached production-only logic. It is now derived from the
+    // credential — the agent row for an agent, the tenant's default
+    // environment for a human — and the body may only ask for it.
+    //
+    // The demo agent runs in DEMO. Moving the tenant's default environment to
+    // PRODUCTION moves the human credentials with it and leaves the agent
+    // alone, so the two identities disagree and the API has to tell them
+    // apart.
+    await t.db.sql`UPDATE tenants SET default_environment = 'PRODUCTION' WHERE id = ${t.tenantId}`;
+
+    // The agent credential is bound to DEMO and may not claim PRODUCTION.
+    const agentClaim = await postJson(
+      t,
+      '/v1/actions',
+      t.agentToken,
+      intakeBody(t.agentId, { environment: 'PRODUCTION' }),
+    );
+    expect(agentClaim.status).toBe(403);
+    expect(agentClaim.json).toMatchObject({ error: { code: 'FORBIDDEN' } });
+
+    // The human credential is now bound to PRODUCTION and may not claim DEMO.
+    const ownerClaim = await postJson(t, '/v1/actions', t.ownerToken, intakeBody(t.agentId, { environment: 'DEMO' }));
+    expect(ownerClaim.status).toBe(403);
+
+    // Asking for the environment the credential is actually bound to works,
+    // and the action records the derived environment rather than a claim.
+    const accepted = await postJson(
+      t,
+      '/v1/actions',
+      t.ownerToken,
+      intakeBody(t.agentId, { environment: 'PRODUCTION' }),
+    );
+    expect(accepted.status).toBe(201);
+    const fetched = await getJson(t, `/v1/actions/${(accepted.json as IntakeResponse).action_id}`, t.ownerToken);
+    expect(fetched.json).toMatchObject({ environment: 'PRODUCTION' });
+    await closeApp(t);
+  });
 });

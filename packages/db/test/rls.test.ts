@@ -18,7 +18,11 @@ import { sql } from 'drizzle-orm';
 import { newId } from '@permitzero/domain';
 import {
   appendAuditEvent,
+  claimOutboxEvents,
   createCredential,
+  insertOutboxEvent,
+  markOutboxFailed,
+  markOutboxPublished,
   resetDb,
   rlsEnforcementState,
   seed,
@@ -235,6 +239,26 @@ describe('rls: the escape hatch is as narrow as the code claims', () => {
     }
   });
 
+  it('the blind flag does NOT open the WRITE path on the door and delivery tables', async () => {
+    // `users` and `outbox_events` are deliberately absent from the list above:
+    // both have a legitimate blind READ — the door lookup reads `users`, and
+    // /v1/status reads the delivery backlog — so the flag opens them for
+    // reading and for nothing else. What is asserted here is the half that
+    // was open by accident: a blind transaction could write either table.
+    //
+    // The invariant is checked on the ROW, not on the statement: a policy that
+    // silently matches nothing looks exactly like a successful write.
+    const users = await admin.sql<{ n: string }[]>`SELECT count(*)::text AS n FROM users`;
+    await withTenantBlindTransaction(app, (tx) => q(tx, `DELETE FROM users`));
+    const usersAfter = await admin.sql<{ n: string }[]>`SELECT count(*)::text AS n FROM users`;
+    expect(usersAfter[0]?.n, 'users').toBe(users[0]?.n);
+
+    const outbox = await admin.sql<{ n: string }[]>`SELECT count(*)::text AS n FROM outbox_events`;
+    await withTenantBlindTransaction(app, (tx) => q(tx, `DELETE FROM outbox_events WHERE tenant_id = '${tenantB}'`));
+    const outboxAfter = await admin.sql<{ n: string }[]>`SELECT count(*)::text AS n FROM outbox_events`;
+    expect(outboxAfter[0]?.n, 'outbox_events').toBe(outbox[0]?.n);
+  });
+
   it('the blind flag does not leak onto the pooled connection afterwards', async () => {
     await withTenantBlindTransaction(app, async () => undefined);
     const seen = await app.sql<{ n: string }[]>`SELECT count(*)::text AS n FROM service_credentials`;
@@ -247,6 +271,168 @@ describe('rls: the escape hatch is as narrow as the code claims', () => {
     );
     expect(found.length).toBeGreaterThan(0);
     expect(found.every((r) => r.tenant_id === tenantA)).toBe(true);
+  });
+});
+
+/**
+ * The write side of the blind flag.
+ *
+ * `0006` opened the blind flag with `FOR ALL` policies on `users` and
+ * `outbox_events`, and `FOR ALL` whose USING clause says "the flag is on" is a
+ * write grant: a blind transaction could insert, edit and delete rows of any
+ * tenant. The read side is legitimate — the door lookup reads `users`, and
+ * /v1/status reads the delivery backlog — so these tests assert that the
+ * READ still works and that the WRITE does not.
+ */
+describe('rls: the blind flag may read, and may not write', () => {
+  let userId = '';
+  let outboxId = '';
+  let otherTenantOutboxId = '';
+
+  beforeAll(async () => {
+    const users = await admin.sql<{ id: string }[]>`SELECT id FROM users ORDER BY created_at LIMIT 1`;
+    userId = users[0]?.id ?? '';
+    if (!userId) throw new Error('the seed must produce at least one user');
+    const row = await insertOutboxEvent(admin.db, {
+      tenantId: tenantB,
+      aggregateType: 'action',
+      aggregateId: 'act_blind_write',
+      eventType: 'action.submitted',
+      queueName: 'pz.outbox',
+      payload: { action_id: 'act_blind_write' },
+    });
+    outboxId = row.outboxEventId;
+    // A second tenant's row, so the cross-tenant claim has something to
+    // cross. A claim that only ever saw one tenant would pass the same
+    // assertions.
+    const other = await insertOutboxEvent(admin.db, {
+      tenantId: tenantA,
+      aggregateType: 'action',
+      aggregateId: 'act_blind_write_other',
+      eventType: 'action.submitted',
+      queueName: 'pz.outbox',
+      payload: { action_id: 'act_blind_write_other' },
+    });
+    otherTenantOutboxId = other.outboxEventId;
+  });
+
+  it('the blind flag still reads the door tables it is allowed to read', async () => {
+    const users = await withTenantBlindTransaction(app, (tx) =>
+      q<{ n: string }>(tx, 'SELECT count(*)::text AS n FROM users'),
+    );
+    expect(Number(users[0]?.n ?? 0), 'the door lookup reads users').toBeGreaterThan(0);
+  });
+
+  it('a blind transaction cannot insert a user row', async () => {
+    await expectSqlstate(
+      withTenantBlindTransaction(app, (tx) =>
+        q(
+          tx,
+          `INSERT INTO users (id, email, display_name) VALUES ('usr_blind_write', 'blind-write@example.invalid', 'blind')`,
+        ),
+      ),
+      '42501',
+    );
+    const leaked = await admin.sql<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM users WHERE id = 'usr_blind_write'`;
+    expect(leaked[0]?.n).toBe('0');
+  });
+
+  it('a blind transaction cannot update a user row', async () => {
+    const before = await admin.sql<{ display_name: string }[]>`SELECT display_name FROM users WHERE id = ${userId}`;
+    await withTenantBlindTransaction(app, (tx) =>
+      q(tx, `UPDATE users SET display_name = 'tampered' WHERE id = '${userId}'`),
+    );
+    const after = await admin.sql<{ display_name: string }[]>`SELECT display_name FROM users WHERE id = ${userId}`;
+    expect(after[0]?.display_name, 'a blind transaction rewrote a user row').toBe(before[0]?.display_name);
+  });
+
+  it('a blind transaction cannot delete a user row', async () => {
+    await withTenantBlindTransaction(app, (tx) => q(tx, `DELETE FROM users WHERE id = '${userId}'`));
+    const still = await admin.sql<{ n: string }[]>`SELECT count(*)::text AS n FROM users WHERE id = ${userId}`;
+    expect(still[0]?.n, 'a blind transaction deleted a user row').toBe('1');
+  });
+
+  it('a blind transaction cannot move an outbox row of another tenant', async () => {
+    // The claim may move a row's lease columns; it may not move its status.
+    // The distinction is the whole point: publishing another tenant's event,
+    // failing it or killing it are all things the blind flag must not be able
+    // to do.
+    await expectSqlstate(
+      withTenantBlindTransaction(app, (tx) =>
+        q(
+          tx,
+          `UPDATE outbox_events SET status = 'PUBLISHED', published_at = now() WHERE outbox_event_id = '${outboxId}'`,
+        ),
+      ),
+      '42501',
+    );
+    const after = await admin.sql<{ status: string }[]>`
+      SELECT status FROM outbox_events WHERE outbox_event_id = ${outboxId}`;
+    expect(after[0]?.status, "a blind transaction published another tenant's event").toBe('PENDING');
+  });
+
+  it('a blind transaction cannot insert an outbox row', async () => {
+    await expectSqlstate(
+      withTenantBlindTransaction(app, (tx) =>
+        q(
+          tx,
+          `INSERT INTO outbox_events (outbox_event_id, tenant_id, aggregate_type, aggregate_id, event_type, payload_json)
+           VALUES ('obx_blind_write', '${tenantB}', 'action', 'act_forged', 'action.submitted', '{}'::jsonb)`,
+        ),
+      ),
+      '42501',
+    );
+    const leaked = await admin.sql<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM outbox_events WHERE outbox_event_id = 'obx_blind_write'`;
+    expect(leaked[0]?.n).toBe('0');
+  });
+
+  it('a blind transaction cannot delete an outbox row', async () => {
+    await withTenantBlindTransaction(app, (tx) =>
+      q(tx, `DELETE FROM outbox_events WHERE outbox_event_id = '${outboxId}'`),
+    );
+    const still = await admin.sql<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM outbox_events WHERE outbox_event_id = ${outboxId}`;
+    expect(still[0]?.n, 'a blind transaction deleted an outbox row').toBe('1');
+  });
+
+  it('the cross-tenant claim still reaches rows of every tenant', async () => {
+    // The escape hatch has to survive the narrowing: a per-tenant claim loop
+    // would let one busy tenant starve the queue behind it, so the claim
+    // crosses tenants by design. It is the only blind write, and it is
+    // confined to the claim columns.
+    const claimed = await withTenantBlindTransaction(app, (tx) => claimOutboxEvents(tx, 10, new Date()));
+    expect(claimed.length, 'the blind claim reached nothing').toBeGreaterThan(0);
+    expect(new Set(claimed.map((r) => r.tenantId)).size, 'the claim did not cross tenants').toBeGreaterThan(1);
+    expect(claimed.map((r) => r.id)).toContain(outboxId);
+    expect(claimed.map((r) => r.id)).toContain(otherTenantOutboxId);
+    // And the claim moved the lease, not the status: the row is still
+    // deliverable, it is just spoken for.
+    const after = await admin.sql<{ status: string; attempt_count: number }[]>`
+      SELECT status, attempt_count FROM outbox_events WHERE outbox_event_id = ${outboxId}`;
+    expect(after[0]?.status).toBe('PENDING');
+    expect(after[0]?.attempt_count).toBe(1);
+  });
+
+  it('a tenant-scoped transaction can still move its own outbox row', async () => {
+    // The narrowing must not cost the dispatcher its job: the status writes
+    // now carry the row's tenant and run tenant-scoped, and this is what that
+    // looks like from the database.
+    const marked = await withTenantTransaction(app, tenantB, (tx) =>
+      markOutboxFailed(tx, outboxId, 'PROBE_FAILURE', new Date(Date.now() + 60_000), tenantB),
+    );
+    expect(marked, 'the tenant could not move its own row').toBe(true);
+    const after = await admin.sql<{ status: string }[]>`
+      SELECT status FROM outbox_events WHERE outbox_event_id = ${outboxId}`;
+    expect(after[0]?.status).toBe('FAILED');
+  });
+
+  it("a tenant-scoped transaction cannot move another tenant's outbox row", async () => {
+    const marked = await withTenantTransaction(app, tenantA, (tx) =>
+      markOutboxFailed(tx, outboxId, 'PROBE_FAILURE', new Date(Date.now() + 60_000), tenantA),
+    );
+    expect(marked, "one tenant moved another tenant's row").toBe(false);
   });
 });
 

@@ -55,7 +55,11 @@ export async function authenticateToken(db: Db, header: string | undefined, now:
     throw new UnauthenticatedError();
   }
   if (credential.expiresAt !== null && credential.expiresAt.getTime() <= now.getTime()) {
-    throw new UnauthenticatedError('This credential has expired.');
+    // The same message again. An expired credential is still a credential that
+    // exists, and saying so turns this endpoint into an oracle for "which
+    // tokens were ever issued" — the one fact an attacker probing for stale
+    // keys wants, and the one the line above already declines to hand out.
+    throw new UnauthenticatedError();
   }
   return resolvePrincipal(db, credential, now);
 }

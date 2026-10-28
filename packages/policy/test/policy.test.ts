@@ -29,11 +29,14 @@ import type {
 } from '@permitzero/schemas';
 import {
   DEFAULT_MAX_FIXTURES,
+  deriveMfaAssertionKey,
   evaluatePolicy,
   hashPolicyDocument,
+  issueMfaAssertion,
   lintPolicy,
   resolveFields,
   simulatePolicy,
+  verifyMfaAssertion,
 } from '../src/index.js';
 import type { PinnedPolicyRevision } from '../src/index.js';
 
@@ -1087,5 +1090,153 @@ describe('simulatePolicy', () => {
     expect(() => simulatePolicy(cases, revision, { maxFixtures: 2 })).toThrow(RangeError);
     expect(simulatePolicy(cases, revision, { maxFixtures: 3 })).toHaveLength(3);
     expect(DEFAULT_MAX_FIXTURES).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The environment is derived, not requested
+// ---------------------------------------------------------------------------
+
+describe('environment scoping', () => {
+  const productionOnly: PolicyDocument = {
+    schema_version: 'policy.v1',
+    default_effect: 'DENY',
+    rules: [
+      makeRule({
+        id: 'allow-production-payments',
+        effect: 'ALLOW',
+        reason_code: 'WITHIN_LIMIT',
+        scope: { tools: ['payment.execute'], environments: ['PRODUCTION'] },
+        when: { none: [] },
+      }),
+    ],
+  };
+
+  it('scopes a rule by the environment derived from the principal, not the one the request asked for', () => {
+    // The request says DEMO; the principal is bound to PRODUCTION. The rule
+    // that only applies in production applies, because the environment that
+    // scopes it was derived and not claimed.
+    const result = evaluatePolicy(
+      baseInput({ environment: 'DEMO', principal: { ...basePrincipal, environment: 'PRODUCTION' } }),
+      makeRevision(productionOnly),
+    );
+    expect(result.decision).toBe('ALLOW');
+  });
+
+  it('refuses to let a request claim an environment that drops protective rules out of scope', () => {
+    // The mirror image: the request says PRODUCTION, the principal is DEMO.
+    // Claiming PRODUCTION must not pull the production rule into scope.
+    const result = evaluatePolicy(
+      baseInput({ environment: 'PRODUCTION', principal: { ...basePrincipal, environment: 'DEMO' } }),
+      makeRevision(productionOnly),
+    );
+    expect(result.decision).toBe('DENY');
+    expect(result.reasonCodes).toContain(DenyReason.NO_EXPLICIT_ALLOW);
+  });
+
+  it('resolves the environment condition field from the same derived value', () => {
+    const byField = new Map(
+      resolveFields(baseInput({ environment: 'PRODUCTION', principal: { ...basePrincipal, environment: 'DEMO' } })).map(
+        (f) => [f.field, f],
+      ),
+    );
+    expect(byField.get('environment')?.value).toBe('DEMO');
+    expect(byField.get('environment')?.detail).toContain('derived');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MFA step-up assertions
+// ---------------------------------------------------------------------------
+
+describe('mfa step-up assertions', () => {
+  const key = deriveMfaAssertionKey('server-secret-for-tests');
+  const otherKey = deriveMfaAssertionKey('a-different-server-secret');
+  const now = new Date('2026-10-26T12:00:00Z');
+  const subject = { tenantId: TENANT, actorId: 'usr_approver_1', actionId: 'act_00000000000000000000000001' };
+
+  function issue(overrides: Partial<typeof subject> = {}, issuedAt = now.getTime(), ttlMs = 300_000): string {
+    return issueMfaAssertion(
+      {
+        tenantId: overrides.tenantId ?? subject.tenantId,
+        actorId: overrides.actorId ?? subject.actorId,
+        actionId: overrides.actionId ?? subject.actionId,
+        issuedAt,
+        expiresAt: issuedAt + ttlMs,
+      },
+      key,
+    );
+  }
+
+  it('accepts an assertion issued for this subject', () => {
+    const verdict = verifyMfaAssertion(issue(), key, { ...subject, now });
+    expect(verdict.ok).toBe(true);
+  });
+
+  it('refuses an assertion signed with another key', () => {
+    const token = issueMfaAssertion(
+      {
+        tenantId: subject.tenantId,
+        actorId: subject.actorId,
+        actionId: subject.actionId,
+        issuedAt: now.getTime(),
+        expiresAt: now.getTime() + 300_000,
+      },
+      otherKey,
+    );
+    const verdict = verifyMfaAssertion(token, key, { ...subject, now });
+    expect(verdict).toEqual({ ok: false, reason: 'BAD_SIGNATURE' });
+  });
+
+  it('refuses a tampered payload', () => {
+    const token = issue();
+    const parts = token.split('.');
+    const payload = JSON.parse(Buffer.from(parts[1] ?? '', 'base64url').toString('utf8')) as Record<string, unknown>;
+    payload['actorId'] = 'usr_somebody_else';
+    const forged = `${parts[0]}.${Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')}.${parts[2]}`;
+    const verdict = verifyMfaAssertion(forged, key, { ...subject, now });
+    expect(verdict).toEqual({ ok: false, reason: 'BAD_SIGNATURE' });
+  });
+
+  it('refuses an expired assertion and one that is not yet valid', () => {
+    const expired = verifyMfaAssertion(issue({}, now.getTime() - 600_000, 60_000), key, { ...subject, now });
+    expect(expired).toEqual({ ok: false, reason: 'EXPIRED' });
+    const early = verifyMfaAssertion(issue({}, now.getTime() + 60_000), key, { ...subject, now });
+    expect(early).toEqual({ ok: false, reason: 'NOT_YET_VALID' });
+  });
+
+  it('refuses an assertion issued for another tenant, principal or action', () => {
+    expect(verifyMfaAssertion(issue({ tenantId: 'ten_other' }), key, { ...subject, now })).toEqual({
+      ok: false,
+      reason: 'SUBJECT_MISMATCH',
+    });
+    expect(verifyMfaAssertion(issue({ actorId: 'usr_somebody_else' }), key, { ...subject, now })).toEqual({
+      ok: false,
+      reason: 'SUBJECT_MISMATCH',
+    });
+    expect(verifyMfaAssertion(issue({ actionId: 'act_00000000000000000000000002' }), key, { ...subject, now })).toEqual(
+      {
+        ok: false,
+        reason: 'SUBJECT_MISMATCH',
+      },
+    );
+  });
+
+  it('refuses a malformed token outright', () => {
+    expect(verifyMfaAssertion('not-an-assertion', key, { ...subject, now })).toEqual({
+      ok: false,
+      reason: 'MALFORMED',
+    });
+    expect(verifyMfaAssertion('pzmfa.only-two-parts', key, { ...subject, now })).toEqual({
+      ok: false,
+      reason: 'MALFORMED',
+    });
+  });
+
+  it('derives a different key from the same secret than the raw secret', () => {
+    // Domain separation: the assertion key is not the server secret, so a
+    // signature made with one is not a signature made with the other.
+    expect(deriveMfaAssertionKey('server-secret-for-tests').equals(key)).toBe(true);
+    expect(deriveMfaAssertionKey('server-secret-for-tests').equals(Buffer.from('server-secret-for-tests'))).toBe(false);
   });
 });

@@ -106,15 +106,25 @@ export interface DbOutboxDraft {
   traceId?: string | null;
 }
 
+/**
+ * The outbox port, as the database implements it.
+ *
+ * Every method that mutates a row carries the row's own tenant. An outbox
+ * event id is unique per tenant rather than globally, so a mutation that
+ * carries only an id can be pointed at another tenant's row — which is how a
+ * redrive became a cross-tenant write. The tenant is required here, not
+ * optional: the queue-side port keeps it optional for compatibility, and the
+ * adapter that bridges the two refuses to call through without it.
+ */
 export interface DbOutboxStore {
   insert(draft: DbOutboxDraft): Promise<ClaimedOutboxRow>;
   claimPending(limit: number, now: Date): Promise<ClaimedOutboxRow[]>;
-  markPublished(id: string, publishedAt: Date): Promise<boolean>;
-  markFailed(id: string, errorClass: string, nextAttemptAt: Date): Promise<boolean>;
-  markDead(id: string, errorClass: string): Promise<boolean>;
-  getDeadLetter(id: string): Promise<ClaimedOutboxRow | null>;
+  markPublished(id: string, publishedAt: Date, tenantId: string): Promise<boolean>;
+  markFailed(id: string, errorClass: string, nextAttemptAt: Date, tenantId: string): Promise<boolean>;
+  markDead(id: string, errorClass: string, tenantId: string): Promise<boolean>;
+  getDeadLetter(id: string, tenantId: string): Promise<ClaimedOutboxRow | null>;
   countByStatus(): Promise<Record<string, number>>;
-  redrive(id: string, reason: string, actorId: string): Promise<ClaimedOutboxRow | null>;
+  redrive(id: string, reason: string, actorId: string, tenantId: string): Promise<ClaimedOutboxRow | null>;
 }
 
 function receiptToJson(receipt: PersistedExecution['receipt']): Record<string, unknown> | null {
@@ -197,10 +207,25 @@ export function createDbStores(db: Db | DbExecutor, opts?: DbStoresOptions): DbS
   /**
    * Cross-tenant statement, permitted only for the outbox: claiming with
    * `FOR UPDATE SKIP LOCKED` across all tenants is what stops one busy tenant
-   * delaying delivery for the rest. Policy `dispatch_claim` opens nothing else.
+   * delaying delivery for the rest. The blind flag opens SELECT on the
+   * delivery backlog and an UPDATE limited to the claim columns — nothing
+   * else (`infra/migrations/0007_rls_write_scope.sql`).
    */
   const runBlind = <T>(fn: (ex: DbExecutor) => Promise<T>): Promise<T> =>
     root ? withTenantBlindTransaction(root, (tx) => fn(tx)) : fn(ex);
+
+  /**
+   * A tenant-scoped write without a tenant is a bug, not a no-op.
+   *
+   * Silently matching nothing would look exactly like a successful publish,
+   * and the event would sit in the outbox forever with nobody looking for it.
+   */
+  const requireTenant = (tenantId: string): string => {
+    if (!tenantId) {
+      throw new Error('outbox store: a tenant-scoped write was called without a tenant id.');
+    }
+    return tenantId;
+  };
 
   const permits: PermitStore = {
     insert: (permit: PersistedPermit) => run(permit.tenantId, (e) => insertPermit(e, permit)).then(() => undefined),
@@ -403,21 +428,36 @@ export function createDbStores(db: Db | DbExecutor, opts?: DbStoresOptions): DbS
           traceId: draft.traceId ?? null,
         }),
       ).then(claimedFromInsert),
+    // The claim is the one deliberately cross-tenant write. It has to be: a
+    // per-tenant claim loop would let one busy tenant starve the queue behind
+    // it. What it may touch is narrow — the lease columns of the rows it is
+    // about to publish — and `infra/migrations/0007_rls_write_scope.sql` is
+    // what holds it to that, so a blind transaction cannot use this path to
+    // change a row's status.
     claimPending: (limit: number, now: Date) => runBlind((e) => claimOutboxEvents(e, limit, now)),
-    markPublished: (id: string, publishedAt: Date) => runBlind((e) => markOutboxPublished(e, id, publishedAt)),
-    markFailed: (id: string, errorClass: string, nextAttemptAt: Date) =>
-      runBlind((e) => markOutboxFailed(e, id, errorClass, nextAttemptAt)),
-    markDead: (id: string, errorClass: string) => runBlind((e) => markOutboxDead(e, id, errorClass)),
-    getDeadLetter: (id: string) =>
-      runBlind(async (e) => {
-        const row = await getOutboxEvent(e, id);
+    // Every status transition is tenant-scoped. It used to run blind, which
+    // meant the runtime role could move any tenant's row — the write half of
+    // the hole `0007` closes. The dispatcher knows which tenant each row
+    // belongs to, so the tenant travels with the call.
+    markPublished: (id: string, publishedAt: Date, tenantId: string) =>
+      run(requireTenant(tenantId), (e) => markOutboxPublished(e, id, publishedAt, tenantId)),
+    markFailed: (id: string, errorClass: string, nextAttemptAt: Date, tenantId: string) =>
+      run(requireTenant(tenantId), (e) => markOutboxFailed(e, id, errorClass, nextAttemptAt, tenantId)),
+    markDead: (id: string, errorClass: string, tenantId: string) =>
+      run(requireTenant(tenantId), (e) => markOutboxDead(e, id, errorClass, tenantId)),
+    getDeadLetter: (id: string, tenantId: string) =>
+      run(requireTenant(tenantId), async (e) => {
+        const row = await getOutboxEvent(e, id, tenantId);
         return row && row.status === 'DEAD' ? claimedFromInsert(row) : null;
       }),
+    // A platform-wide delivery total, not tenant data: the same read the
+    // cross-tenant claim makes, and the reason the blind flag opens SELECT on
+    // `outbox_events` and nothing else.
     countByStatus: () => runBlind((e) => countOutboxByStatus(e)),
     // Reason/actor are accepted for port shape; the caller audits the redrive.
-    redrive: (id: string, _reason: string, _actorId: string) =>
-      runBlind(async (e) => {
-        const row = await redriveOutboxEvent(e, id);
+    redrive: (id: string, _reason: string, _actorId: string, tenantId: string) =>
+      run(requireTenant(tenantId), async (e) => {
+        const row = await redriveOutboxEvent(e, id, tenantId);
         return row ? claimedFromInsert(row) : null;
       }),
   };

@@ -20,6 +20,7 @@
 import {
   ApprovalInvalidatedError,
   ConflictError,
+  ForbiddenError,
   NotFoundError,
   ValidationError,
   hashEquals,
@@ -28,6 +29,7 @@ import {
 } from '@permitzero/domain';
 import type { Principal } from '@permitzero/domain';
 import type { ActionDto, ApproveActionRequest, RejectActionRequest } from '@permitzero/schemas';
+import { deriveMfaAssertionKey, verifyMfaAssertion } from '@permitzero/policy';
 import {
   createApproval,
   createDbStores,
@@ -60,6 +62,23 @@ function isApprove(body: ApprovalBody): body is ApproveActionRequest {
   return body.decision === 'APPROVE';
 }
 
+/**
+ * The key that signs MFA step-up assertions.
+ *
+ * The API has exactly one server-side HMAC secret today (`AUDIT_HMAC_KEY`) and
+ * `config.ts` is outside this change, so the assertion key is *derived* from it
+ * with domain separation rather than reusing the raw secret: forging an audit
+ * chain entry and forging a step-up assertion stay different capabilities.
+ *
+ * No secret means no assertion can be verified. That is the fail-closed
+ * direction: a policy that requires MFA cannot be approved, rather than being
+ * approved on the strength of a string the caller typed.
+ */
+function mfaAssertionKey(deps: ApprovalDeps): Buffer | null {
+  if (!deps.auditHmacKey) return null;
+  return deriveMfaAssertionKey(deps.auditHmacKey);
+}
+
 export async function decideApproval(
   deps: ApprovalDeps,
   principal: Principal,
@@ -70,6 +89,9 @@ export async function decideApproval(
   const now = deps.clock?.() ?? new Date();
   const tenantId = principal.tenantId;
   const scope = tenantScope(deps.db, tenantId);
+  // Derived once: the decision verifies the assertion against it and the
+  // quorum re-verifies the stored one against it.
+  const mfaKey = mfaAssertionKey(deps);
 
   const { action, revision } = await scope(async (ex) => {
     const found = await getAction(ex, tenantId, actionId);
@@ -117,14 +139,55 @@ export async function decideApproval(
   );
 
   if (isApprove(body)) {
+    // Four eyes. The requester of an action may not be the approver of it.
+    //
+    // Distinctness was already enforced — one decision per approver per
+    // action — but distinctness is not independence. A user who holds an
+    // approver role could submit an action and then be its only approver,
+    // which satisfies a quorum of one and leaves the separation of duties
+    // this file exists to provide as a claim about nothing. The check lives
+    // on the decision rather than at submission, because the requester is
+    // not the only way an action comes to exist, and the control that
+    // matters is the one that stops the approval.
+    //
+    // A REJECT is not blocked: it can only withhold an approval, never grant
+    // one, and it is the requester's way to withdraw a request they made by
+    // mistake. The four-eyes property is about the grant.
+    if (action.createdByActorId === principal.actorId) {
+      throw new ForbiddenError('You cannot approve an action you requested.');
+    }
     if (!hashEquals(body.action_hash, action.argumentsHash)) {
       throw new ApprovalInvalidatedError('the action changed after it was reviewed');
     }
     if (body.policy_revision_id !== action.policyRevisionId) {
       throw new ApprovalInvalidatedError('the policy changed after it was reviewed');
     }
-    if (requirements.requireMfa && !body.mfa_context_ref) {
-      throw new ValidationError('This approval requires completed step-up authentication.');
+    // Step-up authentication, if one is claimed at all.
+    //
+    // `mfa_context_ref` used to be a free-form client string and the only
+    // test was that it was present, so any character satisfied a policy's
+    // `require_mfa`. It is now a server-issued, signed assertion: the server
+    // verifies the signature, the expiry and the subject (this tenant, this
+    // principal, this action) before the approval counts. An unverifiable
+    // reference is refused whether or not the policy asked for one, because a
+    // caller who presents a step-up proof that does not hold has presented
+    // nothing.
+    if (body.mfa_context_ref !== undefined) {
+      const verdict = mfaKey
+        ? verifyMfaAssertion(body.mfa_context_ref, mfaKey, {
+            tenantId,
+            actorId: principal.actorId,
+            actionId,
+            now,
+          })
+        : null;
+      if (!verdict || !verdict.ok) {
+        throw new ValidationError('The step-up assertion presented with this approval could not be verified.', {
+          reason: verdict ? verdict.reason : 'NO_SERVER_KEY',
+        });
+      }
+    } else if (requirements.requireMfa) {
+      throw new ValidationError('This approval requires a verified step-up authentication assertion.');
     }
   }
 
@@ -141,6 +204,8 @@ export async function decideApproval(
         decision: body.decision,
         reasonCode: body.reason_code,
         reasonTextRedacted: body.reason_text ? String(redact(body.reason_text)) : null,
+        // Stored only after the assertion verified above: the quorum re-checks
+        // it, so a row can never claim MFA it did not perform.
         mfaContextRef: isApprove(body) ? (body.mfa_context_ref ?? null) : null,
       });
 
@@ -181,7 +246,12 @@ export async function decideApproval(
       if (approvals.some((a) => a.decision === 'REJECT')) {
         throw new ConflictError('This action was already rejected.');
       }
-      const progress = evaluateQuorum(requirements, approvals, action.expiresAt);
+      const progress = evaluateQuorum(requirements, approvals, action.expiresAt, {
+        // The requester's own approval never counts, whatever the decision
+        // path did or did not catch.
+        requesterActorId: action.createdByActorId,
+        mfaKey,
+      });
 
       await stores.audit.append({
         tenantId,

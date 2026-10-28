@@ -66,12 +66,22 @@ export interface OutboxStore {
   /** Claim a batch for publishing. Must be concurrency-safe: two dispatchers
    * claiming the same batch would publish duplicates. */
   claimPending(limit: number, now: Date): Promise<OutboxRow[]>;
-  markPublished(id: string): Promise<boolean>;
-  markFailed(id: string, errorClass: string, nextAttemptAt: Date | null): Promise<boolean>;
-  markDead(id: string, errorClass: string): Promise<boolean>;
+  /**
+   * The mutating methods carry the row's own tenant.
+   *
+   * They key on the event id, and an event id is unique per tenant rather
+   * than globally — so a write that carries no tenant can be pointed at
+   * another tenant's row. The parameter is optional in the port so an
+   * existing implementation still satisfies it, and the durable adapter
+   * treats a missing tenant as an error rather than as a licence to write
+   * anything: a store that cannot scope the write must refuse it.
+   */
+  markPublished(id: string, tenantId?: string): Promise<boolean>;
+  markFailed(id: string, errorClass: string, nextAttemptAt: Date | null, tenantId?: string): Promise<boolean>;
+  markDead(id: string, errorClass: string, tenantId?: string): Promise<boolean>;
   countByStatus(): Promise<Record<OutboxStatus, number>>;
   /** Audited manual redrive: reset a DEAD row to PENDING. */
-  redrive(id: string, reason: string, actorId: string): Promise<OutboxRow | null>;
+  redrive(id: string, reason: string, actorId: string, tenantId?: string): Promise<OutboxRow | null>;
   insert(draft: OutboxDraft): Promise<OutboxRow>;
 }
 

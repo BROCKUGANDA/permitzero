@@ -119,6 +119,16 @@ export const createActionRequestSchema = z
     arguments: z.record(z.unknown()),
     evidence_refs: z.array(evidenceRefSchema).max(32).default([]),
     idempotency_key: idempotencyKeySchema,
+    /**
+     * The environment the caller asks to act in.
+     *
+     * A request, not a decision: the API derives the effective environment
+     * from the authenticated principal (the agent row for an agent credential,
+     * the tenant's default environment for a human or service one) and refuses
+     * a request whose ask disagrees with it. The policy engine never reads
+     * this value — it reads the derived one — so a caller cannot scope the
+     * rules that apply to their own action.
+     */
     environment: environmentSchema,
     requested_at: z.coerce.date().optional(),
   })
@@ -293,8 +303,21 @@ export const approveActionRequestSchema = z
      * the current action hash and rejects on mismatch (FR-041). */
     action_hash: actionHashSchema,
     policy_revision_id: policyRevisionIdSchema,
-    /** Present when step-up authentication was completed for this decision. */
-    mfa_context_ref: z.string().max(128).optional(),
+    /**
+     * A server-issued step-up assertion, presented when the approver has
+     * completed step-up authentication for this decision.
+     *
+     * This is not a client-chosen string and the shape check below is not the
+     * control: the server verifies the assertion's signature, expiry and
+     * subject before an approval that requires MFA is accepted. The shape is
+     * enforced here only so an obviously wrong value is refused as a bad
+     * request rather than as a failed verification.
+     */
+    mfa_context_ref: z
+      .string()
+      .max(512)
+      .regex(/^pzmfa\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/, 'expected a server-issued step-up assertion')
+      .optional(),
   })
   .strict();
 export type ApproveActionRequest = z.infer<typeof approveActionRequestSchema>;

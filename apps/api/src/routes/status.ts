@@ -68,7 +68,7 @@ export async function statusRoutes(app: ZodFastifyInstance, ctx: AppContext): Pr
       // runs it through `runBlind` for exactly this reason). Wrapping it in the
       // tenant scope would not error, it would quietly shrink `outbox_pending` /
       // `outbox_dead` to this tenant's share of a platform backlog. So it runs in
-      // a blind transaction instead: policy `dispatch_claim` (0006) is the only
+      // a blind transaction instead: policy `dispatch_read` (0007) is the only
       // thing that lets a non-exempt role see outbox rows across tenants, it is
       // transaction-local, and here it is read-only.
       withTenantBlindTransaction(ctx.runtime, (tx) => countOutboxByStatus(tx)).catch(

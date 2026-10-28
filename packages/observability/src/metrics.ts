@@ -62,8 +62,28 @@ export interface MetricsBundle {
   approvalDecisions: Counter<'decision' | 'quorum_complete'>;
   /** Outbox backlog by state; the gauge behind the delivery-lag SLO. */
   outboxByStatus: Gauge<'status'>;
-  /** Age of the oldest unpublished outbox row, in seconds. */
+  /**
+   * Age of the oldest unpublished outbox ROW, in seconds — the delivery-lag
+   * signal.
+   *
+   * Measured in the database rather than in the queue, and the distinction is
+   * the whole point of the series. The queue's age says how long the oldest
+   * *job* has been waiting, and a wedged dispatcher produces exactly that
+   * situation — thousands of rows sitting in Postgres and an empty queue, so
+   * the queue's age reads zero while the delivery is hours late. The row is
+   * where the work is, so the row is what is measured.
+   */
   outboxOldestAgeSeconds: Gauge;
+  /**
+   * Age of the oldest job waiting in the queue, in seconds. 0 when the queue is
+   * empty.
+   *
+   * A different quantity from the row age above, and it used to be published
+   * under that name. Two numbers that mean different things must not share a
+   * name, or the alert built on one of them silently starts measuring the
+   * other.
+   */
+  outboxOldestJobAgeSeconds: Gauge;
   /** 1 when the serving role is bound by row-level security and fully covered. */
   tenantIsolationEnforced: Gauge<'role'>;
   /** Audit chain verification result for the tenant last checked. 0 = valid. */
@@ -189,7 +209,13 @@ export function createMetrics(opts: CreateMetricsOptions = {}): MetricsBundle {
 
   const outboxOldestAgeSeconds = new Gauge({
     name: 'pz_outbox_oldest_unpublished_age_seconds',
-    help: 'Age of the oldest row still waiting to be published — the delivery-lag signal.',
+    help: 'Age of the oldest outbox row that has not been published yet — the delivery-lag signal. Read from the database, so a stalled dispatcher shows up even while the queue is empty.',
+    registers: [registry],
+  });
+
+  const outboxOldestJobAgeSeconds = new Gauge({
+    name: 'pz_outbox_oldest_job_age_seconds',
+    help: 'Age of the oldest job waiting in the queue, in seconds. 0 when the queue is empty. This is the broker queue backlog, not the outbox row backlog.',
     registers: [registry],
   });
 
@@ -228,6 +254,7 @@ export function createMetrics(opts: CreateMetricsOptions = {}): MetricsBundle {
     approvalDecisions,
     outboxByStatus,
     outboxOldestAgeSeconds,
+    outboxOldestJobAgeSeconds,
     tenantIsolationEnforced,
     auditChainBreaks,
     breakerState,

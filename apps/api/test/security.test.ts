@@ -180,6 +180,33 @@ describe('rate limiting is scoped per class, as the config claims', () => {
     expect(read.statusCode).toBe(200);
     await app.close();
   });
+
+  it('applies the auth budget to the credential-bearing approval surface', async () => {
+    // `RATE_LIMIT_AUTH_PER_MIN` was parsed by the config and turned into a
+    // preset that no route read: a limit that is configured but not applied is
+    // worse than no limit, because it is the kind of control an auditor marks
+    // as present. The approval routes are where a leaked credential is worth
+    // the most, and where twenty calls a minute is already generous.
+    const app = await appWith({ rateLimitAuth: 2 });
+    const statuses: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v1/actions/act_0000000000000000000000000${i}/approve`,
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${fixture.approver1Token}` },
+        payload: JSON.stringify({
+          decision: 'APPROVE',
+          reason_code: 'EVIDENCE_REVIEWED',
+          idempotency_key: uniqueKey('auth-rate'),
+          action_hash: `sha256:${'00'.repeat(32)}`,
+          policy_revision_id: newId('policyRevision'),
+        }),
+      });
+      statuses.push(res.statusCode);
+    }
+    expect(statuses.filter((s) => s === 429).length, 'the auth budget was never charged').toBeGreaterThan(0);
+    await app.close();
+  });
 });
 
 describe('input limits and error hygiene', () => {
@@ -264,13 +291,16 @@ describe('input limits and error hygiene', () => {
 });
 
 describe('authentication surface', () => {
-  it('does not distinguish an unknown credential from a revoked one', async () => {
-    // Both tokens here are well formed, so nothing can be attributed to shape
-    // parsing. If the two answers differ, the endpoint is an oracle for "this
-    // credential exists and was revoked", which is exactly the fact an attacker
-    // probing for stale keys wants.
+  it('does not distinguish an unknown credential from a revoked or an expired one', async () => {
+    // All three tokens here are well formed, so nothing can be attributed to
+    // shape parsing. If the answers differ, the endpoint is an oracle for
+    // "this credential exists, was revoked, or merely expired" — exactly the
+    // fact an attacker probing for stale keys wants. The expired case was the
+    // one that used to answer "This credential has expired." while the other
+    // two said nothing, which is an oracle with a three-way split in it.
     const wellFormedUnknown = 'pz_' + 'a'.repeat(40);
     const revoked = 'pz_' + 'b'.repeat(40);
+    const expired = 'pz_' + 'c'.repeat(40);
     const credentialId = newId('credential');
     await createCredential(fixture.db.db, {
       id: credentialId,
@@ -285,6 +315,20 @@ describe('authentication surface', () => {
     });
     await revokeCredential(fixture.db.db, fixture.tenantId, credentialId, new Date());
 
+    const expiredCredentialId = newId('credential');
+    await createCredential(fixture.db.db, {
+      id: expiredCredentialId,
+      tenantId: fixture.tenantId,
+      name: 'probe-expired',
+      subjectType: 'SERVICE',
+      subjectId: null,
+      credentialRef: 'secret://probe/expired',
+      secretHash: createHash('sha256').update(expired, 'utf8').digest('hex'),
+      secretPrefix: expired.slice(0, 12),
+      scopes: [],
+      expiresAt: new Date(Date.now() - 60_000),
+    });
+
     const unknownRes = await fixture.app.inject({
       method: 'GET',
       url: '/v1/me',
@@ -295,9 +339,15 @@ describe('authentication surface', () => {
       url: '/v1/me',
       headers: { authorization: `Bearer ${revoked}` },
     });
+    const expiredRes = await fixture.app.inject({
+      method: 'GET',
+      url: '/v1/me',
+      headers: { authorization: `Bearer ${expired}` },
+    });
 
     expect(unknownRes.statusCode).toBe(401);
     expect(revokedRes.statusCode).toBe(401);
+    expect(expiredRes.statusCode).toBe(401);
     // Compared field by field, because `trace_id` legitimately differs per
     // request; equality of the whole envelope would be a test of the tracer.
     const shape = (body: unknown) => {
@@ -305,6 +355,9 @@ describe('authentication surface', () => {
       return { code: e.code, message: e.message, retryable: e.retryable };
     };
     expect(shape(revokedRes.json())).toEqual(shape(unknownRes.json()));
+    expect(shape(expiredRes.json())).toEqual(shape(unknownRes.json()));
+    // And the answer says nothing about the credential's history.
+    expect(JSON.stringify(expiredRes.json())).not.toMatch(/expired/i);
   });
 
   it('accepts the tenant claim from no input but the Authorization header', async () => {

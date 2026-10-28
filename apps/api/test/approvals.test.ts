@@ -1,10 +1,23 @@
 /**
  * Human approvals: quorum math, binding to the reviewed hash and revision,
- * veto on reject, and the dual-control gate on bank-detail changes.
+ * veto on reject, the dual-control gate on bank-detail changes, the four-eyes
+ * rule that keeps the requester out of the approval, and the step-up
+ * assertion a policy can demand before it accepts a decision.
  */
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { insertInvoice, insertPurchaseOrder } from '@permitzero/db';
+import {
+  buildApProtectPolicyDocument,
+  createRevision,
+  insertInvoice,
+  insertPurchaseOrder,
+  publishRevision,
+  withTenantTransaction,
+} from '@permitzero/db';
 import { newId } from '@permitzero/domain';
+import { policyDocumentSchema } from '@permitzero/schemas';
+import { deriveMfaAssertionKey, hashPolicyDocument, issueMfaAssertion } from '@permitzero/policy';
+import { buildApp } from '../src/app.js';
+import { createModelAdapter } from '../src/model.js';
 import {
   closeApp,
   closeTestDb,
@@ -13,6 +26,7 @@ import {
   intakeBody,
   paymentArgs,
   postJson,
+  testConfig,
   uniqueKey,
   type ApiFixture,
 } from './helpers.js';
@@ -36,7 +50,7 @@ interface IntakeResponse {
   approval: { required_approvals: number } | null;
 }
 
-async function approvalAction(amountMinor = 3000000): Promise<IntakeResponse> {
+async function approvalAction(amountMinor = 3000000, token?: string): Promise<IntakeResponse> {
   await insertPurchaseOrder(t.db.db, {
     purchaseOrderId: 'PO-APR-1',
     tenantId: t.tenantId,
@@ -55,7 +69,7 @@ async function approvalAction(amountMinor = 3000000): Promise<IntakeResponse> {
   const res = await postJson(
     t,
     '/v1/actions',
-    t.agentToken,
+    token ?? t.agentToken,
     intakeBody(t.agentId, { arguments: paymentArgs({ invoice_id: 'INV-APR-1', amount_minor: amountMinor }) }),
   );
   expect(res.status).toBe(201);
@@ -246,6 +260,261 @@ describe('approvals', () => {
     expect(late.status).toBe(409);
     const fetched = await getJson(t, `/v1/actions/${action.action_id}`, t.agentToken);
     expect(fetched.json).toMatchObject({ state: 'EXPIRED' });
+    await closeApp(t);
+  });
+});
+
+/**
+ * Four eyes. The quorum counted distinct approvers, which is not the same
+ * thing as an approver who is independent of the requester: an owner could
+ * submit an action and then be its only approver, and a quorum of one would
+ * have been satisfied.
+ */
+describe('four eyes', () => {
+  it('refuses an approval from the requester of the action', async () => {
+    // The owner submits the payment themselves…
+    const action = await approvalAction(3000000, t.ownerToken);
+    expect(action.decision).toBe('REQUIRE_APPROVAL');
+
+    // …and cannot then approve it.
+    const self = await postJson(t, `/v1/actions/${action.action_id}/approve`, t.ownerToken, approveBody(action));
+    expect(self.status).toBe(403);
+    expect(self.json).toMatchObject({ error: { code: 'FORBIDDEN' } });
+
+    // The refusal left nothing behind: no decision, no movement.
+    const fetched = await getJson(t, `/v1/actions/${action.action_id}`, t.ownerToken);
+    expect(fetched.json).toMatchObject({
+      state: 'APPROVAL_REQUIRED',
+      approval_progress: { distinct_approvers: 0, approvals_received: 0 },
+    });
+
+    // A different principal may still approve it.
+    const other = await postJson(t, `/v1/actions/${action.action_id}/approve`, t.approver1Token, approveBody(action));
+    expect(other.status).toBe(200);
+    expect(other.json).toMatchObject({ state: 'APPROVED' });
+    await closeApp(t);
+  });
+
+  it('still reaches a quorum of two when the requester is one of the approvers', async () => {
+    // Bank-detail changes need two approvals and independent verification.
+    // The owner submits it, so the owner cannot be one of the two — the
+    // quorum has to be reached by the people who are left.
+    const created = await postJson(
+      t,
+      '/v1/actions',
+      t.ownerToken,
+      intakeBody(t.agentId, {
+        tool_name: 'vendor.update_bank_details',
+        task_purpose: 'Rotate the vendor payout account',
+        arguments: {
+          vendor_id: 'VEN-017',
+          new_beneficiary_ref: 'BEN-017-NEW',
+          reason: 'Vendor letter dated 2026-10-01',
+          verification_ref: null,
+        },
+      }),
+    );
+    expect(created.status).toBe(201);
+    const action = created.json as IntakeResponse;
+    expect(action.decision).toBe('REQUIRE_APPROVAL');
+    expect(action.approval?.required_approvals).toBe(2);
+
+    const self = await postJson(t, `/v1/actions/${action.action_id}/approve`, t.ownerToken, approveBody(action));
+    expect(self.status).toBe(403);
+
+    // One approval is not two, and the requester's refusal did not count.
+    const first = await postJson(
+      t,
+      `/v1/actions/${action.action_id}/approve`,
+      t.approver1Token,
+      approveBody(action, { reason_code: 'VENDOR_VERIFIED_OUT_OF_BAND' }),
+    );
+    expect(first.status).toBe(200);
+    expect(first.json).toMatchObject({
+      state: 'APPROVAL_REQUIRED',
+      approval_progress: { distinct_approvers: 1, independent_verification_present: true },
+    });
+
+    // The second, independent approver closes it.
+    const second = await postJson(t, `/v1/actions/${action.action_id}/approve`, t.approver2Token, approveBody(action));
+    expect(second.status).toBe(200);
+    expect(second.json).toMatchObject({
+      state: 'APPROVED',
+      approval_progress: { distinct_approvers: 2, independent_verification_present: true },
+    });
+    await closeApp(t);
+  });
+});
+
+/**
+ * `require_mfa` used to mean "the caller typed something in the box". It now
+ * means "the server signed a step-up assertion for this approver, this action
+ * and this tenant, and it has not expired".
+ */
+describe('mfa step-up', () => {
+  const AUDIT_KEY = 'test-audit-hmac-key-for-mfa';
+
+  /**
+   * Rebuild the app with a different configuration, WITHOUT reseeding.
+   *
+   * The file-level `beforeEach` has already seeded this test's fixture, so
+   * calling `freshApp()` again would truncate and reseed — and the second
+   * seed would run against a fixture whose policy ids and tenant id had
+   * already been captured by the caller. That produced a foreign-key failure
+   * on a tenant that existed a moment earlier, which is a very confusing way
+   * to learn that two fixtures disagree.
+   *
+   * What these tests actually need is a different CONFIG, not different data:
+   * the seeded fixture is the subject under test.
+   */
+  async function appWithAuditKey(key: string | null): Promise<void> {
+    await closeApp(t);
+    const config = { ...testConfig(), modelProvider: 'disabled' as const, auditHmacKey: key };
+    const { app } = await buildApp({
+      db: t.db,
+      dbRuntime: t.runtime,
+      config,
+      model: createModelAdapter(config.modelProvider),
+    });
+    t = { ...t, app };
+  }
+
+  async function publishMfaPolicy(): Promise<void> {
+    const policyId = t.seeded.policyIds[0] ?? '';
+    const currentRevisionId = t.seeded.policyRevisionIds[0] ?? '';
+    const base = buildApProtectPolicyDocument();
+    const document = policyDocumentSchema.parse({
+      ...base,
+      rules: base.rules.map((rule) =>
+        rule.id === 'approval-over-threshold'
+          ? { ...rule, approval: { ...(rule.approval ?? {}), require_mfa: true } }
+          : rule,
+      ),
+    });
+    await withTenantTransaction(t.db, t.tenantId, async (tx) => {
+      const revision = await createRevision(tx, {
+        id: newId('policyRevision'),
+        tenantId: t.tenantId,
+        policyId,
+        document,
+        policyHash: hashPolicyDocument(document),
+        changeReason: 'Test policy: approvals above the threshold require step-up.',
+      });
+      await publishRevision(tx, {
+        tenantId: t.tenantId,
+        policyId,
+        revisionId: revision.revisionId,
+        expectedCurrentRevisionId: currentRevisionId,
+      });
+    });
+  }
+
+  function assertion(actionId: string, actorId: string, key: Buffer, ttlMs = 300_000): string {
+    const issuedAt = Date.now();
+    return issueMfaAssertion({ tenantId: t.tenantId, actorId, actionId, issuedAt, expiresAt: issuedAt + ttlMs }, key);
+  }
+
+  it('accepts an approval only with a verifiable step-up assertion', async () => {
+    await appWithAuditKey(AUDIT_KEY);
+    await publishMfaPolicy();
+    const action = await approvalAction();
+    expect(action.decision).toBe('REQUIRE_APPROVAL');
+    const approverId = t.seeded.userIds['approver1'] ?? '';
+
+    // No assertion at all.
+    const none = await postJson(t, `/v1/actions/${action.action_id}/approve`, t.approver1Token, approveBody(action));
+    expect(none.status).toBe(422);
+    expect(none.json).toMatchObject({ error: { code: 'VALIDATION_FAILED' } });
+
+    // A client string: the old control was satisfied by exactly this.
+    const typed = await postJson(
+      t,
+      `/v1/actions/${action.action_id}/approve`,
+      t.approver1Token,
+      approveBody(action, { mfa_context_ref: 'x' }),
+    );
+    expect(typed.status).toBe(422);
+
+    // A well-formed assertion signed with the wrong key.
+    const forged = await postJson(
+      t,
+      `/v1/actions/${action.action_id}/approve`,
+      t.approver1Token,
+      approveBody(action, { mfa_context_ref: assertion(action.action_id, approverId, deriveMfaAssertionKey('wrong')) }),
+    );
+    expect(forged.status).toBe(422);
+
+    // An assertion for a different action cannot be borrowed.
+    const borrowed = await postJson(
+      t,
+      `/v1/actions/${action.action_id}/approve`,
+      t.approver1Token,
+      approveBody(action, {
+        mfa_context_ref: assertion('act_00000000000000000000000000', approverId, deriveMfaAssertionKey(AUDIT_KEY)),
+      }),
+    );
+    expect(borrowed.status).toBe(422);
+
+    // An expired assertion is no assertion.
+    const expired = await postJson(
+      t,
+      `/v1/actions/${action.action_id}/approve`,
+      t.approver1Token,
+      approveBody(action, {
+        mfa_context_ref: assertion(action.action_id, approverId, deriveMfaAssertionKey(AUDIT_KEY), -1_000),
+      }),
+    );
+    expect(expired.status).toBe(422);
+
+    // The real thing: signed by the server for this approver and this action.
+    const valid = await postJson(
+      t,
+      `/v1/actions/${action.action_id}/approve`,
+      t.approver1Token,
+      approveBody(action, {
+        mfa_context_ref: assertion(action.action_id, approverId, deriveMfaAssertionKey(AUDIT_KEY)),
+      }),
+    );
+    expect(valid.status).toBe(200);
+    expect(valid.json).toMatchObject({ state: 'APPROVED' });
+    await closeApp(t);
+  });
+
+  it('refuses a step-up assertion issued for a different approver', async () => {
+    await appWithAuditKey(AUDIT_KEY);
+    await publishMfaPolicy();
+    const action = await approvalAction();
+    const otherApproverId = t.seeded.userIds['approver2'] ?? '';
+    const res = await postJson(
+      t,
+      `/v1/actions/${action.action_id}/approve`,
+      t.approver1Token,
+      approveBody(action, {
+        mfa_context_ref: assertion(action.action_id, otherApproverId, deriveMfaAssertionKey(AUDIT_KEY)),
+      }),
+    );
+    expect(res.status).toBe(422);
+    await closeApp(t);
+  });
+
+  it('refuses every assertion when the server has no key to verify it with', async () => {
+    // No `AUDIT_HMAC_KEY` means no key, which means a policy that requires
+    // MFA cannot be satisfied. That is the fail-closed direction: the action
+    // waits for a human with a verifiable step-up rather than being approved
+    // on the strength of a string.
+    await appWithAuditKey(null);
+    await publishMfaPolicy();
+    const action = await approvalAction();
+    const approverId = t.seeded.userIds['approver1'] ?? '';
+    const res = await postJson(
+      t,
+      `/v1/actions/${action.action_id}/approve`,
+      t.approver1Token,
+      approveBody(action, {
+        mfa_context_ref: assertion(action.action_id, approverId, deriveMfaAssertionKey(AUDIT_KEY)),
+      }),
+    );
+    expect(res.status).toBe(422);
     await closeApp(t);
   });
 });

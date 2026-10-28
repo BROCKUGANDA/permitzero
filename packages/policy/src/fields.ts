@@ -16,6 +16,7 @@
  */
 import type { PolicyEvaluationInput } from '@permitzero/domain';
 import { POLICY_FIELDS, PolicyField } from '@permitzero/schemas';
+import { effectiveEnvironment } from './environment.js';
 
 export interface ResolvedField {
   field: PolicyField;
@@ -86,10 +87,19 @@ const RESOLVERS: Record<PolicyField, (ctx: ResolverContext) => InternalResolved>
       ? resolved(PolicyField.OPERATION, ctx.input.operation, `operation ${ctx.input.operation}`)
       : unknown(PolicyField.OPERATION, 'operation is not a string'),
 
-  [PolicyField.ENVIRONMENT]: (ctx) =>
-    typeof ctx.input.environment === 'string'
-      ? resolved(PolicyField.ENVIRONMENT, ctx.input.environment, `environment ${ctx.input.environment}`)
-      : unknown(PolicyField.ENVIRONMENT, 'environment is not a string'),
+  [PolicyField.ENVIRONMENT]: (ctx) => {
+    // Derived, not requested. `input.environment` is the caller's claim and is
+    // never consulted: a rule that reads `environment` must read the
+    // environment the server derived, or the claim decides the rule.
+    const environment = effectiveEnvironment(ctx.input);
+    return typeof environment === 'string'
+      ? resolved(
+          PolicyField.ENVIRONMENT,
+          environment,
+          `environment ${environment} (derived from the authenticated principal)`,
+        )
+      : unknown(PolicyField.ENVIRONMENT, 'the principal carries no environment');
+  },
 
   [PolicyField.AGENT_ID]: (ctx) =>
     typeof ctx.input.agent.agentId === 'string'

@@ -37,7 +37,7 @@
     "demo:scenario": "npm run demo:scenario -w @permitzero/api",
     "test:e2e": "npm run test:e2e -w @permitzero/web",
     "verify": "node scripts/verify.mjs",
-    "secret:scan": "gitleaks detect --source . --no-git --redact --exit-code 1",
+    "secret:scan": "gitleaks detect --source . --redact --verbose --exit-code 1",
     "model:check": "npm run model:check -w @permitzero/provider-meta",
     "slo:report": "tsx scripts/slo-report.mjs",
     "slo:report:strict": "tsx scripts/slo-report.mjs --strict",

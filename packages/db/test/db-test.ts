@@ -6,16 +6,45 @@
  *
  * Safety: refuses to run unless the database name contains "test".
  */
-import { closeDb, createDb, ensureDatabaseExists, migrate, resetDb, type Db } from '../src/index.js';
+import { closeDb, createDb, ensureDatabaseExists, loadRootEnv, migrate, resetDb, type Db } from '../src/index.js';
+
+// The root `.env` is loaded before the URLs are read.
+//
+// The harness used to read `process.env` alone, which worked on a developer
+// machine — where `postgres://postgres@127.0.0.1` authenticates by trust — and
+// failed in CI, where the service container has a real password and the URL
+// without one is refused: "password authentication failed for user postgres",
+// once per test file.
+//
+// The consequence was that the suite could not run in the environment it is
+// meant to gate. CI writes DATABASE_URL_TEST into `.env` precisely because
+// that is where every other command in this repository reads it from, via
+// `loadRootEnv` — the same helper the database CLI uses, and the one whose
+// header explains this exact class of failure.
+//
+// An explicit environment still wins: `loadRootEnv` never overwrites a value
+// that is already set, so a one-off `DATABASE_URL_TEST=... npm test` and CI's
+// own environment variables both take precedence over the file.
+loadRootEnv();
 
 const poolId = process.env['VITEST_POOL_ID'] ?? '1';
 const workerId = process.env['VITEST_WORKER_ID'] ?? '1';
 const BASE_URL = process.env['DATABASE_URL_TEST'] ?? 'postgres://postgres@127.0.0.1:5432/permitzero_test';
 
+/**
+ * The `db` segment keeps this harness from colliding with the other two that
+ * compute a name the same way (`apps/api/test/helpers.ts` and
+ * `apps/worker/test/helpers.ts`). Vitest's pool and worker ids are per
+ * process, not per file, so without a namespace two suites in different
+ * packages that landed on the same worker id shared one database and
+ * truncated each other's rows mid-test.
+ */
+const DB_NAMESPACE = 'db';
+
 function workerUrl(): string {
   const url = new URL(BASE_URL);
   const baseName = url.pathname.replace(/^\//, '') || 'permitzero_test';
-  url.pathname = `/${baseName}_${poolId}_${workerId}`;
+  url.pathname = `/${baseName}_${DB_NAMESPACE}_${poolId}_${workerId}`;
   return url.toString();
 }
 

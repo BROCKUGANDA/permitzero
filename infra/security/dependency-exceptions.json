@@ -1,6 +1,6 @@
 {
   "$comment": [
-    "Reviewed exceptions to `npm audit --omit=dev --audit-level=high`.",
+    "Reviewed exceptions to `npm audit --omit=dev --json`.",
     "",
     "A dependency audit gate that is set to a level the current tree already",
     "fails is not a control, it is theatre: either CI is red on the day it is",
@@ -13,15 +13,77 @@
     "",
     "Source of truth: `npm audit --omit=dev --json`. See scripts/audit-gate.mjs.",
     "",
+    "These four were removed in 7f2ceb9 on the strength of a run in which npm",
+    "had failed with a configuration error and the gate had parsed the error",
+    "envelope as an empty report. The gate now refuses to pass when npm cannot",
+    "produce a report at all, and with that fixed these four came back.",
+    "",
     "Scope, stated so the file is not read as total coverage: the gate runs",
     "`npm audit --json --omit=dev`, so advisories that live only in devDependencies",
-    "or in GitHub's own advisory database are not counted here. As of 2026-10-28 the",
-    "list is empty because npm reports no advisory against a production dependency;",
-    "GitHub Dependabot simultaneously reports 20 advisories on the default branch",
-    "(2 critical, 10 high, 8 moderate) under its own wider scope. That difference is a",
-    "property of the two sources, not evidence that either is wrong, and the",
-    "compliance map records it as a limit rather than resolving it by quietly widening",
-    "the gate."
+    "are not counted here. GitHub Dependabot reports a wider set under its own",
+    "source and scope. That difference is a property of the two tools, not",
+    "evidence that either is wrong, and the compliance map records it as a limit",
+    "rather than resolving it by quietly widening the gate."
   ],
-  "exceptions": []
+  "exceptions": [
+    {
+      "package": "zod",
+      "severity": "high",
+      "advisory": "memory exhaustion while validating oversized constrained collections",
+      "vulnerableRange": "<4.6.6",
+      "acceptedBecause": [
+        "The fix is a Zod 3 -> 4 major, which changes the API used across 94 call sites in packages/schemas and the Fastify type provider alongside it. That is a migration, not a bump, and it is not something to absorb while the product is being hardened.",
+        "The affected path is unbounded collection validation. Every request collection in this API is explicitly bounded: `evidence_refs` max 20, `action_ids` max 500, policy rule and condition arrays capped in `policySchema`, and `MAX_BODY_BYTES` (1 MiB default, 413 before parsing) limits the whole document. The parser cannot be handed an oversized structure by the network.",
+        "The request body is parsed once by the validator compiler and again by the serializer's schema, both against those bounded schemas."
+      ],
+      "residualRisk": "A caller that can raise MAX_BODY_BYTES substantially and target a bounded-but-large array of deeply nested objects could cost more memory than its bytes warrant. The body limit is the controlling mitigation; it is a configuration value, so the deployment owner has to keep it honest.",
+      "compensatingControl": "MAX_BODY_BYTES enforced by Fastify before validation (tested in apps/api/test/security.test.ts), and bounded collection schemas (packages/schemas).",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-28",
+      "reviewBy": "2027-01-28"
+    },
+    {
+      "package": "fastify-type-provider-zod",
+      "severity": "high",
+      "advisory": "inherits the advisory of its zod peer dependency",
+      "vulnerableRange": "<=4.0.2",
+      "acceptedBecause": [
+        "It has no independent fix: the advisory is the transitive zod one above, and the version that resolves it requires the same Zod 4 migration."
+      ],
+      "residualRisk": "Same as the zod entry.",
+      "compensatingControl": "Same as the zod entry.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-28",
+      "reviewBy": "2027-01-28"
+    },
+    {
+      "package": "postcss",
+      "severity": "high",
+      "advisory": "arbitrary file read and information disclosure via an attacker-controlled sourceMappingURL in CSS comments",
+      "vulnerableRange": "<=8.5.11",
+      "acceptedBecause": [
+        "The advisory is reached through `next`, which pins its own postcss. Fixing it at the root means a Next major upgrade, and the version that carries the fix is a major whose own release notes change the bundler behaviour this project depends on.",
+        "The vulnerable path is CSS PROCESSING of a stylesheet that an attacker would have to get onto the server's disk. PermitZero serves no user-uploaded CSS and no user-supplied stylesheet is compiled at runtime: the console's styles are bundled at build time from this repository."
+      ],
+      "residualRisk": "A dependency that lets an attacker write a stylesheet onto the build host, or a future feature that compiles CSS at runtime, would turn this into a file-read primitive. The console is a static bundle today; a user-content rendering path would change that.",
+      "compensatingControl": "No user-supplied CSS is compiled at runtime; the stylesheets are bundled at build time from the repository, and Caddy serves the built asset.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-28",
+      "reviewBy": "2027-01-28"
+    },
+    {
+      "package": "next",
+      "severity": "moderate",
+      "advisory": "inherits the advisory of its postcss dependency",
+      "vulnerableRange": "9.3.4-canary.0 - 16.3.0-preview.10",
+      "acceptedBecause": [
+        "It has no independent fix: the advisory is the transitive postcss one above, and the version that resolves it is a Next major."
+      ],
+      "residualRisk": "Same as the postcss entry.",
+      "compensatingControl": "Same as the postcss entry.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-28",
+      "reviewBy": "2027-01-28"
+    }
+  ]
 }

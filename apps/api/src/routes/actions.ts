@@ -17,8 +17,8 @@ import {
 } from '@permitzero/schemas';
 import { z } from 'zod';
 import { getAction, listActions, tenantScope } from '@permitzero/db';
-import { NotFoundError } from '@permitzero/domain';
-import type { ActionState } from '@permitzero/domain';
+import { ForbiddenError, NotFoundError } from '@permitzero/domain';
+import type { ActionState, Environment, Principal } from '@permitzero/domain';
 import type { AppContext, ZodFastifyInstance } from '../app.js';
 import { rateLimitPresets } from '../app.js';
 import { authenticateToken } from '../auth.js';
@@ -45,14 +45,50 @@ async function authHook(app: ZodFastifyInstance, ctx: AppContext): Promise<void>
   });
 }
 
+/**
+ * The environment an action is evaluated in.
+ *
+ * It used to be whatever the request body said, which made it a claim the
+ * caller controlled: naming DEMO dropped PRODUCTION-scoped protective rules
+ * out of scope, naming PRODUCTION reached production-only logic, and the
+ * action row recorded the claim as if it had been established. The effective
+ * environment is now derived from the authenticated principal — the agent row
+ * for an agent credential, the tenant's default environment for a human or a
+ * service — and a request that names a different one is refused rather than
+ * quietly reinterpreted.
+ *
+ * The derived value is what the action records, so the audit trail states the
+ * environment the decision was made in instead of repeating a claim.
+ */
+function effectiveEnvironment(principal: Principal, claimed: Environment): Environment {
+  if (claimed !== principal.environment) {
+    throw new ForbiddenError(
+      `This credential may not act in the ${claimed} environment; it is bound to ${principal.environment}.`,
+    );
+  }
+  return principal.environment;
+}
+
 export async function actionRoutes(app: ZodFastifyInstance, ctx: AppContext): Promise<void> {
   await authHook(app, ctx);
-  // Every route below changes state or spends a credential, so each gets the
-  // mutation budget from config rather than the global ceiling. The global number
-  // is a read-path allowance: applying it to intake means an agent can queue
-  // hundreds of proposals per minute against a human approval queue that can only
-  // be worked one at a time.
-  const { mutation } = rateLimitPresets(ctx.config);
+  // Two budgets, split by the pace of the caller rather than by which number
+  // is larger.
+  //
+  // `mutation` is the agent's allowance: every state-changing call gets it
+  // instead of the global ceiling, because applying the global number to
+  // intake means an agent can queue hundreds of proposals per minute against
+  // a human approval queue that can only be worked one at a time.
+  //
+  // `auth` is the credential-bearing surface: the routes a person works one
+  // decision at a time, where a leaked credential is worth the most and where
+  // twenty calls a minute is already generous. A limit that is configured but
+  // not applied is worse than no limit, because it is the kind of control an
+  // auditor marks as present, so the preset is used rather than parsed.
+  //
+  // A route carries one budget: Fastify's limiter replaces the global limit
+  // per route rather than adding to it, so the two cannot be stacked and the
+  // split has to be a decision rather than a sum.
+  const { mutation, auth } = rateLimitPresets(ctx.config);
 
   app.post(
     '/actions',
@@ -64,7 +100,11 @@ export async function actionRoutes(app: ZodFastifyInstance, ctx: AppContext): Pr
       config: { rateLimit: mutation },
     },
     async (request, reply) => {
-      const result = await intakeAction(ctx.intake, request.principal, request.body, request.traceId);
+      const body = {
+        ...request.body,
+        environment: effectiveEnvironment(request.principal, request.body.environment),
+      };
+      const result = await intakeAction(ctx.intake, request.principal, body, request.traceId);
       return reply.status(result.status).send(result.body);
     },
   );
@@ -142,7 +182,7 @@ export async function actionRoutes(app: ZodFastifyInstance, ctx: AppContext): Pr
         body: approveActionRequestSchema,
         response: { 200: actionDtoSchema },
       },
-      config: { rateLimit: mutation },
+      config: { rateLimit: auth },
     },
     async (request) => decideApproval(ctx.approvals, request.principal, request.params.id, request.body),
   );
@@ -155,7 +195,7 @@ export async function actionRoutes(app: ZodFastifyInstance, ctx: AppContext): Pr
         body: rejectActionRequestSchema,
         response: { 200: actionDtoSchema },
       },
-      config: { rateLimit: mutation },
+      config: { rateLimit: auth },
     },
     async (request) => decideApproval(ctx.approvals, request.principal, request.params.id, request.body),
   );

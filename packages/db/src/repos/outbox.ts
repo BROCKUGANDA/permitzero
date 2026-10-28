@@ -9,6 +9,7 @@
  * port (assigned, never imported, to avoid a package cycle).
  */
 import { and, eq, sql } from 'drizzle-orm';
+import type { SQL } from 'drizzle-orm';
 import { newId } from '@permitzero/domain';
 import type { DbExecutor } from '../client.js';
 import { outboxEvents } from '../schema.js';
@@ -95,6 +96,19 @@ function toClaimed(row: Record<string, unknown>): ClaimedOutboxRow {
   };
 }
 
+/**
+ * The tenant predicate for a write that knows whose row it is touching.
+ *
+ * An outbox event id is unique per tenant, not globally, so a write that
+ * carries only an id can be pointed at another tenant's row. The tenant
+ * parameter is optional here because this repository is also called from
+ * places that predate the parameter — but the durable store always supplies
+ * it, and a store that cannot name the tenant must not write at all.
+ */
+function tenantScope(tenantId?: string | null): SQL | undefined {
+  return tenantId ? eq(outboxEvents.tenantId, tenantId) : undefined;
+}
+
 export async function claimOutboxEvents(ex: DbExecutor, limit: number, now: Date): Promise<ClaimedOutboxRow[]> {
   const rows = (await ex.execute(sql`
     WITH c AS (
@@ -115,34 +129,59 @@ export async function claimOutboxEvents(ex: DbExecutor, limit: number, now: Date
   return rows.map(toClaimed);
 }
 
-export async function markOutboxPublished(ex: DbExecutor, id: string, now: Date): Promise<boolean> {
+export async function markOutboxPublished(
+  ex: DbExecutor,
+  id: string,
+  now: Date,
+  tenantId?: string | null,
+): Promise<boolean> {
   const updated = await ex
     .update(outboxEvents)
     .set({ status: 'PUBLISHED', publishedAt: now })
-    .where(and(eq(outboxEvents.outboxEventId, id), sql`${outboxEvents.status} <> 'PUBLISHED'`))
+    .where(and(eq(outboxEvents.outboxEventId, id), sql`${outboxEvents.status} <> 'PUBLISHED'`, tenantScope(tenantId)))
     .returning({ id: outboxEvents.outboxEventId });
   return updated.length > 0;
 }
 
+/**
+ * Park a row as FAILED.
+ *
+ * The `status <> 'PUBLISHED'` guard is the same one `markOutboxPublished`
+ * carries, and it exists because of a race rather than a rule. A dispatcher
+ * whose claim lease expired can still be holding the row when a peer publishes
+ * it; the freeze trigger from 0005 then refuses the UPDATE, and that refusal
+ * used to abort the whole batch — leaving the remaining claimed rows leased
+ * for a minute and swallowing the error entirely.
+ *
+ * Not touching a published row is the correct outcome in any case: the event
+ * is already delivered, and moving it back to FAILED would publish it twice.
+ */
 export async function markOutboxFailed(
   ex: DbExecutor,
   id: string,
   errorClass: string,
   nextAttemptAt: Date,
+  tenantId?: string | null,
 ): Promise<boolean> {
   const updated = await ex
     .update(outboxEvents)
     .set({ status: 'FAILED', lastErrorClass: errorClass, nextAttemptAt, updatedAt: new Date() })
-    .where(eq(outboxEvents.outboxEventId, id))
+    .where(and(eq(outboxEvents.outboxEventId, id), sql`${outboxEvents.status} <> 'PUBLISHED'`, tenantScope(tenantId)))
     .returning({ id: outboxEvents.outboxEventId });
   return updated.length > 0;
 }
 
-export async function markOutboxDead(ex: DbExecutor, id: string, errorClass: string): Promise<boolean> {
+/** Park a row as DEAD. Guarded exactly like `markOutboxFailed`. */
+export async function markOutboxDead(
+  ex: DbExecutor,
+  id: string,
+  errorClass: string,
+  tenantId?: string | null,
+): Promise<boolean> {
   const updated = await ex
     .update(outboxEvents)
     .set({ status: 'DEAD', lastErrorClass: errorClass, updatedAt: new Date() })
-    .where(eq(outboxEvents.outboxEventId, id))
+    .where(and(eq(outboxEvents.outboxEventId, id), sql`${outboxEvents.status} <> 'PUBLISHED'`, tenantScope(tenantId)))
     .returning({ id: outboxEvents.outboxEventId });
   return updated.length > 0;
 }
@@ -157,16 +196,28 @@ export async function countOutboxByStatus(ex: DbExecutor): Promise<Record<string
   return out;
 }
 
-export async function getOutboxEvent(ex: DbExecutor, id: string): Promise<OutboxEventRow | null> {
-  const [row] = await ex.select().from(outboxEvents).where(eq(outboxEvents.outboxEventId, id)).limit(1);
+export async function getOutboxEvent(
+  ex: DbExecutor,
+  id: string,
+  tenantId?: string | null,
+): Promise<OutboxEventRow | null> {
+  const [row] = await ex
+    .select()
+    .from(outboxEvents)
+    .where(and(eq(outboxEvents.outboxEventId, id), tenantScope(tenantId)))
+    .limit(1);
   return row ?? null;
 }
 
-export async function redriveOutboxEvent(ex: DbExecutor, id: string): Promise<OutboxEventRow | null> {
+export async function redriveOutboxEvent(
+  ex: DbExecutor,
+  id: string,
+  tenantId?: string | null,
+): Promise<OutboxEventRow | null> {
   const updated = await ex
     .update(outboxEvents)
     .set({ status: 'PENDING', attemptCount: 0, nextAttemptAt: null, lastErrorClass: null, updatedAt: new Date() })
-    .where(and(eq(outboxEvents.outboxEventId, id), eq(outboxEvents.status, 'DEAD')))
+    .where(and(eq(outboxEvents.outboxEventId, id), eq(outboxEvents.status, 'DEAD'), tenantScope(tenantId)))
     .returning();
   return updated[0] ?? null;
 }
