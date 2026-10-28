@@ -18,12 +18,26 @@ import {
   migrate,
   resetDb,
   seed,
+  loadRootEnv,
   type Db,
   type SeedResult,
 } from '@permitzero/db';
 import { buildApp } from '../src/app.js';
 import type { ApiConfig } from '../src/config.js';
 import { createModelAdapter } from '../src/model.js';
+
+// The root `.env` is loaded before the URLs are read.
+//
+// The harness used to read `process.env` alone, which worked on a developer
+// machine — where `postgres://postgres@127.0.0.1` authenticates by trust — and
+// failed in CI, where the service container has a real password and the URL
+// without one is refused.
+//
+// CI writes DATABASE_URL_TEST into `.env` precisely because that is where
+// every other command in this repository reads it from, via `loadRootEnv`.
+// An explicit environment still wins: `loadRootEnv` never overwrites a value
+// that is already set.
+loadRootEnv();
 
 const poolId = process.env['VITEST_POOL_ID'] ?? '1';
 const workerId = process.env['VITEST_WORKER_ID'] ?? '1';

@@ -97,6 +97,22 @@ jobs:
           # every tenant-isolation assertion would pass while proving nothing.
           sed -i 's|^PZ_RLS_ROLE_PASSWORD=.*|PZ_RLS_ROLE_PASSWORD=pz_app_ci|' .env
 
+          # The same values are exported to the environment as well as written
+          # to the file.
+          #
+          # A command that reads the root `.env` finds them there. A test
+          # harness that reads `process.env` finds them here. The harnesses
+          # now do both, but exporting them means a harness that forgets
+          # cannot silently fall back to a passwordless URL and fail with
+          # "password authentication failed" — which is what happened the
+          # first time this workflow ran for real.
+          {
+            echo "DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/permitzero"
+            echo "DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:5432/permitzero_test"
+            echo "REDIS_URL=redis://127.0.0.1:6379"
+            echo "PZ_RLS_ROLE_PASSWORD=pz_app_ci"
+          } >> "$GITHUB_ENV"
+
       - run: npm run db:migrate
       - run: npm run db:seed
 
@@ -205,6 +221,13 @@ jobs:
           # The SLO report refuses to scrape an unauthenticated /metrics, and
           # the endpoint is not registered at all without a token.
           echo "METRICS_TOKEN=ci-metrics-token" >> .env
+          {
+            echo "DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/permitzero"
+            echo "DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:5432/permitzero_test"
+            echo "REDIS_URL=redis://127.0.0.1:6379"
+            echo "PZ_RLS_ROLE_PASSWORD=pz_app_ci"
+            echo "METRICS_TOKEN=ci-metrics-token"
+          } >> "$GITHUB_ENV"
 
       - run: npm run db:migrate
       - run: npm run db:seed
