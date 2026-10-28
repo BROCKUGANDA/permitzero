@@ -91,30 +91,28 @@ flowchart LR
 
 **Measured, not asserted.**
 
-| Claim                                  | Number                                                                                                                                                                                                  | Where to check it                                                              |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| Tenant isolation is the database's job | 22/22 tenant-bearing tables RLS-enabled, forced and policy-covered for a non-exempt role; asserted from the catalog at boot and reported by `/health/ready`                                             | `infra/migrations/0006_row_level_security.sql`, `packages/db/test/rls.test.ts` |
-| Decisions are tamper-evident           | Every event hashes the canonical payload plus the previous hash; ten concurrent writers on one tenant finish gapless and the chain verifies                                                             | `packages/db/test/audit-concurrency.test.ts`, `verifyAuditChain`               |
-| Throughput and latency                 | 1,590 requests, 159 fresh policy decisions, server decision p99 **249 ms**, 0 5xx, 0 client failures at 10 concurrent clients                                                                           | `docs/benchmarks/RESULTS.md`                                                   |
-| Where the ceiling actually is          | ~46–63 req/s on one tenant, flat as the runtime pool doubles (2.6%): the per-tenant audit chain is the limit, not the pool                                                                              | `docs/benchmarks/SCALING.md`                                                   |
-| Objectives that can fail               | Multi-window, multi-burn-rate SLOs with a histogram bucket at the threshold; the report exits non-zero when breached                                                                                    | `packages/observability/src/slos.ts`, `npm run slo:report:strict`              |
-| Survives a provider or queue outage    | The drill kills Postgres and Redis mid-flight and asserts no lost events, no duplicate delivery, bounded shutdown                                                                                       | `npm run drill:resilience`                                                     |
-| Nothing unproven is claimed            | 24 controls mapped to code and tests: 15 implemented, 5 partial, **4 absent** (encryption at rest, backup/PITR, retention and deletion, independent review)                                             | `docs/compliance/EVIDENCE.md`, `npm run compliance:gate`                       |
-| Test surface                           | 498 tests across 39 files, plus typecheck, lint at `--max-warnings=0`, format, gitleaks, the dependency gate and the evidence-map gate — all wired into `npm run verify` and `.github/workflows/ci.yml` | `npm run verify`, `.github/workflows/ci.yml`                                   |
+| Claim                                   | Number                                                                                                                                                                                                                     | Where to check it                                                              |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Tenant isolation is the database's job  | 22/22 tenant-bearing tables RLS-enabled, forced and policy-covered for a non-exempt role; asserted from the catalog at boot and reported by `/health/ready`                                                                | `infra/migrations/0006_row_level_security.sql`, `packages/db/test/rls.test.ts` |
+| The blind escape hatch is read-only     | Migration 0007 narrows `users` and `outbox_events` so a blind transaction can READ them and cannot WRITE them; the column-level rule is a trigger, because a policy cannot express columns                                 | `infra/migrations/0007_rls_write_scope.sql`, `packages/db/test/rls.test.ts`    |
+| Decisions are tamper-evident            | Every event hashes the canonical payload plus the previous hash; ten concurrent writers on one tenant finish gapless and the chain verifies                                                                                | `packages/db/test/audit-concurrency.test.ts`, `verifyAuditChain`               |
+| A human cannot approve their own action | An approval by the requesting actor is refused at the point of decision, and excluded from the quorum's distinct-approver count                                                                                            | `apps/api/src/approvals.ts`, `apps/api/test/approvals.test.ts`                 |
+| Throughput and latency                  | 1,590 requests, 159 fresh policy decisions, server decision p99 **249 ms**, 0 5xx, 0 client failures at 10 concurrent clients                                                                                              | `docs/benchmarks/RESULTS.md`                                                   |
+| Where the ceiling actually is           | ~46–63 req/s on one tenant, flat as the runtime pool doubles (2.6%): the per-tenant audit chain is the limit, not the pool                                                                                                 | `docs/benchmarks/SCALING.md`                                                   |
+| Objectives that can fail                | Multi-window, multi-burn-rate SLOs with a histogram bucket at the threshold; the report exits non-zero when breached **or when it measured nothing**                                                                       | `packages/observability/src/slos.ts`, `npm run slo:report:strict`              |
+| The alerts can actually fire            | Three series that were declared and never written are now produced; the delivery-lag gauge measures the outbox **row**, not the queue job, so a wedged dispatcher cannot read zero                                         | `apps/api/src/observability.ts`, `packages/observability/test/`                |
+| Survives a provider or queue outage     | The drill fails the database and the queue mid-flight and asserts no lost events and a bounded shutdown; it does not stop the shared Postgres or claim duplicate delivery                                                  | `npm run drill:resilience`                                                     |
+| Nothing unproven is claimed             | 27 controls mapped to code and tests: 16 implemented, 7 partial, **4 absent** (encryption at rest, backup/PITR, retention and deletion, independent review)                                                                | `docs/compliance/EVIDENCE.md`, `npm run compliance:gate`                       |
+| Test surface                            | 547 tests across 40 files, plus typecheck, lint at `--max-warnings=0`, format, gitleaks, the dependency gate, the evidence-map gate and a live SLO scrape — all wired into `npm run verify` and `.github/workflows/ci.yml` | `npm run verify`, `.github/workflows/ci.yml`                                   |
 
-Those gates run on the development machine and are configured for every push. No hosted CI
-run has actually executed on this repository yet: each run finishes in about three seconds
-with no runner assigned and no logs. So the numbers above are local numbers, and
-`docs/compliance/EVIDENCE.md` records that under CHANGE-CONTROL instead of letting a
-workflow file stand in for proof.
-
-**Read the honest parts too.** The model never issues a permit, publishes policy or
-calls a connector, and that is structural rather than a convention:
+**Read the honest parts too.** The model never issues a permit, publishes policy
+or calls a connector, and that is structural rather than a convention:
 `MODEL_FIELD_IN_ALLOW_RULE` refuses to publish a policy whose ALLOW rules read a
 `model.*` field. Finance execution is simulated. The capacity ceiling above is a
 consequence of the design, and the remedy (per-tenant chain partitioning) is named
 but not built. `npm run compliance:gate` exists so that a control claimed here cannot
-quietly rot as the code moves.
+quietly rot as the code moves — and it has already caught this repository claiming
+things that were not true.
 
 ---
 
@@ -143,6 +141,7 @@ Agent ──POST /v1/actions──► API (Fastify) ──► Intake pipeline
                                     ├── validate + canonicalize args, hash
                                     ├── pin published policy revision (immutable)
                                     ├── authoritative lookups (vendor, invoice, PO, connector, mode)
+                                    ├── derive the effective environment from the credential
                                     ├── Meta Model API screening (advisory; redacted input)
                                     ├── deterministic PDP (policy package)  ← never overridden by model
                                     ├── persist decision + audit event + outbox (one transaction)
@@ -154,20 +153,21 @@ Agent ──POST /v1/actions──► API (Fastify) ──► Intake pipeline
 
 ### Packages (monorepo workspaces)
 
-| Package                  | Responsibility                                                                               |
-| ------------------------ | -------------------------------------------------------------------------------------------- |
-| `packages/domain`        | Types, reason codes, errors, canonicalization, money                                         |
-| `packages/schemas`       | Zod request/response + policy + risk-hints (Meta structured output) schemas                  |
-| `packages/policy`        | Pure deterministic PDP: deny precedence, default deny, field resolution, lint, simulation    |
-| `packages/broker`        | Permit issuing/verification/consumption, broker, simulated finance connector, reconciliation |
-| `packages/db`            | Drizzle + postgres; migrations, seeds, stores, RLS-friendly tenant scoping                   |
-| `packages/queue`         | BullMQ + transactional outbox, dispatcher, workers, DLQ                                      |
-| `packages/provider-meta` | Meta Model API client: config, prompt, retry, circuit breaker, semaphore, strict validation  |
-| `packages/ui`            | Shared React UI kit (design tokens, components)                                              |
-| `packages/test-fixtures` | Synthetic corpus + builders                                                                  |
-| `apps/api`               | Fastify API: intake, approvals, execution, policies, replay, health, status                  |
-| `apps/worker`            | Outbox dispatcher, model-analysis consumer, reconciliation, sweeps                           |
-| `apps/web`               | Next.js operator console (dashboard, action queue, policy studio, replay lab, evidence)      |
+| Package                  | Responsibility                                                                                                   |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `packages/domain`        | Types, reason codes, errors, canonicalization, money                                                             |
+| `packages/schemas`       | Zod request/response + policy + risk-hints (Meta structured output) schemas                                      |
+| `packages/policy`        | Pure deterministic PDP: deny precedence, default deny, field resolution, lint, simulation, signed MFA assertions |
+| `packages/broker`        | Permit issuing/verification/consumption, broker, simulated finance connector, reconciliation                     |
+| `packages/db`            | Drizzle + postgres; migrations, seeds, stores, RLS-friendly tenant scoping                                       |
+| `packages/queue`         | BullMQ + transactional outbox, dispatcher, workers, DLQ, Redis circuit breaker                                   |
+| `packages/provider-meta` | Meta Model API client: config, prompt, retry, circuit breaker, semaphore, strict validation                      |
+| `packages/observability` | Metrics, trace context, SLO definitions, multi-window burn-rate evaluation                                       |
+| `packages/ui`            | Shared React UI kit (design tokens, components)                                                                  |
+| `packages/test-fixtures` | Synthetic corpus + builders                                                                                      |
+| `apps/api`               | Fastify API: intake, approvals, execution, policies, replay, health, status                                      |
+| `apps/worker`            | Outbox dispatcher, model-analysis consumer, reconciliation, sweeps, DLQ redrive                                  |
+| `apps/web`               | Next.js operator console (dashboard, action queue, policy studio, replay lab, evidence)                          |
 
 ### Trust boundaries
 
@@ -175,8 +175,27 @@ Agent ──POST /v1/actions──► API (Fastify) ──► Intake pipeline
 - **Model provider ↔ backend**: model output is untrusted until schema (Zod) + semantic validation pass.
 - **PDP ↔ broker**: narrowly scoped permit is the contract; broker re-verifies hash, TTL, nonce, policy revision.
 - **Broker ↔ connector**: only broker holds connector authority; connector credentials never leave the broker.
-- **Tenant ↔ tenant**: enforced server-side in API + DB constraints; cross-tenant access returns 404, never 403.
+- **Tenant ↔ tenant**: enforced in the database, not by query discipline. A query that forgets `WHERE tenant_id = ?` returns zero foreign rows rather than all of them.
 - **Dashboard user ↔ privileged ops**: authenticated roles, step-up auth for sensitive actions, audit records.
+
+### Delivery
+
+```
+push / PR ──► CI: typecheck, lint, 547 tests, build, format, gitleaks,
+               dependency gate, evidence-map gate, resilience drill,
+               strict SLO report against a live stack
+         │
+         ├── Dependabot PRs ──► auto-merge once every required check is
+         │                      green ON THAT COMMIT
+         │
+         └── push to main ──► deploy: build, migrate under an advisory lock,
+                              health check, verify isolation from the database
+```
+
+`main` is protected: three required checks, one approving review, no force
+pushes, no deletions, linear history. Auto-promotion is limited to Dependabot's
+own dependency bumps — a human-authored change is merged by a human, because
+auto-merging one would let a push to a branch bypass review.
 
 ---
 
@@ -199,16 +218,17 @@ See `packages/provider-meta/` and `apps/api/src/model.ts`.
 
 ## 4. Threat model (summary)
 
-| Threat                           | Mitigation                                                                                                                                                                                                                                                       |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Agent bypasses PermitZero        | Broker-only credentials; architecture + integration tests; connector access policy                                                                                                                                                                               |
-| Prompt injection in documents    | Untrusted-source labeling; model advisory signal; deterministic scope/amount/destination/approval rules still apply even if detection fails                                                                                                                      |
-| False allow from policy bug      | Deny-by-default; replay corpus; mutation tests; two-person policy publication for high-risk rules                                                                                                                                                                |
-| Duplicate payment after timeout  | Durable idempotency; `UNKNOWN_OUTCOME` state; connector reconciliation; no blind retry                                                                                                                                                                           |
-| Stale approval                   | Approval + permit bound to exact hash + policy revision; re-evaluated at execution                                                                                                                                                                               |
-| Tenant data leak                 | PostgreSQL RLS on the non-exempt `pz_app` role (22/22 tenant tables, catalog-asserted at boot, transaction-local context that matches zero rows when unset, tenant-id immutability trigger, DDL event trigger for future tables); adversarial cross-tenant tests |
-| Model provider outage/rate limit | Model-independent deterministic core; bounded queue; backoff + breaker + safe degraded mode                                                                                                                                                                      |
-| Overclaiming compliance/security | Evidence mapping only; independent review; no unsupported certification claims                                                                                                                                                                                   |
+| Threat                           | Mitigation                                                                                                                                                                                                                                                             |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Agent bypasses PermitZero        | Broker-only credentials; architecture + integration tests; connector access policy                                                                                                                                                                                     |
+| Prompt injection in documents    | Untrusted-source labeling; model advisory signal; deterministic scope/amount/destination/approval rules still apply even if detection fails                                                                                                                            |
+| False allow from policy bug      | Deny-by-default; replay corpus; mutation tests; two-person policy publication for high-risk rules                                                                                                                                                                      |
+| Duplicate payment after timeout  | Durable idempotency; `UNKNOWN_OUTCOME` state; connector reconciliation; no blind retry                                                                                                                                                                                 |
+| Stale approval                   | Approval + permit bound to exact hash + policy revision; re-evaluated at execution; an approval by the requester is refused                                                                                                                                            |
+| Self-approval                    | The requester is excluded from the approval and from the quorum's distinct-approver count                                                                                                                                                                              |
+| Tenant data leak                 | PostgreSQL RLS on the non-exempt `pz_app` role (22/22 tenant tables), a read-only blind escape hatch, transaction-local context that matches zero rows when unset, tenant-id immutability trigger, DDL event trigger for future tables; adversarial cross-tenant tests |
+| Model provider outage/rate limit | Model-independent deterministic core; bounded queue; backoff + breaker + safe degraded mode                                                                                                                                                                            |
+| Overclaiming compliance/security | Evidence mapping only; independent review; no unsupported certification claims                                                                                                                                                                                         |
 
 ---
 
@@ -239,7 +259,7 @@ git clone https://github.com/BROCKUGANDA/permitzero.git
 cd permitzero
 npm install
 cp .env.example .env
-# Fill in AUTH_SECRET, AUDIT_HASH_KEY, PERMIT_SIGNING_KEY, DATABASE_URL, etc.
+# Fill in PERMIT_SIGNING_KEY, AUDIT_HMAC_KEY, DATABASE_URL, etc.
 # Meta Model API is OPTIONAL: leave MODEL_PROVIDER=disabled for deterministic mode.
 ```
 
@@ -274,7 +294,7 @@ npm run demo:reset
 npm test                   # vitest (unit + integration)
 npm run typecheck
 npm run lint
-npm run verify             # typecheck + lint + tests + build (+ format check)
+npm run verify             # the release gate, in one command
 npm run secret:scan        # gitleaks (working tree)
 ```
 
@@ -292,11 +312,12 @@ MODEL_API_KEY=... MODEL_ID=... npm run model:check -w @permitzero/provider-meta
 permitzero/
 ├── apps/            api, worker, web
 ├── packages/        domain, schemas, policy, broker, db, queue,
-│                    provider-meta, ui, test-fixtures
-├── infra/           migrations, docker, deploy, caddy
-├── scripts/         dev.mjs, verify.mjs
-├── docs/            module-contracts.md
-├── .env.example
+│                    provider-meta, observability, ui, test-fixtures
+├── infra/           migrations, docker, deploy, caddy, observability
+├── scripts/         dev.mjs, verify.mjs, slo-report.mjs, audit-gate.mjs,
+│                    compliance-gate.mjs, resilience-drill.ts
+├── docs/            module-contracts.md, compliance/, benchmarks/, incidents.md
+├── .github/         workflows (ci, deploy, auto-promote), dependabot.yml
 └── README.md
 ```
 
@@ -306,7 +327,7 @@ permitzero/
 
 - Single-region authoritative writer; no active-active multi-region.
 - Simulated connector only; no live payment rails.
-- No SSO/SCIM/MFA step-up beyond role-based auth in the MVP.
+- No SSO/SCIM/MFA step-up beyond role-based auth in the MVP. MFA step-up _assertions_ are signed and verified, but there is no step-up endpoint that issues one — so a policy requiring MFA fails closed rather than being satisfied by a typed string.
 - Replay Lab replays stored actions; full run-trace replay with redaction is P1.
 - Intake throughput is capped by the per-tenant audit hash chain, which serialises
   appends by design: ~46–63 requests/s on one tenant on this rig, flat whether the
@@ -317,6 +338,11 @@ permitzero/
 - No encryption at rest, no backup/PITR procedure, no retention or deletion path,
   and no independent review — all four are recorded as `absent` in
   `docs/compliance/EVIDENCE.md` rather than implied by the word "secure".
+- The CI runner is self-hosted on the deploy host, because this account's hosted
+  runners are refused with _"your account is locked due to a billing issue."_ That is
+  an account billing state and the one thing here that needs a human; clearing it
+  and moving back to hosted runners is a one-line change to the `CI_RUNNER`
+  repository variable.
 - Model confidence is a claim, not a calibrated probability (no labeled eval dataset yet).
 
 ---
