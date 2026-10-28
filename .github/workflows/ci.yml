@@ -45,6 +45,10 @@ jobs:
       # not individually justified in infra/security/dependency-exceptions.json,
       # and on a listed exception whose review date has passed.
       - run: npm run audit:gate
+      # docs/compliance/EVIDENCE.md is the file a reviewer reads to check the
+      # README's claims, so CI resolves every citation in it and refuses a map whose
+      # documented absences have been quietly deleted or relabelled.
+      - run: npm run compliance:gate
       # The outage drill runs against the CI Postgres/Redis services, so the
       # resilience claims in the README are measured on every push.
       - run: npm run drill:resilience

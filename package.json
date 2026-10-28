@@ -44,7 +44,9 @@
     "drill:resilience": "tsx scripts/resilience-drill.ts",
     "audit:gate": "node scripts/audit-gate.mjs",
     "load:test": "tsx scripts/load-test.mjs",
-    "load:sweep": "tsx scripts/load-sweep.mjs"
+    "load:sweep": "tsx scripts/load-sweep.mjs",
+    "compliance:gate": "node scripts/compliance-gate.mjs",
+    "compliance:gate:verbose": "node scripts/compliance-gate.mjs --verbose"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

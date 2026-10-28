@@ -87,6 +87,11 @@ if (liveUrl) {
   });
 }
 
+// The evidence map is a claim about the rest of this repository, so it is checked
+// like one: every citation must resolve, and the documented absences must still be
+// documented. Skipping this step is how a control map becomes decoration.
+add('compliance evidence gate', 'node', ['scripts/compliance-gate.mjs'], { required: true });
+
 add('format check', 'npx', ['prettier', '--check', '**/*.{ts,tsx,js,jsx,json,md,css,yml,yaml}'], {
   required: true,
 });
