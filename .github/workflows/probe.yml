@@ -1,7 +1,8 @@
 name: Probe
 
 on:
-  workflow_dispatch:
+  push:
+    branches: ['probe/**']
 
 jobs:
   probe:
