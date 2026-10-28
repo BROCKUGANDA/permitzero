@@ -161,7 +161,7 @@ jobs:
       # any step in it runs.
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -345,7 +345,7 @@ jobs:
       # therefore runs before Docker is asked for anything.
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
