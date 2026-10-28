@@ -192,6 +192,25 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --web.enable-lifecycle=false
+    depends_on:
+      - alertmanager
+  # Where a firing rule actually goes. Prometheus evaluating a rule and then
+  # doing nothing with the result is not an alerting system; this is the
+  # component that makes `severity: page` mean something.
+  #
+  # The config is RENDERED ON THE HOST rather than expanded inside the
+  # container: the deployment script substitutes the webhook URL into
+  # `alertmanager.yml.template` and writes the result to a gitignored path.
+  # An envsubst entrypoint would depend on which utilities a particular
+  # upstream image happens to ship, and a base-image change would then break
+  # alerting silently.
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    restart: unless-stopped
+    profiles: ['observability']
+    volumes:
+      - ../run/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
 
   edge:
     image: caddy:2.10-alpine
@@ -227,3 +246,4 @@ volumes:
   caddy_data:
   caddy_config:
   prometheus_data:
+  alertmanager_data:

@@ -25,10 +25,15 @@ blob-report/
 *.pem
 *.key
 
-# Runtime state (synthetic demo DB, uploads, local artifacts — all reproducible via scripts)
+# Runtime state (synthetic demo DB, uploads, local artifacts - all reproducible via scripts)
 storage/
 *.sqlite
 *.db
+
+# Rendered observability configuration. The Prometheus scrape token and the
+# Alertmanager webhook URL are written here by infra/deploy/deploy-vps.sh at
+# deploy time; neither belongs in the repository.
+run/
 
 # Logs
 logs/
