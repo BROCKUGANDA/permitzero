@@ -167,8 +167,27 @@ while IFS='|' read -r name created; do
   fi
 done < <(docker ps -a --format '{{.Names}}|{{.CreatedAt}}')
 
-docker builder prune -af >/dev/null 2>&1 || true
-docker image prune -af >/dev/null 2>&1 || true
+# The build cache and the images.
+#
+# The BUILD CACHE cannot be scoped to a project: `docker builder prune` takes
+# no label filter. So it is NOT run here. It is the one thing on this box
+# that would delete another project's cache — and this box hosts four other
+# projects whose builds are as slow to redo as this one.
+#
+# The IMAGE prune is scoped to this project's compose label, so it reaches
+# PermitZero's own images and nothing else. Note the absence of `-a`: the
+# plain prune removes only DANGLING images, and `-a` would also remove every
+# TAGGED image nobody references — which on this box includes other
+# projects' rollback targets. Those exist precisely so a bad deploy can be
+# undone, and deleting them is worse than running out of disk.
+docker image prune -f --filter "label=com.docker.compose.project=permitzero" >/dev/null 2>&1 || true
+
+# This project's own images, by name, which is the narrowest scope of all.
+for img in permitzero/verify:local permitzero/migrate:local; do
+  if docker images -q "$img" 2>/dev/null | grep -q .; then
+    docker rmi -f "$img" >/dev/null 2>&1 || true
+  fi
+done
 
 log "now at $(used_percent)%"
 df -h / | tail -1

@@ -132,6 +132,21 @@ export function createBullmqHandles(redisUrl: string): BullMQHandles {
         data: j.data,
       }));
     },
+    // Removing a job is how the dead-letter sweep retires a dead letter it
+    // has already redriven, so the source is no longer eligible for another
+    // attempt. Without it the sweep's durable marker still prevents a second
+    // redrive, but the dead-letter queue accumulates one marker per redrive
+    // forever — and once the queue reaches the sweep's scan limit, the sweep
+    // stops redriving entirely.
+    //
+    // A job that has already been removed is not an error: the caller's
+    // intent — "this job should not be here" — is satisfied either way.
+    remove: async (jobId: string) => {
+      const job = await guarded(`queue.getJob(${queue.name})`, () => queue.getJob(jobId));
+      if (!job) return false;
+      await guarded(`queue.remove(${queue.name})`, () => job.remove());
+      return true;
+    },
     close: async () => {
       await queue.close();
     },
