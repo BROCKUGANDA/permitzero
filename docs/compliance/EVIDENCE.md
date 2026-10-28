@@ -17,6 +17,15 @@ Statuses: `implemented` (control exists, is wired, and is tested), `partial`
 
 ---
 
+### TENANT-ISOLATION-IN-THE-DEPLOYMENT — the control is on in the running deployment, not only in development
+
+status: implemented
+sources: SOC 2 CC6.1, CC6.6; OWASP Agentic (identity/privilege abuse)
+claim: The deployed API connects as the restricted `pz_app` role, not as the schema owner, so row-level security applies to the traffic that actually serves tenants. The deployment script refuses to start without a runtime URL that names `pz_app`, and verifies the property against the live database rather than the configuration: after the rollout, a query as the runtime role with no tenant context set must return zero rows.
+evidence: infra/deploy/deploy-vps.sh:92 expect:DATABASE_URL_RUNTIME; infra/deploy/deploy-vps.sh:301 expect:tenant isolation in the running deployment
+tests: packages/db/test/rls.test.ts; apps/api/test/tenant-isolation.test.ts
+note: The first version of the deployment script wrote `DATABASE_URL` but not `DATABASE_URL_RUNTIME`, and the application falls back to the admin URL when the latter is unset — so the deployed API ran as the schema owner, which row-level security does not bind, and every tenant row was reachable without a tenant context. The deployment now generates a random password for the restricted role, points the runtime URL at it, refuses to start if the two do not agree, and checks the live database after the rollout. Verified on the running deployment: 31 policies, 22/22 tenant tables enforced, and a cross-tenant read as `pz_app` returns zero rows.
+
 ### TENANT-ISOLATION — the database, not query discipline, separates tenant data
 
 status: implemented
