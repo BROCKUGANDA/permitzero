@@ -80,6 +80,11 @@ jobs:
             --exclude 'storage/' \
             --exclude 'node_modules/' \
             "${GITHUB_WORKSPACE}/" "$DEPLOY_DIR/"
+          # The scripts have to be executable on the host. rsync preserves the
+          # mode it is given, and a checkout does not always carry the execute
+          # bit, so it is set explicitly rather than discovered at deploy time
+          # as "Permission denied".
+          chmod +x "$DEPLOY_DIR"/infra/deploy/*.sh
           echo "tree copied"
           ls "$DEPLOY_DIR/infra/migrations/" | tail -3
 
