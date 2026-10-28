@@ -211,17 +211,20 @@ jobs:
       - name: Secret scan (gitleaks)
         # The scanner is not on every runner image, and a step that cannot run
         # is a step that reports a failure it never measured. The dedicated
-        # secret-scan job below always runs it — that action installs the
-        # binary itself — so a runner without gitleaks has the scan covered
-        # rather than red.
+        # secret-scan job below always runs it — that job installs the
+        # binary itself and checks the history out — so a runner without
+        # gitleaks has the scan covered rather than red.
         #
-        # This step is a second, faster opinion on the working tree; the npm
-        # script it calls scans files, not history. The HISTORY is the
-        # dedicated job's job, and that is where a secret that was committed
-        # and later deleted is found.
+        # This step is the fast opinion on the WORKING TREE, and it is
+        # deliberately a file scan rather than a history scan: the verify
+        # job's checkout is shallow (a merge ref, depth 1), so `git log -p`
+        # has no history to walk and gitleaks in git mode would either fail
+        # or scan almost nothing while LOOKING like it had scanned
+        # everything. The dedicated job below is the one that walks the
+        # history, and it does that with an unshallow checkout.
         run: |
           if command -v gitleaks > /dev/null 2>&1; then
-            npm run secret:scan
+            gitleaks detect --source . --no-git --redact --verbose --exit-code 1
           else
             echo "gitleaks is not installed on this runner; the secret-scan job scans the history"
           fi
