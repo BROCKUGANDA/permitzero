@@ -192,10 +192,10 @@ gap: Alert routing (PagerDuty/slack) is not configured; the rules exist, the not
 
 status: partial
 sources: SOC 2 CC8.1
-claim: CI runs typecheck, lint, the full suite, build, format, the strict SLO report, gitleaks, the dependency gate, the compliance evidence gate and the resilience drill on every push, and migrations are ordered, versioned SQL tracked in `_migrations`.
+claim: CI is configured to run typecheck, lint, the full suite, build, format, the strict SLO report, gitleaks, the dependency gate, the compliance evidence gate and the resilience drill on every push, and migrations are ordered, versioned SQL tracked in `_migrations`.
 evidence: .github/workflows/ci.yml:41 expect:verify; infra/migrations/0001_init.sql:26 expect:CREATE TABLE IF NOT EXISTS tenants
 tests: scripts/verify.mjs
-gap: No protected-branch or required-reviewer evidence is captured in this repository, and there is no release-approval record.
+gap: No hosted CI run has ever executed here. Every run on `main` and on Dependabot pull requests finishes in about three seconds with no runner assigned, no steps and no logs (`runner_name` empty, zero steps via the Actions API), on push and pull_request events alike, so this list describes what the workflow does when a runner exists. Until that is fixed upstream, every gate above is verified locally on the development machine rather than by an independent hosted pipeline. No protected branch, required reviewer, or release-approval record either.
 
 ### ENCRYPTION-AT-REST — not built here
 
