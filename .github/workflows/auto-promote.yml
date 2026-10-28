@@ -124,7 +124,16 @@ jobs:
             # The commit does not match, so the only remaining signal is the
             # branch name — and a branch name only means something within the
             # repository that owns it.
-            if [ "$HEAD_NAME" = "$RUN_HEAD_BRANCH" ] && [ "$HEAD_OWNER" = "$RUN_HEAD_REPO" ]; then
+            #
+            # The comparison is on the FULL repository name. The pull request
+            # API gives the owner as a login (`owner`) and the repository as
+            # a name (`repository`), while the workflow_run payload gives the
+            # repository as a full name (`owner/repository`). Comparing a
+            # login with a full name never matches, so the fallback could
+            # never resolve a pull request whose head had moved on since the
+            # run — and an updated pull request would silently never be
+            # promoted.
+            if [ "$HEAD_NAME" = "$RUN_HEAD_BRANCH" ] && [ "$HEAD_OWNER/$HEAD_REPO" = "$RUN_HEAD_REPO" ]; then
               PICKED="$PICKED $NUM"
             fi
           done <<< "$RAW"

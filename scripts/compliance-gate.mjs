@@ -358,14 +358,23 @@ function main() {
   // The corrected citations are written back to the map, so the correction
   // persists. A line number that is fixed in the report but not in the file
   // would be reported again on every run, and the report would grow.
+  //
+  // The replacement is SCOPED to the whole evidence entry — the path, the
+  // line AND the `expect:` token — and never to the bare `path:line`. A bare
+  // location is a PREFIX of every longer line number that shares its
+  // digits: correcting `README.md:25` by replacing that string would also
+  // rewrite `README.md:251`, silently moving a citation the gate had
+  // validated against a different file. The gate would then be editing the
+  // evidence it is supposed to be checking.
   if (allCorrections.length > 0) {
     let text = readFileSync(mapPath, 'utf8');
     for (const { entry, fixed } of allCorrections) {
       const location = entry.split(' expect:')[0]?.trim() ?? '';
       const m = /^(.+?):(\d+)$/.exec(location);
       if (!m) continue;
-      const from = `${m[1]}:${m[2]}`;
-      const to = `${fixed.file}:${fixed.line}`;
+      // The full entry, with the same `expect:` suffix it already carries.
+      const from = entry;
+      const to = `${fixed.file}:${fixed.line} expect:${entry.split(' expect:')[1]?.trim() ?? ''}`.replace(/\s+$/, '');
       if (text.includes(from)) text = text.split(from).join(to);
     }
     writeFileSync(mapPath, text);
