@@ -6,6 +6,112 @@ PermitZero is a runtime authorization and transaction-control plane for agentic 
 
 ---
 
+## For the judge: sixty seconds, then the evidence
+
+**The one-line bet.** An AI agent with a payment tool should not be able to spend
+money because a language model thought it was fine. PermitZero puts a
+deterministic, tenant-scoped, tamper-evident authorization plane between the agent
+and the connector: the model advises, policy decides, a human can be required, and
+every step is written to a hash-chained audit log the database itself enforces.
+
+**Run it.**
+
+```bash
+npm ci && cp .env.example .env
+npm run db:migrate && npm run db:seed   # synthetic tenant, model provider disabled
+npm run dev                             # API :8080, console :3000, worker
+npm run demo:scenario                   # allow / deny / approval, end to end
+```
+
+**What one decision looks like.**
+
+```mermaid
+sequenceDiagram
+    participant A as Agent (untrusted)
+    participant API as API :8080
+    participant P as Policy PDP
+    participant M as Meta model (optional)
+    participant DB as Postgres (RLS, hash chain)
+    participant B as Broker → simulated connector
+    A->>API: POST /v1/actions (token, task, tool, exact args, idempotency key)
+    API->>DB: tenant-blind credential lookup, then resolve principal in that tenant
+    API->>DB: pin the published policy revision (a version, not "latest")
+    opt model configured
+        API->>M: bounded, redacted risk-hints request (json_schema + Zod revalidation)
+        M-->>API: hints, or none — a missing hint is never treated as safe
+    end
+    API->>P: evaluate(pinned revision, facts, hints)
+    P->>DB: append decision to the tenant's audit chain (one tx: action + audit + outbox)
+    alt ALLOW
+        API-->>A: signed permit (TTL, nonce, argument hash, policy revision)
+        A->>B: execute with the narrowly scoped permit
+        B->>DB: broker re-verifies hash, TTL, nonce and revision before the connector runs
+    else DENY or REQUIRE_APPROVAL
+        API-->>A: terminal answer, or a two-of-N human approval that expires
+    end
+```
+
+**How the pieces hold together.**
+
+```mermaid
+flowchart LR
+    subgraph edge["Edge"]
+      Caddy["Caddy: TLS, security headers"]
+    end
+    subgraph apip["apps/api (Fastify)"]
+      Intake["intake → policy → decision"]
+      Approvals["approvals / quorum"]
+      Permits["permit issuance"]
+      Obs["metrics + W3C trace + /metrics"]
+    end
+    subgraph pkgs["packages"]
+      Policy["policy: deterministic PDP"]
+      Domain["domain / schemas"]
+      DBPkg["db: RLS, hash chain, outbox"]
+      Queue["queue: BullMQ, leases, DLQ"]
+      Meta["provider-meta: breaker + backoff"]
+      ObsPkg["observability: SLOs, burn rates"]
+    end
+    subgraph asyncp["apps/worker"]
+      Disp["outbox dispatcher + redrive"]
+    end
+    Console["apps/web console (Next.js)"]
+    PG[("PostgreSQL: pz_app role, 22 tenant tables under RLS")]
+    RD[("Redis")]
+    P1[("Meta API, optional")]
+
+    Console --> Caddy --> apip
+    Intake --> Policy --> Domain
+    Intake --> Meta --> P1
+    apip --> DBPkg --> PG
+    Disp --> Queue --> RD
+    Queue --> DBPkg
+    Obs --> ObsPkg
+```
+
+**Measured, not asserted.**
+
+| Claim                                  | Number                                                                                                                                                      | Where to check it                                                              |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Tenant isolation is the database's job | 22/22 tenant-bearing tables RLS-enabled, forced and policy-covered for a non-exempt role; asserted from the catalog at boot and reported by `/health/ready` | `infra/migrations/0006_row_level_security.sql`, `packages/db/test/rls.test.ts` |
+| Decisions are tamper-evident           | Every event hashes the canonical payload plus the previous hash; ten concurrent writers on one tenant finish gapless and the chain verifies                 | `packages/db/test/audit-concurrency.test.ts`, `verifyAuditChain`               |
+| Throughput and latency                 | 1,590 requests, 159 fresh policy decisions, server decision p99 **249 ms**, 0 5xx, 0 client failures at 10 concurrent clients                               | `docs/benchmarks/RESULTS.md`                                                   |
+| Where the ceiling actually is          | ~46–63 req/s on one tenant, flat as the runtime pool doubles (2.6%): the per-tenant audit chain is the limit, not the pool                                  | `docs/benchmarks/SCALING.md`                                                   |
+| Objectives that can fail               | Multi-window, multi-burn-rate SLOs with a histogram bucket at the threshold; the report exits non-zero when breached                                        | `packages/observability/src/slos.ts`, `npm run slo:report:strict`              |
+| Survives a provider or queue outage    | The drill kills Postgres and Redis mid-flight and asserts no lost events, no duplicate delivery, bounded shutdown                                           | `npm run drill:resilience`                                                     |
+| Nothing unproven is claimed            | 24 controls mapped to code and tests: 15 implemented, 5 partial, **4 absent** (encryption at rest, backup/PITR, retention and deletion, independent review) | `docs/compliance/EVIDENCE.md`, `npm run compliance:gate`                       |
+| Test surface                           | 498 tests across 39 files, plus typecheck, lint at `--max-warnings=0`, format, gitleaks and a dependency gate in CI                                         | `npm run verify`, `.github/workflows/ci.yml`                                   |
+
+**Read the honest parts too.** The model never issues a permit, publishes policy or
+calls a connector, and that is structural rather than a convention:
+`MODEL_FIELD_IN_ALLOW_RULE` refuses to publish a policy whose ALLOW rules read a
+`model.*` field. Finance execution is simulated. The capacity ceiling above is a
+consequence of the design, and the remedy (per-tenant chain partitioning) is named
+but not built. `npm run compliance:gate` exists so that a control claimed here cannot
+quietly rot as the code moves.
+
+---
+
 ## 1. What it does
 
 Companies are connecting AI agents to tools that can read sensitive data and change business state (ERP/AP, vendor master data, payments, refunds, cloud control planes). Existing IAM answers "does this credential have permission to call this API?" — it does not answer "is this exact action, for this task, at this time, within this amount, to this destination, safe and approved?"
@@ -87,16 +193,16 @@ See `packages/provider-meta/` and `apps/api/src/model.ts`.
 
 ## 4. Threat model (summary)
 
-| Threat                           | Mitigation                                                                                                                                  |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| Agent bypasses PermitZero        | Broker-only credentials; architecture + integration tests; connector access policy                                                          |
-| Prompt injection in documents    | Untrusted-source labeling; model advisory signal; deterministic scope/amount/destination/approval rules still apply even if detection fails |
-| False allow from policy bug      | Deny-by-default; replay corpus; mutation tests; two-person policy publication for high-risk rules                                           |
-| Duplicate payment after timeout  | Durable idempotency; `UNKNOWN_OUTCOME` state; connector reconciliation; no blind retry                                                      |
-| Stale approval                   | Approval + permit bound to exact hash + policy revision; re-evaluated at execution                                                          |
-| Tenant data leak                 | Server-side identity; DB constraints/RLS; no tenant ID trusted from client; adversarial tenant tests                                        |
-| Model provider outage/rate limit | Model-independent deterministic core; bounded queue; backoff + breaker + safe degraded mode                                                 |
-| Overclaiming compliance/security | Evidence mapping only; independent review; no unsupported certification claims                                                              |
+| Threat                           | Mitigation                                                                                                                                                                                                                                                       |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Agent bypasses PermitZero        | Broker-only credentials; architecture + integration tests; connector access policy                                                                                                                                                                               |
+| Prompt injection in documents    | Untrusted-source labeling; model advisory signal; deterministic scope/amount/destination/approval rules still apply even if detection fails                                                                                                                      |
+| False allow from policy bug      | Deny-by-default; replay corpus; mutation tests; two-person policy publication for high-risk rules                                                                                                                                                                |
+| Duplicate payment after timeout  | Durable idempotency; `UNKNOWN_OUTCOME` state; connector reconciliation; no blind retry                                                                                                                                                                           |
+| Stale approval                   | Approval + permit bound to exact hash + policy revision; re-evaluated at execution                                                                                                                                                                               |
+| Tenant data leak                 | PostgreSQL RLS on the non-exempt `pz_app` role (22/22 tenant tables, catalog-asserted at boot, transaction-local context that matches zero rows when unset, tenant-id immutability trigger, DDL event trigger for future tables); adversarial cross-tenant tests |
+| Model provider outage/rate limit | Model-independent deterministic core; bounded queue; backoff + breaker + safe degraded mode                                                                                                                                                                      |
+| Overclaiming compliance/security | Evidence mapping only; independent review; no unsupported certification claims                                                                                                                                                                                   |
 
 ---
 
@@ -196,7 +302,15 @@ permitzero/
 - Simulated connector only; no live payment rails.
 - No SSO/SCIM/MFA step-up beyond role-based auth in the MVP.
 - Replay Lab replays stored actions; full run-trace replay with redaction is P1.
-- Performance SLOs are not measured under representative load.
+- Intake throughput is capped by the per-tenant audit hash chain, which serialises
+  appends by design: ~46–63 requests/s on one tenant on this rig, flat whether the
+  runtime pool is 10 or 25 (`npm run load:sweep`, `docs/benchmarks/SCALING.md`). At
+  25 concurrent clients on one tenant, 0.65–0.69% of requests exceeded the client
+  timeout, which breaches the 99.9% availability objective — measured, not hidden.
+  Per-tenant chain partitioning is the remedy and is not built here.
+- No encryption at rest, no backup/PITR procedure, no retention or deletion path,
+  and no independent review — all four are recorded as `absent` in
+  `docs/compliance/EVIDENCE.md` rather than implied by the word "secure".
 - Model confidence is a claim, not a calibrated probability (no labeled eval dataset yet).
 
 ---
