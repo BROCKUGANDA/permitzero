@@ -28,10 +28,20 @@ const poolId = process.env['VITEST_POOL_ID'] ?? '1';
 const workerId = process.env['VITEST_WORKER_ID'] ?? '1';
 const BASE_URL = process.env['DATABASE_URL_TEST'] ?? 'postgres://postgres@127.0.0.1:5432/permitzero_test';
 
+/**
+ * The `worker` segment keeps this harness from colliding with the other two
+ * that compute a name the same way (`packages/db/test/db-test.ts` and
+ * `apps/api/test/helpers.ts`). Vitest's pool and worker ids are per process,
+ * not per file, so without a namespace two suites in different packages that
+ * landed on the same worker id shared one database and truncated each other's
+ * rows mid-test.
+ */
+const DB_NAMESPACE = 'worker';
+
 function workerUrl(): string {
   const url = new URL(BASE_URL);
   const baseName = url.pathname.replace(/^\//, '') || 'permitzero_test';
-  url.pathname = `/${baseName}_${poolId}_${workerId}`;
+  url.pathname = `/${baseName}_${DB_NAMESPACE}_${poolId}_${workerId}`;
   return url.toString();
 }
 
