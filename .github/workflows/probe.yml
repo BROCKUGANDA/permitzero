@@ -1,0 +1,14 @@
+name: Probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: Self-hosted probe
+    runs-on: [self-hosted, permitzero]
+    timeout-minutes: 5
+    steps:
+      - run: echo "SELF_HOSTED_JOB_RAN_OK"
+      - run: hostname
+      - run: df -h / | tail -1
