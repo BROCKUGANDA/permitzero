@@ -76,7 +76,7 @@ note: The migration role is exempt by design (it must own DDL); on managed Postg
 status: implemented
 sources: SOC 2 CC7.2, CC4.1; OWASP Agentic (records of decisions); MAS SAFR (record of decision)
 claim: Each audit event hashes the canonical event plus the previous hash, its sequence is assigned under a per-tenant advisory lock, and the chain is verifiable end-to-end for a tenant.
-evidence: infra/migrations/0002_triggers.sql:146 expect:hashtextextended('pz_audit_chain:; packages/db/src/repos/audit.ts:170 expect:appendAuditEvent; packages/db/src/repos/audit.ts:366 expect:verifyAuditChain
+evidence: infra/migrations/0002_triggers.sql:146 expect:hashtextextended('pz_audit_chain:; packages/db/src/repos/audit.ts:297 expect:export async function appendAuditEvent; packages/db/src/repos/audit.ts:493 expect:verifyAuditChain
 tests: packages/db/test/execution-stores.test.ts; packages/db/test/audit-concurrency.test.ts; apps/api/test/intake.test.ts
 gap: —
 
@@ -85,7 +85,7 @@ gap: —
 status: implemented
 sources: SOC 2 CC7.2, A1.2 (resilience of evidence)
 claim: The chain lock is taken before the head is read, so a concurrent writer blocks instead of aborting its own transaction, and a row that violates a real CHECK is reported as that violation rather than retried into a 25P02.
-evidence: packages/db/src/repos/audit.ts:198 expect:SELECT pg_advisory_xact_lock; packages/db/src/repos/audit.ts:159 expect:export function isAuditChainCollision
+evidence: packages/db/src/repos/audit.ts:325 expect:SELECT pg_advisory_xact_lock; packages/db/src/repos/audit.ts:286 expect:export function isAuditChainCollision
 tests: packages/db/test/audit-concurrency.test.ts | does not lose the second writer when the chain head moves underneath it; packages/db/test/audit-concurrency.test.ts | serves every writer when a burst of them appends at once; packages/db/test/audit-concurrency.test.ts | reports a row that breaks a CHECK
 note: Per-tenant serialisation is the design and also the throughput ceiling; it is measured in docs/benchmarks/SCALING.md rather than assumed.
 
@@ -274,16 +274,16 @@ note: The backups and the WAL archive live outside the compose project, so `comp
 status: implemented
 sources: SOC 2 CC6.7, CC9.1; MAS SAFR (record retention)
 claim: A retention window is enforced by a sweep that ages the audit and outbox rows out, and a LEGAL HOLD stops it: a tenant under a hold is left exactly as it is, and the sweep says so rather than failing silently. Every pass records what it did — how many rows were purged, how many were relinked, whether a hold stopped it, and the chain hashes at the boundary — because a deletion that leaves no record is a deletion nobody can be asked about. The audit chain stays VERIFIABLE across a purge: the survivors are re-sequenced and re-linked, so the trail does not report itself as tampered because the retention sweep did its job.
-evidence: apps/worker/src/retention.ts:582 expect:export async function runRetentionSweep; infra/migrations/0010_retention_and_legal_hold.sql:152 expect:CREATE TABLE IF NOT EXISTS public.legal_holds
+evidence: apps/worker/src/retention.ts:602 expect:export async function runRetentionSweep; infra/migrations/0010_retention_and_legal_hold.sql:152 expect:CREATE TABLE IF NOT EXISTS public.legal_holds
 tests: apps/worker/test/retention.test.ts | leaves the audit chain verifiable after a purge; apps/worker/test/retention.test.ts | removes nothing for a tenant under a legal hold, and says so; apps/worker/test/retention.test.ts | records what it purged
-note: A purge cannot remove the chain's last event without re-anchoring the chain, so the retention window and the chain's integrity are reconciled by relinking rather than by leaving a hole. The window itself is a deployment configuration, and the hold is per tenant with a named operator and a release reason.
+note: A purge cannot remove the chain's last event without re-anchoring the chain, so the retention window and the chain's integrity are reconciled by relinking rather than by leaving a hole. The window itself is a deployment configuration, and the hold is per tenant with a named operator and a release reason. The re-anchor reproduces each row's EXISTING hash to discover the key that wrote it, and re-hashes over the plaintext: hashing the stored column with the configured key instead produces a chain that no verifier can check, which is the signal that is supposed to mean somebody altered the record coming to mean the retention sweep ran. That defect was real, and it was invisible locally because it only appears in a deployment WITH a key - the CI environment has one and a developer machine often does not. The sweep's own marker row is stored encrypted like every other row.
 
 ### ADVERSARIAL-SECURITY-REVIEW — a review was performed, and what it found is recorded
 
 status: implemented
 sources: SOC 2 CC4.1, CC7.2; OWASP (design review)
-claim: An adversarial review of the whole build was performed during the hardening work, every finding was reproduced before it was fixed, and the register of findings — with severities, resolutions and the commits that closed them — is committed alongside the code. Twenty-seven findings, including four that disabled a control the repository claimed: the deployment ran as the role that row-level security does not bind, the blind escape hatch was a write grant on two tables, the quorum did not exclude the requester, and a merge made with the workflow's own token reached `main` with nothing verifying it.
-evidence: docs/security-review.md:1 expect:Security review; docs/security-review.md:52 expect:Twenty-seven findings; docs/security-review.md:98 expect:Residual and accepted risks
+claim: An adversarial review of the whole build was performed during the hardening work, every finding was reproduced before it was fixed, and the register of findings — with severities, resolutions and the commits that closed them — is committed alongside the code. Thirty-two findings, including four that disabled a control the repository claimed: the deployment ran as the role that row-level security does not bind, the blind escape hatch was a write grant on two tables, the quorum did not exclude the requester, and a merge made with the workflow's own token reached `main` with nothing verifying it.
+evidence: docs/security-review.md:1 expect:Security review; docs/security-review.md:52 expect:Thirty-two findings; docs/security-review.md:114 expect:Residual and accepted risks
 tests: docs/security-review.md
 note: The review was performed by an automated code reviewer running inside this repository, and the triage was done by the author. It is worth something and it is not the same thing as an independent review — see the next control, which is separate precisely so that the two are not conflated.
 

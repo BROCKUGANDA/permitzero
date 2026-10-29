@@ -104,7 +104,7 @@ flowchart LR
 | The alerts can actually fire            | Three series that were declared and never written are now produced; the delivery-lag gauge measures the outbox **row**, not the queue job, so a wedged dispatcher cannot read zero                                                                                                                                                                                                                         | `apps/api/src/observability.ts`, `packages/observability/test/`                |
 | Survives a provider or queue outage     | The drill points a second API instance at an unreachable database and asserts that readiness answers 503, a decision answers 503 rather than 500, the response leaks no driver detail, and the failed request leaves no half-written action; it also asserts an owed outbox event is retained rather than dropped, and that a leased row is not double-claimed or marked published without being published | `npm run drill:resilience`                                                     |
 | Nothing unproven is claimed             | 31 controls mapped to code and tests: 28 implemented, 1 partial, **2 absent** (an independent third-party review, and multi-region failover)                                                                                                                                                                                                                                                               | `docs/compliance/EVIDENCE.md`, `npm run compliance:gate`                       |
-| Test surface                            | 603 tests across 47 files, plus typecheck, lint at `--max-warnings=0`, format, gitleaks, the dependency gate, the evidence-map gate and the resilience drill — all wired into `npm run verify` and `.github/workflows/ci.yml`, which additionally runs a live SLO scrape against a running stack                                                                                                           | `npm run verify`, `.github/workflows/ci.yml`                                   |
+| Test surface                            | 606 tests across 47 files, plus typecheck, lint at `--max-warnings=0`, format, gitleaks, the dependency gate, the evidence-map gate and the resilience drill — all wired into `npm run verify` and `.github/workflows/ci.yml`, which additionally runs a live SLO scrape against a running stack                                                                                                           | `npm run verify`, `.github/workflows/ci.yml`                                   |
 
 **Read the honest parts too.** The model never issues a permit, publishes policy
 or calls a connector, and that is structural rather than a convention:
@@ -182,7 +182,7 @@ Agent ──POST /v1/actions──► API (Fastify) ──► Intake pipeline
 ### Delivery
 
 ```
-push / PR ──► CI: typecheck, lint, 603 tests, build, format, gitleaks,
+push / PR ──► CI: typecheck, lint, 606 tests, build, format, gitleaks,
                dependency gate, evidence-map gate, resilience drill,
                strict SLO report against a live stack
          │

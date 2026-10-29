@@ -65,9 +65,9 @@
 import { sql } from 'drizzle-orm';
 import { newId } from '@permitzero/domain';
 import {
-  AUDIT_HASH_VERSION_HMAC,
-  computeAuditHash,
   listActiveTenantIds,
+  reanchorAuditHash,
+  sealAuditEvent,
   verifyAuditChain,
   withTenantBlindTransaction,
 } from '@permitzero/db';
@@ -157,10 +157,6 @@ interface AuditRow {
 /** Milliseconds, because the audit hash is computed over a Date. */
 function truncateToMs(date: Date): Date {
   return new Date(Math.floor(date.getTime()));
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 function countRows(result: unknown): number {
@@ -272,16 +268,30 @@ async function purgeAuditChain(
   // 4. Compute the chain that will exist after the purge: the survivors,
   //    re-sequenced from 1 and re-linked. `sequence` is not covered by the
   //    hash, so only the LINK changes the hash.
+  //
+  //    The re-hash has to reproduce the row's ORIGINAL hash exactly, with
+  //    only the link changed. `reanchorAuditHash` does that by DISCOVERING
+  //    the key that wrote the row — the one under which its existing hash
+  //    reproduces — and re-hashing with it over the new link.
+  //
+  //    Doing it the obvious way instead — hashing the stored column with
+  //    the configured key — is wrong twice over: the stored column holds
+  //    the CIPHERTEXT when the deployment has a key (the hash covers the
+  //    plaintext), and the configured key is not necessarily the one that
+  //    wrote the row (the ring holds several during a rotation). Both
+  //    mistakes produce a chain that no longer verifies, which is the
+  //    signal that is supposed to mean "somebody altered the record" —
+  //    coming to mean "the retention sweep ran".
+  //
+  //    A row that cannot be reproduced is a row that is not what it
+  //    claims to be, and re-linking it would launder that into a
+  //    clean-looking chain. The tenant is refused instead.
   let previousHash: string | null = null;
   let sequence = 0;
   const relink: Array<{ eventId: string; sequence: number; previousHash: string | null; eventHash: string }> = [];
   for (const row of survivors) {
     sequence += 1;
-    // A row's own hash version decides whether it is keyed. A chain that
-    // mixes versions is not something this sweep may "fix": it re-hashes each
-    // row the way that row was hashed.
-    const keyed = row.hash_version === AUDIT_HASH_VERSION_HMAC;
-    const { hash } = computeAuditHash(
+    const rehashed = reanchorAuditHash(
       {
         tenantId,
         eventId: row.event_id,
@@ -293,11 +303,19 @@ async function purgeAuditChain(
         eventTime: new Date(Number(row.event_time_ms)),
         traceId: row.trace_id,
         policyRevisionId: row.policy_revision_id,
-        payload: asRecord(row.payload_redacted_json),
-        previousHash,
+        storedPayload: row.payload_redacted_json,
+        previousHash: row.previous_hash,
+        eventHash: row.event_hash,
       },
-      keyed ? hmacKey : null,
+      previousHash,
+      { hmacKey },
     );
+    if (!rehashed) {
+      throw new Error(
+        `refusing to purge the audit chain for tenant ${tenantId}: event ${row.event_id} cannot be reproduced with the available keys`,
+      );
+    }
+    const hash = rehashed.hash;
     if (Number(row.sequence) !== sequence || row.previous_hash !== previousHash || row.event_hash !== hash) {
       relink.push({ eventId: row.event_id, sequence, previousHash, eventHash: hash });
     }
@@ -337,6 +355,13 @@ async function purgeAuditChain(
   // 6. The marker. It is an ordinary append — the chain's own insert path
   //    assigns its sequence and checks its link — carrying the commitment to
   //    what was removed.
+  //
+  //    It is SEALED the way the repository seals a row: the hash over the
+  //    canonical plaintext, the payload stored encrypted. A marker written
+  //    any other way is a row in an encrypted table whose contents sit in
+  //    the clear — and the marker is the one row that says what was
+  //    deleted, which is exactly the row nobody should be able to edit in
+  //    peace.
   const boundary = removed[removed.length - 1];
   const boundaryHash = boundary?.event_hash ?? null;
   const markerId = newId('auditEvent');
@@ -350,9 +375,7 @@ async function purgeAuditChain(
     audit_retention_days: days,
     purged_at: now.toISOString(),
   };
-  const keyed =
-    survivors.length > 0 ? survivors[survivors.length - 1]?.hash_version === AUDIT_HASH_VERSION_HMAC : hmacKey !== null;
-  const marker = computeAuditHash(
+  const marker = sealAuditEvent(
     {
       tenantId,
       eventId: markerId,
@@ -367,7 +390,7 @@ async function purgeAuditChain(
       payload: markerPayload,
       previousHash,
     },
-    keyed ? hmacKey : null,
+    { hmacKey },
   );
   await tx.execute(sql`
     INSERT INTO public.audit_events
@@ -376,7 +399,7 @@ async function purgeAuditChain(
        trace_id, event_time, purged_at, expires_at)
     VALUES
       (${markerId}, ${tenantId}, ${AUDIT_PURGE_EVENT_TYPE}, NULL, NULL, 'SYSTEM', ${deps.config.operatorId},
-       NULL, ${JSON.stringify(markerPayload)}::jsonb, ${marker.hash}, ${previousHash}, ${marker.version},
+       NULL, ${JSON.stringify(marker.storedPayload)}::jsonb, ${marker.hash}, ${previousHash}, ${marker.version},
        ${traceId}, ${now.toISOString()}, ${now.toISOString()},
        ${new Date(now.getTime() + days * DAY_MS).toISOString()})
   `);

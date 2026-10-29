@@ -24,7 +24,7 @@ database layer and its migrations, the deployment scripts, the Docker Compose
 stack, the CI/CD workflows, and the operational tooling (janitor, drill,
 gates).
 
-**Method.** Three passes, in this order:
+**Method.** Four passes, in this order:
 
 1. **Automated adversarial review.** A code-reviewer integration posts findings
    against every pull request. Each finding was read, reproduced against the
@@ -39,6 +39,12 @@ gates).
    deployment rather than against a local checkout — a control that is
    "enforced" in the repository but disabled in the deployed stack is worse
    than one that is absent, because the map claims it.
+4. **Running the controls.** A control that has never been executed is a
+   configuration, not a control. The restore drill and the retention sweep
+   were both run against the live deployment, and both failed on first
+   contact — with the drill reporting a backup that was present, and the
+   sweep reporting a chain it had itself just broken. Those failures are
+   findings 28 to 32.
 
 **Out of scope.** Performance beyond what the drill measures; the third-party
 model provider's own implementation; the host operating system's own
@@ -49,7 +55,7 @@ runs in.
 
 ## 2. Findings
 
-Twenty-seven findings. Every one was reproduced before it was fixed.
+Thirty-two findings. Every one was reproduced before it was fixed.
 
 ### Deployment and secrets
 
@@ -92,6 +98,16 @@ Twenty-seven findings. Every one was reproduced before it was fixed.
 | 25  | Medium | The migration runner had no advisory lock. Two replicas booting together both read the same pending-migration snapshot, both applied the same file, and the loser crashed on the tracking table's primary key — a crash loop caused by nothing more than two pods starting at once.            | The read-apply-record sequence runs under a per-database advisory lock, taken and released on one reserved connection. The key is derived from the database name, because `pg_advisory_lock` is cluster-wide and a fixed key would serialise unrelated databases.      |
 | 26  | Low    | The secret scan read files only, so a secret that was committed and later deleted from the working tree was never found — and removing a secret from a file does not un-leak it.                                                                                                               | The scan runs over the history, from a checkout with `fetch-depth: 0`. The working-tree scan is kept separately, because a shallow checkout has no history to walk and a history scan over one examines almost nothing while looking as though it examined everything. |
 | 27  | Low    | The dependency gate read an npm _configuration error_ as a clean audit. npm reports its own failures as a JSON envelope, which parses, has no `vulnerabilities` key, and therefore yields zero findings — and a zero-finding report passes. This is how four real advisories had been retired. | A report that is not a report fails the gate. The four exceptions are restored, named and reasoned.                                                                                                                                                                    |
+
+### Recovery and retention
+
+| #   | Sev    | Finding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Resolution                                                                                                                                                                                                                                                                       |
+| --- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 28  | High   | The retention sweep re-anchored the audit chain by hashing the **stored** payload column with the **configured** key. The hash covers the canonical _plaintext_, so in a deployment with a key the re-linked row carried a digest no verifier could reproduce — and the sweep's own signal that "somebody altered the record" would have come to mean "the retention sweep ran". The second half is worse under rotation: the configured key is not necessarily the one that wrote the row. | The re-anchor reproduces each row's _existing_ hash to discover the key that wrote it, and re-hashes over the decrypted plaintext. A row that no key reproduces is refused rather than re-linked, because re-linking it would launder the alteration into a clean-looking chain. |
+| 29  | Medium | The restore drill reported "no base.tar.gz" for a backup that was present, complete and verified. `pg_basebackup` creates the backup directory mode 0700 owned by the container's postgres user, so the deploying user on the host cannot traverse into it — and a host-side existence check reports a backup that is sitting there as a missing one.                                                                                                                                       | The check runs inside the container, where the backup is readable. A drill that reports a false outage is a drill that gets ignored.                                                                                                                                             |
+| 30  | Medium | The drill aimed its recovery target two seconds past the marker, on an idle database where no commit exists in that window. The recovery replayed everything available, found no commit at or after the target, and refused: "recovery ended before configured recovery target was reached". The drill was asking for a point in time the WAL had not reached.                                                                                                                              | A second marker is written in its own later transaction, and the target is that marker's timestamp: strictly after the first marker's commit, and a commit the WAL actually contains.                                                                                            |
+| 31  | Medium | The drill could not delete what it made. The restored database's files belong to the container's postgres user, so the deploying user could not remove them — and /tmp is sticky, so a directory the deploying user no longer owns could not be removed from it either. Every failed run left a full copy of the production database in a world-readable temporary directory.                                                                                                               | The removal is done from inside a container, and the directory is handed back to the deploying user first. The drill also sweeps the leftovers of earlier runs, so a run that dies hard enough to skip its own cleanup does not leave the copy behind.                           |
+| 32  | Medium | The drill connected to the restored cluster as `postgres`. The backup carries the production cluster's roles, and the production cluster's superuser is `$PZ_PG_USER` — there is no `postgres` role in it at all. Every query failed with "role postgres does not exist", and the readiness loop read each failure as "still recovering", so it waited out the full timeout against a server that had already promoted.                                                                     | The drill connects as the role the cluster actually has. A readiness check that cannot distinguish "not ready" from "cannot ask" is not a readiness check.                                                                                                                       |
 
 ---
 
