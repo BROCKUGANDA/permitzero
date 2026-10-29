@@ -151,7 +151,7 @@ export interface StepUpResponse {
  * encrypted form, so a lost phone means enrolling again — there is no
  * recovery path, and there is deliberately no support path either.
  */
-export async function enrolMfa(deps: MfaDeps, principal: Principal): Promise<EnrolResponse> {
+export async function enrolMfa(deps: MfaDeps, principal: Principal, code?: string): Promise<EnrolResponse> {
   requireHumanUser(principal);
   if (!deps.enabled) throw new ConflictError('MFA is disabled on this deployment.');
   const key = masterKey(deps);
@@ -169,10 +169,18 @@ export async function enrolMfa(deps: MfaDeps, principal: Principal): Promise<Enr
   // secret belongs to the person, and there is one of it. Enrolling again
   // here would mean a second authenticator entry for the same human, which is
   // not what the person asked for.
-  if (!state.row && state.enrolledAt) {
-    throw new ConflictError(
-      'This account is already enrolled for MFA in another workspace. Remove that enrolment first.',
-    );
+  if (state.enrolledAt) {
+    if (!state.row || !code) throw new ForbiddenError('A current MFA code is required to replace this enrolment.');
+    const currentSecret = decryptSecret(state.row.secretEncrypted, key);
+    try {
+      spendCode(state.row.lastCodeHash, key, currentSecret, code, now);
+    } catch (err) {
+      if (err instanceof ValidationError) throw new ForbiddenError('The current MFA code is not valid.');
+      throw err;
+    }
+    await scope(async (ex) => {
+      await recordConsumedMfaCode(ex, tenantId, principal.actorId, hashConsumedCode(key, code.trim()));
+    });
   }
 
   try {
@@ -302,8 +310,10 @@ function spendCode(lastCodeHash: string | null, key: Buffer, secret: string, cod
 }
 
 /** Remove the enrolment: the secret goes, and the account is not enrolled. */
-export async function removeMfa(deps: MfaDeps, principal: Principal): Promise<{ deleted: true }> {
+export async function removeMfa(deps: MfaDeps, principal: Principal, code?: string): Promise<{ deleted: true }> {
   requireHumanUser(principal);
+  const key = masterKey(deps);
+  const now = deps.clock?.() ?? new Date();
   const tenantId = principal.tenantId;
   return tenantScope(
     deps.db,
@@ -311,6 +321,17 @@ export async function removeMfa(deps: MfaDeps, principal: Principal): Promise<{ 
   )(async (ex) => {
     const row = await getMfaSecretByUserId(ex, tenantId, principal.actorId);
     if (!row) throw new NotFoundError('There is no MFA enrolment to remove.');
+    const enrolledAt = await getUserMfaEnrolledAt(ex, principal.actorId);
+    if (enrolledAt) {
+      if (!code) throw new ForbiddenError('A current MFA code is required to remove this enrolment.');
+      try {
+        spendCode(row.lastCodeHash, key, decryptSecret(row.secretEncrypted, key), code, now);
+      } catch (err) {
+        if (err instanceof ValidationError) throw new ForbiddenError('The current MFA code is not valid.');
+        throw err;
+      }
+      await recordConsumedMfaCode(ex, tenantId, principal.actorId, hashConsumedCode(key, code.trim()));
+    }
     await deleteMfaSecret(ex, tenantId, principal.actorId);
     await setUserMfaEnrolledAt(ex, principal.actorId, null);
     return { deleted: true };
@@ -425,6 +446,8 @@ const mfaCodeBodySchema = z
   })
   .strict();
 
+const mfaReenrolBodySchema = z.object({ code: mfaCodeBodySchema.shape.code.optional() }).strict();
+
 export async function meRoutes(app: ZodFastifyInstance, ctx: AppContext): Promise<void> {
   app.addHook('preHandler', async (request) => {
     request.principal = await authenticateToken(ctx.runtime, request.headers.authorization, new Date());
@@ -439,10 +462,10 @@ export async function meRoutes(app: ZodFastifyInstance, ctx: AppContext): Promis
   app.post(
     '/me/mfa/enrol',
     {
-      schema: { response: { 200: enrolResponseSchema } },
+      schema: { body: mfaReenrolBodySchema, response: { 200: enrolResponseSchema } },
       config: { rateLimit: authBudget },
     },
-    async (request) => enrolMfa(deps, request.principal),
+    async (request) => enrolMfa(deps, request.principal, request.body.code),
   );
 
   app.post(
@@ -466,9 +489,9 @@ export async function meRoutes(app: ZodFastifyInstance, ctx: AppContext): Promis
   app.delete(
     '/me/mfa',
     {
-      schema: { response: { 200: deleteResponseSchema } },
+      schema: { body: mfaReenrolBodySchema, response: { 200: deleteResponseSchema } },
       config: { rateLimit: authBudget },
     },
-    async (request) => removeMfa(deps, request.principal),
+    async (request) => removeMfa(deps, request.principal, request.body.code),
   );
 }
