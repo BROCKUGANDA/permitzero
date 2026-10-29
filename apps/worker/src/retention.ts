@@ -186,7 +186,7 @@ async function activeLegalHold(tx: DbTransaction, tenantId: string, now: Date): 
     SELECT legal_hold_id, reason, operator_id, placed_at
       FROM public.legal_holds
      WHERE tenant_id = ${tenantId}
-       AND (released_at IS NULL OR released_at > ${now.toISOString()})
+       AND (released_at IS NULL OR released_at > now())
      ORDER BY placed_at ASC
      LIMIT 1
   `);
