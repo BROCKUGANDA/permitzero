@@ -267,7 +267,21 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
   const authBudget = presets.auth;
   const sharedBudgets = await createSharedBudgets(deps.config, presets, metrics, app.log);
   let authLimiter: ReturnType<FastifyInstance['createRateLimit']> | null = null;
+  // Local floor for failed authentications, keyed on the client address.
+  // The shared counter (Redis) is charged in onResponse for 401s; this map
+  // enforces the floor in onRequest so a burst of distinct bad tokens
+  // cannot pass simply because Redis is unreachable. (Finding 9.)
+  const failedIpLocal = new Map<string, { count: number; resetAt: number }>();
   app.addHook('onRequest', async (request, reply) => {
+    const hadAuthHeader = Boolean(request.headers.authorization);
+    if (hadAuthHeader) {
+      const now = Date.now();
+      const entry = failedIpLocal.get(request.ip);
+      if (entry && entry.resetAt > now && entry.count >= authBudget.max) {
+        reply.header('retry-after', String(Math.ceil((entry.resetAt - now) / 1000)));
+        throw new RateLimitedError(Math.ceil((entry.resetAt - now) / 1000));
+      }
+    }
     // The alert sink presents the alerting secret rather than a tenant
     // credential, so it is not a credential-bearing request and must not be
     // charged against the credential budget. It stays in the global limit.
@@ -340,6 +354,38 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
     }
     reply.header('retry-after', String(local.ttlInSeconds));
     throw new RateLimitedError(local.ttlInSeconds);
+  });
+
+  app.addHook('onResponse', async (request, reply) => {
+    if (reply.statusCode !== 401) return;
+    if (!request.headers.authorization) return;
+    // Record the failed authentication against the local IP floor. The shared
+    // counter is charged here too when Redis is available, so the next
+    // onRequest from this IP sees the budget refused — even when Redis is
+    // down, the local floor above is what enforces it.
+    const now = Date.now();
+    let entry = failedIpLocal.get(request.ip);
+    if (!entry || entry.resetAt <= now) {
+      entry = { count: 0, resetAt: now + authBudget.timeWindow };
+    }
+    entry.count++;
+    failedIpLocal.set(request.ip, entry);
+    // Best-effort cleanup of expired entries to avoid unbounded growth.
+    if (failedIpLocal.size > 1000) {
+      for (const [ip, e] of failedIpLocal) {
+        if (e.resetAt <= now) failedIpLocal.delete(ip);
+      }
+    }
+    const shared = await sharedBudgets.failedAuth?.charge(request.ip).catch(() => null);
+    if (shared) {
+      if (shared.unavailable) {
+        metrics.sharedRateLimitFailures.inc();
+      } else if (!shared.allowed) {
+        metrics.sharedRateLimitCharges.inc({ scope: 'auth-failed-ip', outcome: 'refused' } as never);
+      } else {
+        metrics.sharedRateLimitCharges.inc({ scope: 'auth-failed-ip', outcome: 'allowed' } as never);
+      }
+    }
   });
 
   // The limiter's own Redis connection, closed with the app. A process that
@@ -604,6 +650,9 @@ export interface SharedBudgets {
   auth: SharedRateLimiter | null;
   /** The mutation budget, shared across replicas. Null when there is no Redis. */
   mutation: SharedRateLimiter | null;
+  /** The IP-keyed budget for failed authentications — without it, each bad
+   * token gets a fresh credential bucket. Null when there is no Redis. */
+  failedAuth: SharedRateLimiter | null;
   close: () => Promise<void>;
 }
 
@@ -648,7 +697,7 @@ export async function createSharedBudgets(
   const redisUrl = config.redisUrl;
   if (!redisUrl) {
     metrics.sharedRateLimitEnabled.set(0);
-    return { auth: null, mutation: null, close: async () => undefined };
+    return { auth: null, mutation: null, failedAuth: null, close: async () => undefined };
   }
   const client = new IORedis(redisUrl, limiterRedisOptions());
   // ioredis emits 'error' on every failed reconnect, and an unhandled 'error'
@@ -685,6 +734,13 @@ export async function createSharedBudgets(
       scope: 'mutation',
       max: presets.mutation.max,
       timeWindowMs: presets.mutation.timeWindow,
+    }),
+    failedAuth: new SharedRateLimiter({
+      store,
+      prefix,
+      scope: 'auth-failed-ip',
+      max: presets.auth.max,
+      timeWindowMs: presets.auth.timeWindow,
     }),
     close: async () => {
       client.disconnect();
