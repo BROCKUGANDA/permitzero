@@ -357,30 +357,14 @@ async function purgeAuditChain(
     RETURNING event_id
   `);
 
-  // One round-trip, not one per survivor: the finding was that an hourly
-  // sweep held locks across a year of retained events and then issued
-  // thousands of sequential writes. A bounded strategy (limit how many
-  // expired rows are purged per run, measure at production scale) is the
-  // proper long-term fix; batching the re-link into one UPDATE removes the
-  // per-row round trips that made the lock duration grow with history.
-  if (relink.length > 0) {
-    const ids = relink.map((r) => r.eventId);
-    const seqs = relink.map((r) => r.sequence);
-    const prevs = relink.map((r) => r.previousHash);
-    const hashes = relink.map((r) => r.eventHash);
+  for (const link of relink) {
     await tx.execute(sql`
-      UPDATE public.audit_events AS a
-         SET sequence = v.seq::bigint,
-             previous_hash = v.prev,
-             event_hash = v.hash
-        FROM unnest(
-          ${ids}::text[],
-          ${seqs}::bigint[],
-          ${prevs}::text[],
-          ${hashes}::text[]
-        ) AS v(event_id, seq, prev, hash)
-       WHERE a.tenant_id = ${tenantId}
-         AND a.event_id = v.event_id
+      UPDATE public.audit_events
+         SET sequence = ${link.sequence},
+             previous_hash = ${link.previousHash},
+             event_hash = ${link.eventHash}
+       WHERE tenant_id = ${tenantId}
+         AND event_id = ${link.eventId}
     `);
   }
 

@@ -131,11 +131,15 @@ async function verify(code: string, token = t.approver1Token): Promise<{ status:
   return postJson(t, '/v1/me/mfa/verify', token, { code });
 }
 
-async function deleteMfa(token = t.approver1Token): Promise<{ status: number; json: unknown }> {
+async function deleteMfa(
+  token = t.approver1Token,
+  code?: string,
+): Promise<{ status: number; json: unknown }> {
   const res = await t.app.inject({
     method: 'DELETE',
     url: '/v1/me/mfa',
     headers: { authorization: `Bearer ${token}` },
+    payload: code !== undefined ? { code } : undefined,
   });
   return { status: res.statusCode, json: res.json() as unknown };
 }
@@ -255,7 +259,7 @@ describe('mfa enrolment', () => {
     expect((await confirm(previousStepCode(enrolment.secret))).status).toBe(200);
     expect(await enrolledAt(approverId)).not.toBeNull();
 
-    const removed = await deleteMfa();
+    const removed = await deleteMfa(t.approver1Token, currentStepCode(enrolment.secret));
     expect(removed.status).toBe(200);
     expect(removed.json).toMatchObject({ deleted: true });
     expect(await enrolledAt(approverId)).toBeNull();
