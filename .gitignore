@@ -62,3 +62,6 @@ infra/data/
 
 # Scratch / working notes
 .scratch/
+
+# The agent skill lockfile: written by the local tooling, not by the project.
+skills-lock.json
