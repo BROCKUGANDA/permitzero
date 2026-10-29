@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS public.mfa_secrets (
   created_at       timestamptz NOT NULL DEFAULT now(),
   last_verified_at timestamptz,
   last_code_hash   text,
+  last_used_step   bigint,
   CONSTRAINT chk_mfa_secrets_encrypted_shape
     CHECK (secret_encrypted ~ '^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$')
 );
@@ -86,6 +87,10 @@ COMMENT ON COLUMN public.mfa_secrets.last_verified_at IS
 
 COMMENT ON COLUMN public.mfa_secrets.last_code_hash IS
   'Keyed fingerprint of the last TOTP code this account spent. A code is valid for a whole thirty-second step, so without this a captured code could be presented twice.';
+
+ALTER TABLE public.mfa_secrets ADD COLUMN IF NOT EXISTS last_used_step bigint;
+COMMENT ON COLUMN public.mfa_secrets.last_used_step IS
+  'The TOTP step counter of the last accepted code. A code is accepted only when its step exceeds this value — otherwise a replayed or window-stale code from an earlier step could be accepted after a later step was used.';
 
 -- One secret per person. The index is the database's statement of that, and
 -- it is what makes a second tenant unable to enrol a second secret for the

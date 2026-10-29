@@ -40,6 +40,7 @@ import { z } from 'zod';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError, newId } from '@permitzero/domain';
 import type { Principal } from '@permitzero/domain';
 import {
+  consumeMfaCodeStep,
   dbErrorCode,
   deleteMfaSecret,
   getMfaSecretByUserId,
@@ -48,6 +49,7 @@ import {
   recordMfaVerification,
   setUserMfaEnrolledAt,
   tenantScope,
+  touchMfaVerifiedAt,
   upsertMfaSecret,
 } from '@permitzero/db';
 import type { Db } from '@permitzero/db';
@@ -65,6 +67,7 @@ import {
   issueMfaAssertion,
   totpUri,
   verifyTotpCode,
+  verifyTotpCodeStep,
 } from '@permitzero/policy';
 import type { AppContext, ZodFastifyInstance } from '../app.js';
 import { rateLimitPresets } from '../app.js';
@@ -205,13 +208,25 @@ export async function enrolMfa(
     if (!currentSecret) {
       throw new ConflictError('The stored MFA secret could not be read. Enrol again.');
     }
-    spendCode(state.row.lastCodeHash, key, currentSecret, raw, now);
+    const reEnrolStep = verifyTotpCodeStep(currentSecret, raw, now.getTime());
+    if (reEnrolStep === null) {
+      throw new ValidationError('That code is not valid.');
+    }
   }
 
   try {
     await scope(async (ex) => {
       if (state.enrolledAt && state.row) {
-        await recordConsumedMfaCode(ex, tenantId, principal.actorId, hashConsumedCode(key, (code as string).trim()));
+        const rawInner = (code as string).trim();
+        const stepInner = verifyTotpCodeStep(decryptSecret(state.row.secretEncrypted, key) as string, rawInner, now.getTime());
+        if (stepInner === null) {
+          throw new ValidationError('That code is not valid.');
+        }
+        const hashInner = hashConsumedCode(key, rawInner);
+        const ok = await consumeMfaCodeStep(ex, tenantId, principal.actorId, stepInner, hashInner);
+        if (!ok) {
+          throw new ValidationError('That code has already been used. Enter the code your authenticator is showing now.');
+        }
       }
       await upsertMfaSecret(ex, {
         id: newId('credential'),
@@ -274,11 +289,18 @@ export async function confirmMfa(deps: MfaDeps, principal: Principal, code: stri
     if (!secret) {
       throw new ConflictError('The stored MFA secret could not be read. Enrol again.');
     }
-    await spendCode(row.lastCodeHash, key, secret, code, now);
+    const step = verifyTotpCodeStep(secret, code, now.getTime());
+    if (step === null) {
+      throw new ValidationError('That code is not valid.');
+    }
+    const codeHash = hashConsumedCode(key, code.trim());
+    const consumed = await consumeMfaCodeStep(ex, tenantId, principal.actorId, step, codeHash);
+    if (!consumed) {
+      throw new ValidationError('That code has already been used. Enter the code your authenticator is showing now.');
+    }
     await setUserMfaEnrolledAt(ex, principal.actorId, now);
-    // The code is spent. `last_verified_at` is deliberately NOT set here:
-    // confirming says "I hold the secret", not "I am there right now".
-    await recordConsumedMfaCode(ex, tenantId, principal.actorId, hashConsumedCode(key, code.trim()));
+    // `last_verified_at` is deliberately NOT set here: confirming says
+    // "I hold the secret", not "I am there right now".
     return { enrolled: true, enrolled_at: now };
   });
 }
@@ -310,11 +332,16 @@ export async function verifyMfa(deps: MfaDeps, principal: Principal, code: strin
     if (!secret) {
       throw new ConflictError('The stored MFA secret could not be read. Enrol again.');
     }
-    await spendCode(row.lastCodeHash, key, secret, code, now);
-    await recordMfaVerification(ex, tenantId, principal.actorId, {
-      now,
-      codeHash: hashConsumedCode(key, code.trim()),
-    });
+    const step = verifyTotpCodeStep(secret, code, now.getTime());
+    if (step === null) {
+      throw new ValidationError('That code is not valid.');
+    }
+    const codeHash = hashConsumedCode(key, code.trim());
+    const consumed = await consumeMfaCodeStep(ex, tenantId, principal.actorId, step, codeHash);
+    if (!consumed) {
+      throw new ValidationError('That code has already been used. Enter the code your authenticator is showing now.');
+    }
+    await touchMfaVerifiedAt(ex, tenantId, principal.actorId, now);
     return { verified: true, verified_at: now };
   });
 }
@@ -368,8 +395,15 @@ export async function removeMfa(
       if (!currentSecret) {
         throw new ConflictError('The stored MFA secret could not be read. Enrol again.');
       }
-      spendCode(row.lastCodeHash, key, currentSecret, raw, now);
-      await recordConsumedMfaCode(ex, tenantId, principal.actorId, hashConsumedCode(key, raw));
+      const step = verifyTotpCodeStep(currentSecret, raw, now.getTime());
+      if (step === null) {
+        throw new ValidationError('That code is not valid.');
+      }
+      const codeHash = hashConsumedCode(key, raw);
+      const ok = await consumeMfaCodeStep(ex, tenantId, principal.actorId, step, codeHash);
+      if (!ok) {
+        throw new ValidationError('That code has already been used. Enter the code your authenticator is showing now.');
+      }
     }
     await deleteMfaSecret(ex, tenantId, principal.actorId);
     await setUserMfaEnrolledAt(ex, principal.actorId, null);

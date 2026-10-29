@@ -275,14 +275,57 @@ export function totpCode(secret: string, atMs: number): string {
   return (binary % 10 ** TOTP_DIGITS).toString().padStart(TOTP_DIGITS, '0');
 }
 
+/** The TOTP step counter for the instant `atMs`. */
+export function totpStep(atMs: number): number {
+  return Math.max(0, Math.floor(atMs / 1000 / TOTP_PERIOD_SECONDS));
+}
+
 /**
- * True when `code` is the TOTP code for the step containing `atMs`, or for
- * one of the `window` steps either side of it.
+ * The TOTP step counter of `code` if it matches `secret` in the window around
+ * `atMs`, otherwise null.
  *
  * Every candidate step is compared and no comparison ends the search, so the
  * time taken does not depend on WHICH step matched. The comparison itself is
  * `timingSafeEqual`, which refuses buffers of different lengths — hence the
  * length check first, on a value whose length is not secret.
+ *
+ * Returning the step rather than a boolean lets the caller store the step and
+ * accept a code only when its step exceeds the stored one — without that, a
+ * code from an earlier step could be replayed after a later step was accepted,
+ * because the window is ±1 and only the last hash was remembered.
+ */
+export function verifyTotpCodeStep(
+  secret: string,
+  code: string,
+  atMs: number,
+  window: number = TOTP_DEFAULT_WINDOW,
+): number | null {
+  const candidate = typeof code === 'string' ? code.trim() : '';
+  if (!/^\d{6}$/.test(candidate)) return null;
+  const provided = Buffer.from(candidate, 'utf8');
+  const steps = Math.max(0, Math.floor(window));
+  const base = totpStep(atMs);
+  let matchedStep: number | null = null;
+  for (let offset = -steps; offset <= steps; offset++) {
+    let expected: string;
+    try {
+      expected = totpCode(secret, atMs + offset * TOTP_PERIOD_SECONDS * 1000);
+    } catch {
+      return null;
+    }
+    const expectedBytes = Buffer.from(expected, 'utf8');
+    // Constant-time per candidate, constant-time over the window: which step
+    // matched does not affect how long the function takes.
+    if (expectedBytes.length === provided.length && timingSafeEqual(expectedBytes, provided)) {
+      matchedStep = base + offset;
+    }
+  }
+  return matchedStep;
+}
+
+/**
+ * True when `code` is the TOTP code for the step containing `atMs`, or for
+ * one of the `window` steps either side of it.
  */
 export function verifyTotpCode(
   secret: string,
@@ -290,24 +333,7 @@ export function verifyTotpCode(
   atMs: number,
   window: number = TOTP_DEFAULT_WINDOW,
 ): boolean {
-  const candidate = typeof code === 'string' ? code.trim() : '';
-  if (!/^\d{6}$/.test(candidate)) return false;
-  const provided = Buffer.from(candidate, 'utf8');
-  const steps = Math.max(0, Math.floor(window));
-  let matched = false;
-  for (let offset = -steps; offset <= steps; offset++) {
-    let expected: string;
-    try {
-      expected = totpCode(secret, atMs + offset * TOTP_PERIOD_SECONDS * 1000);
-    } catch {
-      return false;
-    }
-    const expectedBytes = Buffer.from(expected, 'utf8');
-    if (expectedBytes.length === provided.length && timingSafeEqual(expectedBytes, provided)) {
-      matched = true;
-    }
-  }
-  return matched;
+  return verifyTotpCodeStep(secret, code, atMs, window) !== null;
 }
 
 /**
