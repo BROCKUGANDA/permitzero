@@ -78,7 +78,17 @@ cleanup() {
   # somebody could connect to.
   docker rm -f "$DRILL_NAME" >/dev/null 2>&1 || true
   if [ -n "$DRILL_DATA" ] && [ -d "$DRILL_DATA" ]; then
-    rm -rf "$DRILL_DATA" || true
+    # The restored database's files belong to the container's postgres user,
+    # not to the deploying user, so the host cannot delete them: a directory
+    # owned by somebody else, holding files with restrictive permissions, is
+    # not removable by an unprivileged user even when its parent is.
+    #
+    # The removal is therefore done from inside a container, for the same
+    # reason the restore was. `--entrypoint sh` bypasses the image's
+    # entrypoint so nothing chowns or initialises anything on the way past.
+    docker run --rm --entrypoint sh -v "$DRILL_DATA:/d" postgres:16-alpine \
+      -c 'rm -rf /d/* /d/.[!.]*' >/dev/null 2>&1 || true
+    rmdir "$DRILL_DATA" >/dev/null 2>&1 || rm -rf "$DRILL_DATA" >/dev/null 2>&1 || true
   fi
   # The scratch table. The marker is evidence DURING the drill; afterwards it
   # is litter in the production schema.
@@ -154,16 +164,33 @@ CREATE TABLE IF NOT EXISTS pz_restore_drill_marker (
 INSERT INTO pz_restore_drill_marker (marker) VALUES ('$MARKER');
 SQL
 
-MARKER_TIME=$($COMPOSE exec -T postgres psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -tAc \
-  "SELECT to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.MS') || '+00'
-     FROM pz_restore_drill_marker WHERE marker = '$MARKER'" | tr -d '[:space:]')
-[ -n "$MARKER_TIME" ] || fail "the marker row was not written."
+# The marker's time, as epoch seconds.
+#
+# The epoch is the form the recovery target is COMPUTED from, and it is
+# computed arithmetically rather than by re-parsing a formatted timestamp.
+#
+# The earlier version formatted the timestamp as text and then asked `date`
+# to add two seconds to it, and the two disagreed: `tr -d '[:space:]'` ate
+# the space between the date and the time, so the value handed to the
+# database was `2026-10-2913:43:16.959+00` — not a timestamp at all, and
+# the restored server refused to start with it. A fallback quietly reused
+# the marker's own time as the target, which would have made the drill
+# assert less than it claimed to.
+#
+# Seconds of arithmetic have one meaning: the target is two seconds after
+# the marker, and there is no format for the two to disagree about.
+MARKER_EPOCH=$($COMPOSE exec -T postgres psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -tAc \
+  "SELECT floor(extract(epoch from written_at))::bigint
+     FROM pz_restore_drill_marker WHERE marker = '$MARKER'" | tr -dc '0-9')
+[ -n "$MARKER_EPOCH" ] || fail "the marker row was not written."
 
 # The recovery target is AFTER the marker's commit time, so the recovery
 # replays past it and the marker is inside the restored copy. Two seconds of
 # margin: the marker's `written_at` is taken when the row is written and the
 # commit happens after it.
-TARGET_TIME="$(date -u -d "$MARKER_TIME +2 seconds" '+%Y-%m-%d %H:%M:%S.%3N+00' 2>/dev/null || echo "$MARKER_TIME")"
+TARGET_EPOCH=$((MARKER_EPOCH + 2))
+TARGET_TIME="$(date -u -d "@$TARGET_EPOCH" '+%Y-%m-%d %H:%M:%S+00')"
+MARKER_TIME="$(date -u -d "@$MARKER_EPOCH" '+%Y-%m-%d %H:%M:%S+00')"
 log "   marker written at $MARKER_TIME; recovery target $TARGET_TIME"
 
 # --- 3. the WAL, forced and archived ---------------------------------------
