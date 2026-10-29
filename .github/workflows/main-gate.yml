@@ -1,0 +1,90 @@
+name: Main gate
+
+# The reconciliation for a commit that reaches main without a CI run.
+#
+# A merge performed with the repository's GITHUB_TOKEN does not trigger a push
+# workflow, so a commit landed that way has no CI run of its own. The
+# Auto-promote workflow dispatches one as soon as it sees the merge — but a
+# merge can land long after that step ran, because GitHub's auto-merge queue
+# applies the branch protection rules itself and the pull request can sit
+# behind a human's approval for hours.
+#
+# This workflow closes that gap. It runs on a schedule, and it does one thing:
+# if main's HEAD has not been tested by a CI run, it dispatches one.
+#
+# It is a reconciliation, not a gate. The gate is still CI's own result: this
+# workflow cannot make a commit pass, it can only make sure the commit is
+# TESTED. A commit whose CI fails stays undeployable, and the Deploy workflow
+# refuses it.
+on:
+  schedule:
+    # Every fifteen minutes. The Deploy workflow's own gate is what keeps an
+    # unverified commit from shipping, so this interval is how long a commit
+    # can sit on main untested — not how long it can sit undeployed, which is
+    # the Deploy workflow's own decision.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Dispatching CI is the whole point of this workflow.
+  actions: write
+
+jobs:
+  reconcile:
+    name: Make sure main's head is tested
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    # The group is SHARED with the Auto-promote workflow's `gate` job.
+    # Concurrency groups are unique within the REPOSITORY, not within a
+    # workflow, so the two dispatchers cannot both look at an untested main
+    # head and both dispatch a run for it. On a single shared runner that
+    # race costs a full CI cycle every time it is hit.
+    concurrency:
+      group: gate-main
+      cancel-in-progress: false
+    steps:
+      - name: Dispatch CI if main's head is untested
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+
+          HEAD_SHA=$(gh api "repos/$REPO/commits/main" --jq '.sha' 2>/dev/null || echo "")
+          if [ -z "$HEAD_SHA" ]; then
+            echo "could not read main's head commit" >&2
+            exit 1
+          fi
+          echo "main is at $HEAD_SHA"
+
+          # Has main's head been TESTED? "Tested" means a CI run against
+          # main for that commit, whether it passed or failed: a failing
+          # commit is still a tested commit, and re-running it every fifteen
+          # minutes would spend the runner on a deterministic failure
+          # without changing anything. Whether the commit may be SHIPPED is
+          # the Deploy workflow's decision, not this one's.
+          #
+          # A run for a pull request's merge ref does not count — it has the
+          # wrong head branch, and the Deploy workflow rejects it. A cancelled
+          # run does not count either: it tested nothing.
+          #
+          # A failed LOOKUP is a failure, not an absence: treating it as an
+          # absence would dispatch a duplicate run every time the API
+          # hiccuped.
+          TESTED=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=20" \
+            --jq '[.workflow_runs[] | select(.name == "CI" and .head_branch == "main" and (.event == "push" or .event == "workflow_dispatch") and .conclusion != "cancelled")] | length' \
+            2>/dev/null) || {
+              echo "could not read the run list for $HEAD_SHA" >&2
+              exit 1
+            }
+          if [ "${TESTED:-0}" != "0" ]; then
+            echo "main's head has already been tested by a CI run; nothing to do"
+            exit 0
+          fi
+
+          echo "main's head has not been tested; dispatching CI for it"
+          gh workflow run ci.yml --ref main \
+            || { echo "could not dispatch CI for $HEAD_SHA" >&2; exit 1; }
+          echo "CI dispatched for $HEAD_SHA"

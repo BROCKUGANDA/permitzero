@@ -46,12 +46,18 @@ permissions:
   pull-requests: write
   # The gate reads the check runs of the head commit.
   checks: read
-  # The gate also reads the COMPLETED RUN to find which pull request it
-  # belonged to. Without this the lookup is refused and every promotion
-  # silently stops — a permission error and "there was nothing to promote"
-  # look the same from the outside, which is why the lookup's failure is now
-  # reported rather than swallowed.
-  actions: read
+  # The gate reads the COMPLETED RUN to find which pull request it belonged
+  # to, and dispatches CI on the merge commit.
+  #
+  # The read needs Actions access, or the lookup is refused and every
+  # promotion silently stops — a permission error and "there was nothing to
+  # promote" look the same from the outside, which is why the lookup's
+  # failure is now reported rather than swallowed.
+  #
+  # The write is for the dispatch: a merge performed with the workflow's
+  # token does not trigger CI, so the commit it lands on main would never be
+  # gated. See the `gate` job below.
+  actions: write
 
 jobs:
   resolve:
@@ -73,20 +79,14 @@ jobs:
         id: targets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # The repository every `gh` call is about.
-          #
-          # Without it, `gh` infers the repository from the git remote of the
-          # current directory — so the command only worked because a checkout
-          # happened to be lying there. On a fresh runner, or after the host
-          # janitor cleared the runner's work directory, there is no remote,
-          # `gh` fails, and the step aborts under `set -e`. It also meant a
-          # pull_request-triggered run silently skipped every pull request
-          # whose repository could not be inferred.
+          # The repository every `gh` call is about. See the note in the
+          # resolution step: without it, `gh` infers the repository from a
+          # git remote that may not exist on this runner.
           GH_REPO: ${{ github.repository }}
           # The same repository, under the name the `gh api` path uses. `gh`
           # reads GH_REPO for its own default, but the URL in the command is
-          # built by the shell, and an undefined variable there is a step that
-          # aborts before it can do anything.
+          # built by the shell, and an undefined variable there is a step
+          # that aborts before it can do anything.
           REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -176,8 +176,11 @@ jobs:
     concurrency:
       group: auto-promote-pr-${{ needs.resolve.outputs.prs }}
       cancel-in-progress: false
+    outputs:
+      promoted: ${{ steps.eligible.outputs.promoted }}
     steps:
       - name: Check whether these pull requests are eligible
+        id: eligible
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -191,6 +194,12 @@ jobs:
             "SLO report (live scrape, strict)"
             "Secret scan (gitleaks)"
           )
+
+          # The pull requests that actually got a merge registered. Only
+          # those are worth waiting for: a human-authored pull request fails
+          # the author check below and never reaches the merge, and waiting
+          # for one would hold a runner slot for nothing.
+          PROMOTED=""
 
           for PR in ${PRS:-}; do
             echo "=== pull request $PR ==="
@@ -246,13 +255,6 @@ jobs:
             # SHA. A check that passed on an earlier commit says nothing about
             # the code being merged.
             #
-            # And not a COUNT of failures. The count was wrong in both
-            # directions: it counted the checks that had not reported yet as
-            # failures — which includes this workflow's own in-progress
-            # check-run, so the gate always declined — and an empty check list
-            # counted as zero failures, so the gate would have promoted a pull
-            # request on which nothing at all had been verified.
-            #
             # What is required instead is that each of the three named
             # required checks is PRESENT and SUCCESSFUL on the head commit.
             # A missing one, an unfinished one and a red one are all reasons
@@ -290,6 +292,149 @@ jobs:
             # If the merge cannot happen, the request stays queued and GitHub
             # tells us why.
             echo "enabling auto-merge"
-            gh pr merge "$PR" --squash --auto --delete-branch \
-              || echo "auto-merge could not be enabled; GitHub will report the reason on the pull request"
+            if gh pr merge "$PR" --squash --auto --delete-branch; then
+              PROMOTED="$PROMOTED $PR"
+              echo "promoted=$PROMOTED" >> "$GITHUB_OUTPUT"
+            else
+              echo "auto-merge could not be enabled; GitHub will report the reason on the pull request"
+            fi
           done
+
+          echo "promoted pull requests:${PROMOTED:-none}"
+
+  gate:
+    name: Gate the commit the promotion landed on main
+    needs: [resolve, promote]
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    # The group is SHARED with the reconciliation workflow
+    # (.github/workflows/main-gate.yml). Concurrency groups are unique within
+    # the REPOSITORY, not within a workflow, so the two dispatchers cannot
+    # both look at an uncovered main head and both dispatch a run for it.
+    #
+    # That race is small — the window between the lookup and the run
+    # appearing in the API — but it is real, and on a single runner it costs
+    # a full CI cycle every time it is hit.
+    concurrency:
+      group: gate-main
+      cancel-in-progress: false
+    steps:
+      - name: Ensure main's head is gated
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          REPO: ${{ github.repository }}
+          PROMOTED: ${{ needs.promote.outputs.promoted }}
+        run: |
+          set -uo pipefail
+
+          # The merge may be queued rather than immediate, so wait for it to
+          # land. Only the pull requests that were ACTUALLY promoted are
+          # waited for: a human-authored pull request fails the author check
+          # and never gets a merge registered, and waiting for one would
+          # hold a runner slot for nothing.
+          #
+          # The TOTAL wait is bounded, not the wait per pull request: several
+          # promoted pull requests each taking five minutes would exceed the
+          # job's own timeout, and the step would be cancelled before it
+          # reached the dispatch at all — which is the part that matters.
+          DEADLINE=$(( $(date +%s) + 180 ))
+          for PR in ${PROMOTED:-}; do
+            while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+              STATE=$(gh pr view "$PR" --json state --jq '.state' 2>/dev/null || echo "unknown")
+              [ "$STATE" = "MERGED" ] && { echo "pull request $PR merged"; break; }
+              [ "$STATE" = "CLOSED" ] && { echo "pull request $PR was closed rather than merged"; break; }
+              sleep 10
+            done
+            [ "$(date +%s)" -ge "$DEADLINE" ] && {
+              echo "pull request $PR has not merged within the window; the reconciliation" >&2
+              echo "workflow will gate main if it lands later" >&2
+            }
+          done
+
+          # A merge this workflow performs does not trigger CI.
+          #
+          # GitHub's rule is that an event caused by the repository's
+          # GITHUB_TOKEN does not create a new workflow run. So when this
+          # workflow merges a pull request, the commit lands on main and
+          # NOTHING runs: not CI, and therefore not the deploy either. The
+          # change sits on main unverified and undeployed.
+          #
+          # That is the exact opposite of what a promotion gate is for, and it
+          # is silent — this workflow reports success, the merge looks
+          # routine, and the only symptom is that main has drifted ahead of
+          # what is running.
+          #
+          # So the merge is followed by an explicit dispatch of CI on main. A
+          # workflow_dispatch is exempt from the recursion rule, so the run
+          # really does happen, and its completion is what the Deploy workflow
+          # waits for. That last part was MEASURED rather than assumed: a
+          # dispatched CI run on main completed, and the Deploy workflow fired
+          # from it two seconds later and deployed successfully.
+          #
+          # The dispatch is repeated if main advances while it is being
+          # arranged: the dispatch is made against the mutable `main` ref, so
+          # a merge landing in between would leave the commit that was just
+          # captured without a run of its own.
+          for attempt in 1 2 3; do
+            HEAD_SHA=$(gh api "repos/$REPO/commits/main" --jq '.sha' 2>/dev/null || echo "")
+            if [ -z "$HEAD_SHA" ]; then
+              echo "could not read main's head commit" >&2
+              exit 1
+            fi
+            echo "main is at $HEAD_SHA"
+
+            # Has main's head been TESTED? "Tested" means a CI run against
+            # main for that commit, whether it passed or failed: a failing
+            # commit is still a tested commit, and re-running it every
+            # fifteen minutes would spend the runner on a deterministic
+            # failure without changing anything. Whether the commit may be
+            # SHIPPED is the Deploy workflow's decision, not this one's.
+            #
+            # A run for a pull request's merge ref does not count — it has the
+            # wrong head branch, and the Deploy workflow rejects it. A
+            # cancelled run does not count either: it tested nothing.
+            #
+            # A failed LOOKUP is a failure, not an absence: treating it as
+            # an absence would dispatch a duplicate run every time the API
+            # hiccuped.
+            EXISTING=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=20" \
+              --jq '[.workflow_runs[] | select(.name == "CI" and .head_branch == "main" and (.event == "push" or .event == "workflow_dispatch") and .conclusion != "cancelled")] | length' \
+              2>/dev/null) || {
+                echo "could not read the run list for $HEAD_SHA" >&2
+                exit 1
+              }
+            if [ "${EXISTING:-0}" != "0" ]; then
+              echo "main's head has already been tested by a CI run; nothing to dispatch"
+
+              # The commit that was captured is not necessarily the one main
+              # points at now: a merge can land between the two. If main has
+              # moved on, its new head needs its own check rather than being
+              # left to the reconciliation.
+              NOW_SHA=$(gh api "repos/$REPO/commits/main" --jq '.sha' 2>/dev/null || echo "")
+              if [ "$NOW_SHA" != "$HEAD_SHA" ]; then
+                echo "main advanced to $NOW_SHA while checking; continuing"
+                continue
+              fi
+              exit 0
+            fi
+
+            echo "main's head has not been tested; dispatching CI for it"
+            if ! gh workflow run ci.yml --ref main; then
+              echo "could not dispatch CI for $HEAD_SHA" >&2
+              exit 1
+            fi
+
+            # Did main move while the dispatch was being arranged?
+            sleep 5
+            NOW_SHA=$(gh api "repos/$REPO/commits/main" --jq '.sha' 2>/dev/null || echo "")
+            if [ "$NOW_SHA" = "$HEAD_SHA" ]; then
+              echo "CI dispatched for $HEAD_SHA; the deploy follows when it passes"
+              exit 0
+            fi
+            echo "main advanced to $NOW_SHA during the dispatch; arranging a run for it"
+          done
+
+          echo "main kept advancing while CI was being arranged" >&2
+          echo "the reconciliation workflow will gate it, but this step could not" >&2
+          exit 1

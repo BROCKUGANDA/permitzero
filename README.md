@@ -104,7 +104,7 @@ flowchart LR
 | The alerts can actually fire            | Three series that were declared and never written are now produced; the delivery-lag gauge measures the outbox **row**, not the queue job, so a wedged dispatcher cannot read zero                                                                                                                                                                                                                         | `apps/api/src/observability.ts`, `packages/observability/test/`                |
 | Survives a provider or queue outage     | The drill points a second API instance at an unreachable database and asserts that readiness answers 503, a decision answers 503 rather than 500, the response leaks no driver detail, and the failed request leaves no half-written action; it also asserts an owed outbox event is retained rather than dropped, and that a leased row is not double-claimed or marked published without being published | `npm run drill:resilience`                                                     |
 | Nothing unproven is claimed             | 28 controls mapped to code and tests: 17 implemented, 7 partial, **4 absent** (encryption at rest, backup/PITR, retention and deletion, independent review)                                                                                                                                                                                                                                                | `docs/compliance/EVIDENCE.md`, `npm run compliance:gate`                       |
-| Test surface                            | 550 tests across 41 files, plus typecheck, lint at `--max-warnings=0`, format, gitleaks, the dependency gate, the evidence-map gate and the resilience drill — all wired into `npm run verify` and `.github/workflows/ci.yml`, which additionally runs a live SLO scrape against a running stack                                                                                                           | `npm run verify`, `.github/workflows/ci.yml`                                   |
+| Test surface                            | 551 tests across 41 files, plus typecheck, lint at `--max-warnings=0`, format, gitleaks, the dependency gate, the evidence-map gate and the resilience drill — all wired into `npm run verify` and `.github/workflows/ci.yml`, which additionally runs a live SLO scrape against a running stack                                                                                                           | `npm run verify`, `.github/workflows/ci.yml`                                   |
 
 **Read the honest parts too.** The model never issues a permit, publishes policy
 or calls a connector, and that is structural rather than a convention:
@@ -182,12 +182,13 @@ Agent ──POST /v1/actions──► API (Fastify) ──► Intake pipeline
 ### Delivery
 
 ```
-push / PR ──► CI: typecheck, lint, 550 tests, build, format, gitleaks,
+push / PR ──► CI: typecheck, lint, 551 tests, build, format, gitleaks,
                dependency gate, evidence-map gate, resilience drill,
                strict SLO report against a live stack
          │
          ├── Dependabot PRs ──► auto-merge once every required check is
-         │                      green ON THAT COMMIT
+         │                      green ON THAT COMMIT, then CI is dispatched
+         │                      on the merge commit so it is gated too
          │
          └── CI green on main ──► deploy: build, migrate under an advisory lock,
                                health check, verify isolation from the database
@@ -203,6 +204,13 @@ human-authored change is merged by a human, because auto-merging one would
 let a push to a branch bypass review. The workflow checks the three required
 checks **by name, on the exact commit** — a check that passed on an earlier
 commit says nothing about the code being merged.
+
+The merge the promotion performs is followed by an explicit dispatch of CI on
+the merge commit. That is not redundant: a merge made with the workflow's own
+token does not trigger a push workflow, so without the dispatch the merged
+commit would reach `main` with nothing having verified it and nothing having
+deployed it. The failure would be silent — the promotion would report
+success — so it is closed explicitly rather than relied upon not to happen.
 
 A pull request from a fork never reaches the self-hosted runner: fork code
 is checked out and executed, and that runner holds the deployment
