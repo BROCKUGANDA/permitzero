@@ -188,10 +188,27 @@ done < <(docker ps -a --format '{{.Names}}|{{.CreatedAt}}')
 #
 # `docker volume ls --filter dangling=true` lists exactly the volumes that
 # no container references, so this cannot touch a running service's data.
+#
+# But "dangling" is not the same as "disposable". A NAMED volume — the
+# production database of any project on this box — also becomes dangling the
+# moment its container is removed, and removing it would destroy a database
+# that a `compose up` was about to reattach to. So only ANONYMOUS volumes
+# are removed: Docker names those with 64 hexadecimal characters, and the
+# CI service containers create exactly those.
+#
 # The age check is belt and braces: a volume created moments ago is left
 # alone in case its container is still starting.
 docker volume ls -q --filter dangling=true 2>/dev/null | while read -r VOL; do
   [ -n "$VOL" ] || continue
+  # Only an anonymous volume. A named one belongs to a project, and this
+  # script does not get to decide that its data is garbage.
+  case "$VOL" in
+    [0-9a-f]*) ;;
+    *) continue ;;
+  esac
+  if [ "${#VOL}" -ne 64 ]; then
+    continue
+  fi
   CREATED=$(docker volume inspect -f '{{.CreatedAt}}' "$VOL" 2>/dev/null || echo "")
   if [ -z "$CREATED" ]; then
     continue
