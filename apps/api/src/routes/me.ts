@@ -246,7 +246,6 @@ export async function enrolMfa(deps: MfaDeps, principal: Principal, code?: strin
   try {
     await scope(async (ex) => {
       if (state.enrolledAt && state.row) {
-        const rawInner = (code as string).trim();
         // Re-read inside the transaction for the authoritative check — the
         // outer read's row could be stale if another workspace rotated the
         // secret between the two transactions. The conditional UPDATE makes
@@ -259,6 +258,7 @@ export async function enrolMfa(deps: MfaDeps, principal: Principal, code?: strin
         }
         const openedInner = decryptSecretAny(curRow.secretEncrypted, keys);
         if (openedInner) {
+          const rawInner = (code as string).trim();
           const stepInner = verifyTotpCodeStep(openedInner.secret, rawInner, now.getTime());
           if (stepInner === null) {
             throw new ValidationError('That code is not valid.');
@@ -620,7 +620,7 @@ export async function meRoutes(app: ZodFastifyInstance, ctx: AppContext): Promis
   app.delete(
     '/me/mfa',
     {
-      schema: { body: mfaEnrolBodySchema, response: { 200: deleteResponseSchema } },
+      schema: { body: mfaEnrolBodySchema.optional(), response: { 200: deleteResponseSchema } },
       config: { rateLimit: authBudget },
     },
     async (request) => removeMfa(deps, request.principal, (request.body as { code?: string } | undefined)?.code),
