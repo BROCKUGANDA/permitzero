@@ -664,7 +664,13 @@ export async function createSharedBudgets(
   }
   const store = createSharedCounter(client);
   const prefix = sharedRateLimitPrefix();
-  metrics.sharedRateLimitEnabled.set(1);
+  metrics.sharedRateLimitEnabled.set(ready ? 1 : 0);
+  // The gauge must track reality after boot, not just the outcome of the
+  // one wait: a Redis that was there at boot can go away, and one that was
+  // not there can come back.
+  client.on('ready', () => metrics.sharedRateLimitEnabled.set(1));
+  client.on('close', () => metrics.sharedRateLimitEnabled.set(0));
+  client.on('end', () => metrics.sharedRateLimitEnabled.set(0));
   return {
     auth: new SharedRateLimiter({
       store,

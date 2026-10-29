@@ -327,7 +327,6 @@ CONF
 touch "$DRILL_DATA/recovery.signal"
 
 docker run -d --name "$DRILL_NAME" \
-  -p "127.0.0.1:${DRILL_PORT}:5432" \
   -v "$DRILL_DATA:/var/lib/postgresql/data" \
   -v "$BACKUP_ROOT/wal:/wal-archive:ro" \
   -e POSTGRES_HOST_AUTH_METHOD=trust \
