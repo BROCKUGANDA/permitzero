@@ -46,12 +46,18 @@ permissions:
   pull-requests: write
   # The gate reads the check runs of the head commit.
   checks: read
-  # The gate also reads the COMPLETED RUN to find which pull request it
-  # belonged to. Without this the lookup is refused and every promotion
-  # silently stops — a permission error and "there was nothing to promote"
-  # look the same from the outside, which is why the lookup's failure is now
-  # reported rather than swallowed.
-  actions: read
+  # The gate reads the COMPLETED RUN to find which pull request it belonged
+  # to, and dispatches CI on the merge commit.
+  #
+  # The read needs Actions access, or the lookup is refused and every
+  # promotion silently stops — a permission error and "there was nothing to
+  # promote" look the same from the outside, which is why the lookup's
+  # failure is now reported rather than swallowed.
+  #
+  # The write is for the dispatch: a merge performed with the workflow's
+  # token does not trigger CI, so the commit it lands on main would never be
+  # gated. See the step that does it.
+  actions: write
 
 jobs:
   resolve:
@@ -293,3 +299,85 @@ jobs:
             gh pr merge "$PR" --squash --auto --delete-branch \
               || echo "auto-merge could not be enabled; GitHub will report the reason on the pull request"
           done
+
+      - name: Ensure the merged commit is gated by CI
+        # A merge this workflow performs does not trigger CI.
+        #
+        # GitHub's rule is that an event caused by the repository's
+        # GITHUB_TOKEN does not create a new workflow run. So when this
+        # workflow merges a pull request, the commit lands on main and
+        # NOTHING runs: not CI, and therefore not the deploy either. The
+        # change sits on main unverified and undeployed.
+        #
+        # That is the exact opposite of what a promotion gate is for, and it
+        # is silent — this workflow reports success, the merge looks
+        # routine, and the only symptom is that main has drifted ahead of
+        # what is running.
+        #
+        # So the merge is followed by an explicit dispatch of CI on main. A
+        # workflow_dispatch is exempt from the recursion rule, so the run
+        # really does happen, and its completion is what the Deploy workflow
+        # waits for.
+        #
+        # If a CI run already exists for main's HEAD — because the merge was
+        # performed by GitHub's own auto-merge queue rather than by this
+        # workflow's token — nothing is dispatched, and the run that is
+        # already there is the one that counts.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          REPO: ${{ github.repository }}
+          PRS: ${{ needs.resolve.outputs.prs }}
+        run: |
+          set -uo pipefail
+
+          # The merge may be queued rather than immediate, so wait for it to
+          # land before deciding what to gate. The wait is bounded: a merge
+          # that has not happened within the window is reported, not waited
+          # on forever, and the promotion itself has already been registered.
+          MERGED=""
+          for PR in ${PRS:-}; do
+            for _ in $(seq 1 30); do
+              STATE=$(gh pr view "$PR" --json state --jq '.state' 2>/dev/null || echo "unknown")
+              if [ "$STATE" = "MERGED" ]; then
+                MERGED="$PR"
+                break
+              fi
+              if [ "$STATE" = "CLOSED" ]; then
+                echo "pull request $PR was closed rather than merged"
+                break
+              fi
+              sleep 10
+            done
+            [ -n "$MERGED" ] && break
+          done
+
+          if [ -z "$MERGED" ]; then
+            echo "no pull request merged within the window; the promotion stays queued" >&2
+            echo "and the deploy will follow the push that eventually lands it" >&2
+            exit 0
+          fi
+          echo "pull request $MERGED merged"
+
+          # What is on main now is what has to be gated.
+          HEAD_SHA=$(gh api "repos/$REPO/commits/main" --jq '.sha' 2>/dev/null || echo "")
+          if [ -z "$HEAD_SHA" ]; then
+            echo "could not read main's head commit" >&2
+            exit 1
+          fi
+          echo "main is at $HEAD_SHA"
+
+          # Has CI already run for it? If it has, the merge went through
+          # GitHub's own queue rather than this workflow's token, and the
+          # existing run is the one that gates the deploy.
+          EXISTING=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=20" \
+            --jq '[.workflow_runs[] | select(.name == "CI")] | length' 2>/dev/null || echo "")
+          if [ "${EXISTING:-0}" != "0" ]; then
+            echo "CI has already run for $HEAD_SHA; nothing to dispatch"
+            exit 0
+          fi
+
+          echo "no CI run exists for $HEAD_SHA; dispatching one"
+          gh workflow run ci.yml --ref main \
+            || { echo "could not dispatch CI for $HEAD_SHA" >&2; exit 1; }
+          echo "CI dispatched for $HEAD_SHA; the deploy follows when it passes"
