@@ -7,7 +7,14 @@ import { and, asc, desc, eq, isNull } from 'drizzle-orm';
 import { newId } from '@permitzero/domain';
 import type { ActorType, EnforcementMode, Environment, VendorStatus } from '@permitzero/domain';
 import type { DbExecutor } from '../client.js';
-import { currentKey, deriveKey, encryptColumn, encryptNullableColumn, readColumn, verificationKeys } from '../crypto.js';
+import {
+  currentKey,
+  deriveKey,
+  encryptColumn,
+  encryptNullableColumn,
+  readColumn,
+  verificationKeys,
+} from '../crypto.js';
 import {
   connectorDispatches,
   connectorLedger,

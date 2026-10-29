@@ -278,7 +278,7 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
     // fresh bucket and only the global ceiling would remain.
     const hadAuthHeader = Boolean(request.headers.authorization);
     if (hadAuthHeader) {
-      const ipLimiter = (failedIpLimiter ??= app.createRateLimit({
+      void (failedIpLimiter ??= app.createRateLimit({
         max: authBudget.max,
         timeWindow: authBudget.timeWindow,
         keyGenerator: (req) => `failed-auth:${req.ip}`,
