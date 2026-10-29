@@ -164,33 +164,76 @@ CREATE TABLE IF NOT EXISTS pz_restore_drill_marker (
 INSERT INTO pz_restore_drill_marker (marker) VALUES ('$MARKER');
 SQL
 
-# The marker's time, as epoch seconds.
+# A SECOND marker, in its own later transaction, so that the recovery target
+# has a commit to stop at.
 #
-# The epoch is the form the recovery target is COMPUTED from, and it is
-# computed arithmetically rather than by re-parsing a formatted timestamp.
+# This looks redundant and is not. A recovery target expressed as a time
+# means "replay until a commit at or after this time". The marker's own
+# commit was not enough: the drill previously aimed two seconds PAST the
+# marker, and the database is idle, so there was no commit in that window.
+# The recovery replayed everything available, found no commit at or after
+# the target, and refused: "recovery ended before configured recovery target
+# was reached". The drill was right to fail — it was asking for a point in
+# time the WAL had not reached.
 #
-# The earlier version formatted the timestamp as text and then asked `date`
-# to add two seconds to it, and the two disagreed: `tr -d '[:space:]'` ate
-# the space between the date and the time, so the value handed to the
-# database was `2026-10-2913:43:16.959+00` — not a timestamp at all, and
-# the restored server refused to start with it. A fallback quietly reused
-# the marker's own time as the target, which would have made the drill
-# assert less than it claimed to.
-#
-# Seconds of arithmetic have one meaning: the target is two seconds after
-# the marker, and there is no format for the two to disagree about.
-MARKER_EPOCH=$($COMPOSE exec -T postgres psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -tAc \
-  "SELECT floor(extract(epoch from written_at))::bigint
-     FROM pz_restore_drill_marker WHERE marker = '$MARKER'" | tr -dc '0-9')
-[ -n "$MARKER_EPOCH" ] || fail "the marker row was not written."
+# The second marker provides that point: it commits after the first, so the
+# WAL contains a commit at or after the first marker's time. The target is
+# the FIRST marker's time, which is at or before the second marker's commit.
+# Recovery therefore stops at or after the second marker, and the first
+# marker — the one whose presence proves the WAL was replayed — is inside
+# the restored copy either way.
+log "writing the follow-up marker"
+$COMPOSE exec -T postgres psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -v ON_ERROR_STOP=1 -q <<SQL
+INSERT INTO pz_restore_drill_marker (marker) VALUES ('$MARKER-followup');
+SQL
 
-# The recovery target is AFTER the marker's commit time, so the recovery
-# replays past it and the marker is inside the restored copy. Two seconds of
-# margin: the marker's `written_at` is taken when the row is written and the
-# commit happens after it.
-TARGET_EPOCH=$((MARKER_EPOCH + 2))
-TARGET_TIME="$(date -u -d "@$TARGET_EPOCH" '+%Y-%m-%d %H:%M:%S+00')"
-MARKER_TIME="$(date -u -d "@$MARKER_EPOCH" '+%Y-%m-%d %H:%M:%S+00')"
+# The recovery target: the FOLLOW-UP marker's own timestamp.
+#
+# A recovery target expressed as a time means "replay until a commit at or
+# after this time". Two properties have to hold at once, and the earlier
+# version of this drill could only get one of them:
+#
+#   1. the target must be AT OR AFTER a commit that exists in the WAL, or
+#      the recovery replays everything available, finds nothing at or after
+#      the target, and refuses: "recovery ended before configured recovery
+#      target was reached". The drill aimed two seconds past the marker on
+#      an idle database, where no such commit exists;
+#
+#   2. the target must be AFTER the marker's commit, or the recovery stops
+#      before the marker and the marker is not in the restored copy — which
+#      is the whole assertion, so a target that stops early proves nothing.
+#
+# The follow-up marker's timestamp satisfies both. It is the start of a
+# transaction that began after the marker was committed, so it is strictly
+# later than the marker's commit, and the follow-up's own commit lands at
+# or after it — there is a commit in the WAL for the recovery to stop at.
+#
+# The follow-up's PRESENCE is deliberately not asserted. Between the
+# follow-up's transaction starting and its committing, an unrelated
+# transaction could commit and become the recovery's stopping point, in
+# which case the restored copy would legitimately not contain the follow-up.
+# The MARKER is the assertion: it was written after the base backup, so it
+# can only be in the restored copy if the ARCHIVED WAL was replayed — the
+# backup's own streamed WAL stops at the end of the backup.
+#
+# The timestamp is built as one string and never re-parsed. The earlier
+# version formatted the time and then asked `date` to add two seconds to it,
+# and the two disagreed about what a timestamp is: `tr -d '[:space:]'` ate
+# the space between the date and the time, so the restored server was given
+# `2026-10-2913:43:16.959+00` — not a timestamp at all — and refused to
+# start with it.
+TARGET_TIME=$($COMPOSE exec -T postgres psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -tAc \
+  "SELECT to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.MS') || '+00'
+     FROM pz_restore_drill_marker WHERE marker = '$MARKER-followup'" | tr -d '\r\n')
+# The shape is checked, because a malformed target is a restore that fails
+# for a reason that has nothing to do with recovery.
+printf '%s' "$TARGET_TIME" \
+  | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}\+00$' \
+  || fail "the follow-up marker's timestamp is not a timestamp: '$TARGET_TIME'"
+
+MARKER_TIME=$($COMPOSE exec -T postgres psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -tAc \
+  "SELECT to_char(written_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.MS') || '+00'
+     FROM pz_restore_drill_marker WHERE marker = '$MARKER'" | tr -d '\r\n')
 log "   marker written at $MARKER_TIME; recovery target $TARGET_TIME"
 
 # --- 3. the WAL, forced and archived ---------------------------------------
