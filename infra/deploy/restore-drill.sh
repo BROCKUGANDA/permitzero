@@ -66,6 +66,16 @@ DRILL_PORT="${PZ_RESTORE_DRILL_PORT:-55432}"
 DRILL_DATA=""
 MARKER="restore-drill-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 
+# A file whose timestamp is this run's start time, used to tell this run's
+# leftovers from an earlier run's. It is created immediately before the
+# cleanup trap is installed, so it cannot itself be orphaned by a failure
+# between here and there.
+#
+# The name deliberately does not match the `pz-restore-drill.*` pattern the
+# stale sweep globs, or the sweep would try to delete its own reference
+# point.
+RUN_MARKER=""
+
 log() { printf 'drill: %s\n' "$*"; }
 fail() {
   printf 'drill: FAIL: %s\n' "$*" >&2
@@ -95,15 +105,37 @@ cleanup() {
       -c "rm -rf /d/* /d/.[!.]*; chown $(id -u):$(id -g) /d" >/dev/null 2>&1 || true
     rmdir "$DRILL_DATA" >/dev/null 2>&1 || rm -rf "$DRILL_DATA" >/dev/null 2>&1 || true
   fi
+  # The leftovers of EARLIER runs.
+  #
+  # The trap above cleans up this run. It cannot clean up a run that died
+  # before the trap was installed, or one that was killed hard enough that
+  # the trap never ran — and each of those leaves a full copy of the
+  # production database in /tmp. Four had accumulated while this drill was
+  # being brought up.
+  #
+  # Only directories older than this run are touched, so a drill running
+  # alongside this one is not pulled out from under itself.
+  for stale in "${TMPDIR:-/tmp}"/pz-restore-drill.*; do
+    [ -d "$stale" ] || continue
+    [ "$stale" = "$DRILL_DATA" ] && continue
+    if [ -n "$(find "$stale" -maxdepth 0 -newer "$RUN_MARKER" 2>/dev/null)" ]; then
+      continue
+    fi
+    docker run --rm --entrypoint sh -v "$stale:/d" postgres:16-alpine \
+      -c "rm -rf /d/* /d/.[!.]*; chown $(id -u):$(id -g) /d" >/dev/null 2>&1 || true
+    rmdir "$stale" >/dev/null 2>&1 || rm -rf "$stale" >/dev/null 2>&1 || true
+  done
   # The scratch table. The marker is evidence DURING the drill; afterwards it
   # is litter in the production schema.
   $COMPOSE exec -T postgres psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -q \
     -c 'DROP TABLE IF EXISTS pz_restore_drill_marker' >/dev/null 2>&1 || true
+  rm -f "$RUN_MARKER" >/dev/null 2>&1 || true
   if [ "$status" -ne 0 ]; then
     printf 'drill: FAILED (exit %s)\n' "$status" >&2
   fi
   exit "$status"
 }
+RUN_MARKER="$(mktemp "${TMPDIR:-/tmp}/pz-drill-run-start.XXXXXX")"
 trap cleanup EXIT
 
 # --- 0. preflight ----------------------------------------------------------
