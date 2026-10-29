@@ -9,9 +9,10 @@
  * a code from it has not enrolled. The first says "a secret is stored"; the
  * second says "the person proved it".
  *
- * The secret row is tenant-scoped, and the tenant is the one the enrolment
- * happened in: an account belongs to a tenant, and the row is read and
- * written inside that tenant's transaction.
+ * The secret row's `tenant_id` records where the enrolment happened, but
+ * the secret itself is per-person (one authenticator): a lookup by user must
+ * be visible in every workspace the person belongs to, or a step-up in a
+ * second workspace looks up no secret and approves without asking.
  */
 import { and, eq } from 'drizzle-orm';
 import type { DbExecutor } from '../client.js';
@@ -23,19 +24,13 @@ async function first<T>(rows: Promise<T[]>): Promise<T | null> {
   return row ?? null;
 }
 
-/** The secret row of this user in this tenant, if there is one. */
+/** The secret row of this user, if there is one — per-person, not per-tenant. */
 export async function getMfaSecretByUserId(
   ex: DbExecutor,
-  tenantId: string,
+  _tenantId: string,
   userId: string,
 ): Promise<MfaSecretRow | null> {
-  return first(
-    ex
-      .select()
-      .from(mfaSecrets)
-      .where(and(eq(mfaSecrets.tenantId, tenantId), eq(mfaSecrets.userId, userId)))
-      .limit(1),
-  );
+  return first(ex.select().from(mfaSecrets).where(eq(mfaSecrets.userId, userId)).limit(1));
 }
 
 /**
@@ -75,9 +70,9 @@ export async function upsertMfaSecret(
   return row;
 }
 
-/** Remove the secret row of this user in this tenant. */
-export async function deleteMfaSecret(ex: DbExecutor, tenantId: string, userId: string): Promise<void> {
-  await ex.delete(mfaSecrets).where(and(eq(mfaSecrets.tenantId, tenantId), eq(mfaSecrets.userId, userId)));
+/** Remove the secret row of this user. */
+export async function deleteMfaSecret(ex: DbExecutor, _tenantId: string, userId: string): Promise<void> {
+  await ex.delete(mfaSecrets).where(eq(mfaSecrets.userId, userId));
 }
 
 /**
@@ -90,14 +85,14 @@ export async function deleteMfaSecret(ex: DbExecutor, tenantId: string, userId: 
  */
 export async function recordMfaVerification(
   ex: DbExecutor,
-  tenantId: string,
+  _tenantId: string,
   userId: string,
   input: { now: Date; codeHash: string },
 ): Promise<boolean> {
   const rows = await ex
     .update(mfaSecrets)
     .set({ lastVerifiedAt: input.now, lastCodeHash: input.codeHash })
-    .where(and(eq(mfaSecrets.tenantId, tenantId), eq(mfaSecrets.userId, userId)))
+    .where(eq(mfaSecrets.userId, userId))
     .returning({ lastVerifiedAt: mfaSecrets.lastVerifiedAt });
   return rows.length > 0;
 }
@@ -112,14 +107,14 @@ export async function recordMfaVerification(
  */
 export async function recordConsumedMfaCode(
   ex: DbExecutor,
-  tenantId: string,
+  _tenantId: string,
   userId: string,
   codeHash: string,
 ): Promise<boolean> {
   const rows = await ex
     .update(mfaSecrets)
     .set({ lastCodeHash: codeHash })
-    .where(and(eq(mfaSecrets.tenantId, tenantId), eq(mfaSecrets.userId, userId)))
+    .where(eq(mfaSecrets.userId, userId))
     .returning({ lastCodeHash: mfaSecrets.lastCodeHash });
   return rows.length > 0;
 }
