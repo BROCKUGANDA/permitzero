@@ -444,16 +444,22 @@ async function purgeOutbox(
   tenantId: string,
 ): Promise<{ purged: number; stamped: number }> {
   const days = deps.config.outboxRetentionDays;
+  // Only rows that have actually been delivered (PUBLISHED) or are terminal
+  // dead-letters (DEAD) are eligible for expiry. PENDING and retryable FAILED
+  // rows are still owed to the queue — deleting them would drop committed
+  // events before they can be delivered.
   const stamped = await tx.execute(sql`
     UPDATE public.outbox_events
        SET expires_at = created_at + make_interval(days => ${days}::int)
      WHERE tenant_id = ${tenantId}
+       AND status IN ('PUBLISHED', 'DEAD')
        AND expires_at IS DISTINCT FROM created_at + make_interval(days => ${days}::int)
     RETURNING outbox_event_id
   `);
   const deleted = await tx.execute(sql`
     DELETE FROM public.outbox_events
      WHERE tenant_id = ${tenantId}
+       AND status IN ('PUBLISHED', 'DEAD')
        AND expires_at IS NOT NULL
        AND expires_at <= now()
     RETURNING outbox_event_id

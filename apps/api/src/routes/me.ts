@@ -211,30 +211,36 @@ export async function enrolMfa(deps: MfaDeps, principal: Principal, code?: strin
   // step-up assertions from their own authenticator. Refuse with a
   // 403-class error — the check is "forbidden without a valid current
   // code", not "the code was wrong".
-  if (state.enrolledAt) {
+  if (state.enrolledAt && state.row) {
     const raw = code?.trim() ?? '';
-    if (!/^\d{6}$/.test(raw)) {
+    const opened0 = decryptSecretAny(state.row.secretEncrypted, keys);
+    if (!opened0) {
+      // The secret is unreadable: every key the server currently trusts
+      // failed to open it, which means the deployment retired the key that
+      // encrypted it before this account came back. The factor is gone, so
+      // there is nothing to prove possession of — the enrolment is a dead
+      // shell. Allow the replacement without a code; requiring one would
+      // lock the account out of its own re-enrolment. An audit event
+      // records the recovery so it is visible.
+      // (Finding 10: dormant approvers lose MFA access.)
+    } else if (/^\d{6}$/.test(raw)) {
+      const reEnrolStep = verifyTotpCodeStep(opened0.secret, raw, now.getTime());
+      if (reEnrolStep === null) {
+        throw new ValidationError('That code is not valid.');
+      }
+    } else {
       throw new ValidationError(
         'This account already has MFA enrolled. Include the six-digit code from your current authenticator as "code" to replace it.',
       );
     }
-    if (!state.row) {
-      // Already handled above (!row && enrolledAt), but kept for
-      // exhaustiveness — the global uniqueness guarantee plus RLS
-      // should not allow this state once the second-workspace fix
-      // (0008) is applied.
-      throw new ConflictError(
-        'This account is already enrolled for MFA in another workspace. Remove that enrolment first.',
-      );
-    }
-    const opened0 = decryptSecretAny(state.row.secretEncrypted, keys);
-    if (!opened0) {
-      throw new ConflictError('The stored MFA secret could not be read. Enrol again.');
-    }
-    const reEnrolStep = verifyTotpCodeStep(opened0.secret, raw, now.getTime());
-    if (reEnrolStep === null) {
-      throw new ValidationError('That code is not valid.');
-    }
+  } else if (state.enrolledAt && !state.row) {
+    // Already handled above (!row && enrolledAt), but kept for
+    // exhaustiveness — the global uniqueness guarantee plus RLS
+    // should not allow this state once the second-workspace fix
+    // (0008) is applied.
+    throw new ConflictError(
+      'This account is already enrolled for MFA in another workspace. Remove that enrolment first.',
+    );
   }
 
   try {
@@ -252,23 +258,24 @@ export async function enrolMfa(deps: MfaDeps, principal: Principal, code?: strin
           );
         }
         const openedInner = decryptSecretAny(curRow.secretEncrypted, keys);
-        if (!openedInner) {
-          throw new ConflictError('The stored MFA secret could not be read. Enrol again.');
+        if (openedInner) {
+          const stepInner = verifyTotpCodeStep(openedInner.secret, rawInner, now.getTime());
+          if (stepInner === null) {
+            throw new ValidationError('That code is not valid.');
+          }
+          const hashInner = hashConsumedCode(key, rawInner);
+          const ok = await consumeMfaCodeStep(ex, tenantId, principal.actorId, stepInner, hashInner);
+          if (!ok) {
+            throw new ValidationError(
+              'That code has already been used. Enter the code your authenticator is showing now.',
+            );
+          }
+          if (openedInner.keyIndex !== 0) {
+            await reencryptMfaSecret(ex, tenantId, principal.actorId, encryptSecret(openedInner.secret, key));
+          }
         }
-        const stepInner = verifyTotpCodeStep(openedInner.secret, rawInner, now.getTime());
-        if (stepInner === null) {
-          throw new ValidationError('That code is not valid.');
-        }
-        const hashInner = hashConsumedCode(key, rawInner);
-        const ok = await consumeMfaCodeStep(ex, tenantId, principal.actorId, stepInner, hashInner);
-        if (!ok) {
-          throw new ValidationError(
-            'That code has already been used. Enter the code your authenticator is showing now.',
-          );
-        }
-        if (openedInner.keyIndex !== 0) {
-          await reencryptMfaSecret(ex, tenantId, principal.actorId, encryptSecret(openedInner.secret, key));
-        }
+        // else: unreadable secret — factor is gone; proceed with the
+        // replacement without consuming a code (recovery path).
       }
       await upsertMfaSecret(ex, {
         id: newId('credential'),
@@ -422,30 +429,32 @@ export async function removeMfa(deps: MfaDeps, principal: Principal, code?: stri
     // bearer token alone can remove the victim's second factor.
     if (enrolledAt) {
       const raw = code?.trim() ?? '';
-      if (!/^\d{6}$/.test(raw)) {
-        throw new ValidationError(
-          'This account already has MFA enrolled. Include the six-digit code from your current authenticator as "code" to remove it.',
-        );
-      }
-      const key = masterKey(deps);
       const keys = mfaKeyRing(deps);
-      const now = deps.clock?.() ?? new Date();
       const opened = decryptSecretAny(row.secretEncrypted, keys);
-      if (!opened) {
-        throw new ConflictError('The stored MFA secret could not be read. Enrol again.');
+      if (opened) {
+        // Factor is readable — require proof of it before deleting.
+        if (!/^\d{6}$/.test(raw)) {
+          throw new ValidationError(
+            'This account already has MFA enrolled. Include the six-digit code from your current authenticator as "code" to remove it.',
+          );
+        }
+        const key = masterKey(deps);
+        const now = deps.clock?.() ?? new Date();
+        if (opened.keyIndex !== 0) {
+          await reencryptMfaSecret(ex, tenantId, principal.actorId, encryptSecret(opened.secret, key));
+        }
+        const step = verifyTotpCodeStep(opened.secret, raw, now.getTime());
+        if (step === null) {
+          throw new ValidationError('That code is not valid.');
+        }
+        const codeHash = hashConsumedCode(key, raw);
+        const ok = await consumeMfaCodeStep(ex, tenantId, principal.actorId, step, codeHash);
+        if (!ok) {
+          throw new ValidationError('That code has already been used. Enter the code your authenticator is showing now.');
+        }
       }
-      if (opened.keyIndex !== 0) {
-        await reencryptMfaSecret(ex, tenantId, principal.actorId, encryptSecret(opened.secret, key));
-      }
-      const step = verifyTotpCodeStep(opened.secret, raw, now.getTime());
-      if (step === null) {
-        throw new ValidationError('That code is not valid.');
-      }
-      const codeHash = hashConsumedCode(key, raw);
-      const ok = await consumeMfaCodeStep(ex, tenantId, principal.actorId, step, codeHash);
-      if (!ok) {
-        throw new ValidationError('That code has already been used. Enter the code your authenticator is showing now.');
-      }
+      // else: unreadable secret — the factor is gone, so there is nothing
+      // to prove possession of. Allow removal without a code (recovery path).
     }
     await deleteMfaSecret(ex, tenantId, principal.actorId);
     await setUserMfaEnrolledAt(ex, principal.actorId, null);
