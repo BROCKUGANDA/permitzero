@@ -16,9 +16,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { newId } from '@permitzero/domain';
 import {
   appendAuditEvent,
+  AUDIT_HASH_VERSION_HMAC,
+  AUDIT_HASH_VERSION_PLAIN,
   computeAuditHash,
   insertOutboxEvent,
   listAuditEvents,
+  reanchorAuditHash,
   seed,
   verifyAuditChain,
   type Db,
@@ -122,6 +125,127 @@ async function tamperWithStoredPayload(): Promise<void> {
     await db.sql`ALTER TABLE audit_events ENABLE TRIGGER trg_audit_events_no_update`;
   }
 }
+
+describe('re-anchoring a chain row', () => {
+  /**
+   * A stored row, as the retention sweep reads it.
+   *
+   * The payload is the STORED value — ciphertext when the deployment has a
+   * key — because that is what the sweep has in hand when it re-links a
+   * survivor.
+   */
+  async function storedRow(sequence: number): Promise<{
+    tenantId: string;
+    eventId: string;
+    actionId: string | null;
+    runId: string | null;
+    actorType: string;
+    actorId: string;
+    eventType: string;
+    eventTime: Date;
+    traceId: string;
+    policyRevisionId: string | null;
+    storedPayload: unknown;
+    previousHash: string | null;
+    eventHash: string;
+  }> {
+    const rows = await db.sql<
+      {
+        event_id: string;
+        sequence: string;
+        previous_hash: string | null;
+        event_hash: string;
+        action_id: string | null;
+        run_id: string | null;
+        actor_type: string;
+        actor_id: string;
+        event_type: string;
+        trace_id: string;
+        policy_revision_id: string | null;
+        payload_redacted_json: unknown;
+        event_time: string;
+      }[]
+    >`
+      SELECT event_id, sequence::text AS sequence, previous_hash, event_hash, action_id, run_id,
+             actor_type, actor_id, event_type, trace_id, policy_revision_id, payload_redacted_json,
+             event_time
+        FROM audit_events WHERE tenant_id = ${TENANT()} ORDER BY sequence ASC`;
+    const row = rows[sequence - 1];
+    if (!row) throw new Error(`no audit row at sequence ${sequence}`);
+    return {
+      tenantId: TENANT(),
+      eventId: row.event_id,
+      actionId: row.action_id,
+      runId: row.run_id,
+      actorType: row.actor_type,
+      actorId: row.actor_id,
+      eventType: row.event_type,
+      eventTime: new Date(row.event_time),
+      traceId: row.trace_id,
+      policyRevisionId: row.policy_revision_id,
+      storedPayload: row.payload_redacted_json,
+      previousHash: row.previous_hash,
+      eventHash: row.event_hash,
+    };
+  }
+
+  it('re-hashes a keyed row with the key that wrote it, over the plaintext', async () => {
+    await appendAuditEvent(db.db, event(1));
+    const row = await storedRow(1);
+
+    // Re-link it onto a different predecessor, the way a purge does.
+    const rehashed = reanchorAuditHash(row, 'sha256:' + '0'.repeat(64));
+
+    // It is found at all — which means the key that wrote the row was
+    // DISCOVERED rather than assumed.
+    expect(rehashed).not.toBeNull();
+    expect(rehashed?.version).toBe(AUDIT_HASH_VERSION_HMAC);
+
+    // And the new hash is the one a reader with that key would compute
+    // over the PLAINTEXT. Hashing the stored envelope instead — the obvious
+    // implementation — produces a digest no verifier can reproduce, which
+    // is how a retention purge used to break the chain it was re-anchoring.
+    const expected = computeAuditHash(
+      {
+        tenantId: row.tenantId,
+        eventId: row.eventId,
+        actionId: row.actionId,
+        runId: row.runId,
+        actorType: row.actorType,
+        actorId: row.actorId,
+        eventType: row.eventType,
+        eventTime: row.eventTime,
+        traceId: row.traceId,
+        policyRevisionId: row.policyRevisionId,
+        payload: { n: 1, note: SECRET },
+        previousHash: 'sha256:' + '0'.repeat(64),
+      },
+      TEST_KEY,
+    );
+    expect(rehashed?.hash).toBe(expected.hash);
+  });
+
+  it('re-hashes a plain row as plain, with no key at all', async () => {
+    useKeyring(null);
+    await appendAuditEvent(db.db, event(1));
+    const row = await storedRow(1);
+
+    const rehashed = reanchorAuditHash(row, 'sha256:' + '0'.repeat(64));
+    expect(rehashed).not.toBeNull();
+    expect(rehashed?.version).toBe(AUDIT_HASH_VERSION_PLAIN);
+  });
+
+  it('refuses a row that no key reproduces, rather than guessing', async () => {
+    await appendAuditEvent(db.db, event(1));
+    const row = await storedRow(1);
+
+    // A row whose hash does not correspond to its contents is a row that
+    // has been altered. Re-linking it would launder that into a
+    // clean-looking chain, so the re-anchor refuses and says so.
+    const tampered = { ...row, eventHash: 'sha256:' + 'f'.repeat(64) };
+    expect(reanchorAuditHash(tampered, 'sha256:' + '0'.repeat(64))).toBeNull();
+  });
+});
 
 describe('encryption at rest', () => {
   it('stores the audit payload as ciphertext, not as the payload', async () => {

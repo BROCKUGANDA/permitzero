@@ -118,6 +118,131 @@ function decryptedAuditRow<T extends { payloadRedactedJson: unknown }>(row: T, k
   return { ...row, payloadRedactedJson: readAuditPayload(row.payloadRedactedJson, keys) };
 }
 
+/**
+ * Seal an audit row: its hash, its hash version, and the payload as it
+ * must be STORED.
+ *
+ * The hash is computed over the canonical PLAINTEXT and the stored payload
+ * is the ciphertext, exactly as `appendAuditEvent` writes it — so a row
+ * sealed here is indistinguishable from one the repository appended, and
+ * a reader that can verify the hash can also read the row.
+ *
+ * The key that writes is the key that is current: the one the caller
+ * supplied, otherwise the head of the environment keyring. A caller with
+ * no key writes a plain, unencrypted row, which is the pre-encryption
+ * behaviour — degraded and visible, rather than a silent substitute key.
+ */
+export function sealAuditEvent(
+  input: AuditHashInput,
+  opts?: { hmacKey?: string | null },
+): { hash: string; version: string; storedPayload: Record<string, unknown> } {
+  const master = opts?.hmacKey ?? currentKey();
+  const { hash, version } = computeAuditHash(input, master);
+  return {
+    hash,
+    version,
+    storedPayload: master ? encryptColumn(input.payload, deriveKey(master, AUDIT_PAYLOAD_PURPOSE)) : input.payload,
+  };
+}
+
+/**
+ * Re-anchor a stored audit row onto a new predecessor.
+ *
+ * The retention sweep removes rows from the middle of a chain, which
+ * breaks every row after the gap: the successor names a predecessor that
+ * no longer exists, and its own hash was computed over that value. The
+ * rows that survive are therefore RE-LINKED — re-sequenced and
+ * re-hashed — so the chain stays contiguous and verifies again.
+ *
+ * The hash of a re-linked row must be computed exactly the way the
+ * ORIGINAL hash was computed, or the chain stops verifying and the
+ * platform reports its own housekeeping as tampering. Two things make
+ * that easy to get wrong, and both of them are wrong here:
+ *
+ *   · THE PAYLOAD. The hash is computed over the canonical PLAINTEXT.
+ *     The stored column holds the CIPHERTEXT when the deployment has a
+ *     key. Hashing the stored bytes produces a digest that no verifier
+ *     can reproduce, because the verifier hashes the plaintext.
+ *
+ *   · THE KEY. The row's `hash_version` says whether it was keyed, but
+ *     not WHICH key. During a rotation the ring holds several, and the
+ *     right one for a given row is the one that reproduces its existing
+ *     hash. A sweep that re-hashes with the current key would rewrite
+ *     rows that were written under a retired one, and the row would stop
+ *     verifying under the key that actually wrote it.
+ *
+ * So the key is DISCOVERED, not assumed: the row's own existing hash is
+ * reproduced against every candidate key, and the one that matches is the
+ * one used to re-hash it. The result is the same digest the row would
+ * have had if it had been written that way — which is the whole point of
+ * a re-anchor.
+ *
+ * Returns null when no candidate key reproduces the row's existing hash.
+ * That means the row is not what it claims to be, and re-linking it
+ * would launder a tampered row into a clean-looking chain. The caller
+ * must refuse rather than guess.
+ */
+export function reanchorAuditHash(
+  row: {
+    tenantId: string;
+    eventId: string;
+    actionId: string | null;
+    runId: string | null;
+    actorType: string;
+    actorId: string;
+    eventType: string;
+    eventTime: Date;
+    traceId: string;
+    policyRevisionId: string | null;
+    /** The stored payload column: plaintext, or an encryption envelope. */
+    storedPayload: unknown;
+    /** The predecessor the row currently names, and so the one its existing
+     * hash was computed over. */
+    previousHash: string | null;
+    /** The hash the row currently carries. */
+    eventHash: string;
+  },
+  newPreviousHash: string | null,
+  opts?: { hmacKey?: string | null },
+): { hash: string; version: string } | null {
+  const masters = candidateMasters(opts?.hmacKey);
+  const keys = payloadKeys(masters);
+  // The payload as the hash saw it: the plaintext, decrypted if the
+  // deployment has a key. Hashing the stored envelope instead would
+  // produce a digest the verifier cannot reproduce.
+  let payload: Record<string, unknown>;
+  try {
+    payload = readAuditPayload(row.storedPayload, keys);
+  } catch {
+    return null;
+  }
+  const base = {
+    tenantId: row.tenantId,
+    eventId: row.eventId,
+    actionId: row.actionId,
+    runId: row.runId,
+    actorType: row.actorType,
+    actorId: row.actorId,
+    eventType: row.eventType,
+    eventTime: truncateToMs(row.eventTime),
+    traceId: row.traceId,
+    policyRevisionId: row.policyRevisionId,
+    payload,
+  };
+  // Find the key that wrote this row: the one under which its EXISTING
+  // hash reproduces over its EXISTING predecessor. A row written plain has
+  // no key at all, and the plain hash is checked first for exactly that
+  // reason.
+  const candidates: (string | null)[] = [null, ...masters];
+  for (const master of candidates) {
+    const current = computeAuditHash({ ...base, previousHash: row.previousHash }, master);
+    if (current.hash !== row.eventHash) continue;
+    // Same key, new predecessor.
+    return computeAuditHash({ ...base, previousHash: newPreviousHash }, master);
+  }
+  return null;
+}
+
 export interface AppendAuditInput {
   eventId?: string;
   tenantId: string;

@@ -14,7 +14,7 @@
  *     invisible.
  */
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { verifyAuditChain } from '@permitzero/db';
+import { listAuditEvents, verifyAuditChain } from '@permitzero/db';
 import { closeTestDb, freshWorker, type WorkerFixture } from './helpers.js';
 import { AUDIT_PURGE_EVENT_TYPE, runRetentionSweep } from '../src/retention.js';
 import type { RetentionDeps } from '../src/retention.js';
@@ -26,10 +26,16 @@ const DAY_MS = 86_400_000;
 /**
  * The retention window under test.
  *
- * `auditHmacKey: null` matches the harness: the seeded chain is plain-hashed,
- * and the sweep re-anchors a chain with the same version it was written with.
- * A sweep that re-hashed a plain chain with a key would produce a chain the
- * verifier could not check.
+ * `auditHmacKey` mirrors the ENVIRONMENT, not a fixed value: the seeded
+ * chain is hashed with whatever key the deployment has, and a sweep that
+ * re-anchored a keyed chain with no key would produce a chain the verifier
+ * could not check. Passing `null` here while the environment carries a key
+ * is how the sweep's key handling was wrong for so long: the test passed
+ * locally (no key in the environment) and failed in CI (a key in the
+ * environment).
+ *
+ * So the test states the same thing the deployment does — the key it was
+ * given — and the sweep has to do the right thing with it.
  */
 function retentionDeps(): RetentionDeps {
   return {
@@ -37,7 +43,7 @@ function retentionDeps(): RetentionDeps {
     config: {
       auditRetentionDays: 365,
       outboxRetentionDays: 30,
-      auditHmacKey: null,
+      auditHmacKey: process.env['AUDIT_HMAC_KEY'] ?? null,
       operatorId: 'test:retention',
     },
   };
@@ -258,15 +264,26 @@ describe('retention sweep', () => {
     const types = await auditEventTypes();
     expect(types).toContain(AUDIT_PURGE_EVENT_TYPE);
 
-    const marker = await t.db.sql<{ purged_at: string | null; payload_redacted_json: unknown }[]>`
-      SELECT purged_at::text, payload_redacted_json
+    const marker = await t.db.sql<{ purged_at: string | null }[]>`
+      SELECT purged_at::text
         FROM audit_events
        WHERE tenant_id = ${t.tenantId}
          AND event_type = ${AUDIT_PURGE_EVENT_TYPE}
     `;
     expect(marker).toHaveLength(1);
     expect(marker[0]?.purged_at).not.toBeNull();
-    const payload = marker[0]?.payload_redacted_json as { purged_rows?: number; boundary_hash?: string } | null;
+
+    // The marker's payload is read the way an application reads it — through
+    // the repository, which decrypts. Reading the column directly would
+    // return the ENCRYPTION ENVELOPE in a deployment with a key, and the
+    // assertion would pass on the envelope's shape rather than on the
+    // record's contents.
+    const listed = await listAuditEvents(t.db.db, t.tenantId, { eventType: AUDIT_PURGE_EVENT_TYPE }, { limit: 10 });
+    expect(listed.rows).toHaveLength(1);
+    const payload = listed.rows[0]?.payloadRedacted as {
+      purged_rows?: number;
+      boundary_hash?: string;
+    };
     expect(payload?.purged_rows).toBe(1);
     expect(payload?.boundary_hash).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
