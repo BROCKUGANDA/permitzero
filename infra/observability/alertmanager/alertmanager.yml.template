@@ -101,7 +101,7 @@ receivers:
         http_config:
           authorization:
             type: Bearer
-            credentials_file: /etc/alertmanager/pz_metrics_token
+            credentials_file: /etc/alertmanager/pz_alert_token
       # The operator's own receiver. See the note at the top of this file.
       - url: __PZ_ALERT_WEBHOOK_URL__
         send_resolved: true

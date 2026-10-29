@@ -319,9 +319,10 @@ services:
       - |
         set -e
         cp /source/pz_metrics_token /secrets/pz_metrics_token
+        cp /source/pz_alert_token /secrets/pz_alert_token
         cp /source/alertmanager.yml /secrets/alertmanager.yml
-        chown 65534:65534 /secrets/pz_metrics_token /secrets/alertmanager.yml
-        chmod 640 /secrets/pz_metrics_token /secrets/alertmanager.yml
+        chown 65534:65534 /secrets/pz_metrics_token /secrets/pz_alert_token /secrets/alertmanager.yml
+        chmod 640 /secrets/pz_metrics_token /secrets/pz_alert_token /secrets/alertmanager.yml
         echo "observability secrets staged for uid 65534"
 
   edge:
