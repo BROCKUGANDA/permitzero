@@ -184,6 +184,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Check whether these pull requests are eligible
+        id: eligible
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -296,8 +297,16 @@ jobs:
             # If the merge cannot happen, the request stays queued and GitHub
             # tells us why.
             echo "enabling auto-merge"
-            gh pr merge "$PR" --squash --auto --delete-branch \
-              || echo "auto-merge could not be enabled; GitHub will report the reason on the pull request"
+            if gh pr merge "$PR" --squash --auto --delete-branch; then
+              # Only the pull requests that were ACTUALLY promoted are worth
+              # waiting for. A human-authored pull request fails the author
+              # check above and never reaches this line, and waiting for it to
+              # merge would hold a runner slot for nothing.
+              PROMOTED="${PROMOTED:-} $PR"
+              echo "promoted=$PROMOTED" >> "$GITHUB_OUTPUT"
+            else
+              echo "auto-merge could not be enabled; GitHub will report the reason on the pull request"
+            fi
           done
 
       - name: Ensure the merged commit is gated by CI
@@ -317,30 +326,36 @@ jobs:
         # So the merge is followed by an explicit dispatch of CI on main. A
         # workflow_dispatch is exempt from the recursion rule, so the run
         # really does happen, and its completion is what the Deploy workflow
-        # waits for.
+        # waits for. That last part was MEASURED rather than assumed: a
+        # dispatched CI run on main completed, and the Deploy workflow fired
+        # from it two seconds later and deployed successfully.
         #
-        # If a CI run already exists for main's HEAD — because the merge was
-        # performed by GitHub's own auto-merge queue rather than by this
-        # workflow's token — nothing is dispatched, and the run that is
-        # already there is the one that counts.
+        # A merge this workflow registers may land much later than this step
+        # runs — GitHub's auto-merge queue applies the branch protection
+        # rules itself, and the pull request can sit behind a human's
+        # approval for hours. A commit that lands after this window would
+        # still be ungated, so the reconciliation workflow
+        # (.github/workflows/main-gate.yml) closes that gap: it runs on a
+        # schedule and dispatches CI for a main that has no usable run.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           REPO: ${{ github.repository }}
-          PRS: ${{ needs.resolve.outputs.prs }}
+          PROMOTED: ${{ steps.eligible.outputs.promoted }}
         run: |
           set -uo pipefail
 
           # The merge may be queued rather than immediate, so wait for it to
-          # land before deciding what to gate. The wait is bounded: a merge
-          # that has not happened within the window is reported, not waited
-          # on forever, and the promotion itself has already been registered.
-          MERGED=""
-          for PR in ${PRS:-}; do
+          # land. Only the pull requests that were ACTUALLY promoted are
+          # waited for: a human-authored pull request fails the author check
+          # and never gets a merge registered, and waiting for one would
+          # hold a runner slot for nothing.
+          for PR in ${PROMOTED:-}; do
+            MERGED=0
             for _ in $(seq 1 30); do
               STATE=$(gh pr view "$PR" --json state --jq '.state' 2>/dev/null || echo "unknown")
               if [ "$STATE" = "MERGED" ]; then
-                MERGED="$PR"
+                MERGED=1
                 break
               fi
               if [ "$STATE" = "CLOSED" ]; then
@@ -349,35 +364,56 @@ jobs:
               fi
               sleep 10
             done
-            [ -n "$MERGED" ] && break
+            if [ "$MERGED" -ne 1 ]; then
+              echo "pull request $PR has not merged within the window; the reconciliation" >&2
+              echo "workflow will gate main if it lands later" >&2
+              continue
+            fi
+            echo "pull request $PR merged"
           done
 
-          if [ -z "$MERGED" ]; then
-            echo "no pull request merged within the window; the promotion stays queued" >&2
-            echo "and the deploy will follow the push that eventually lands it" >&2
-            exit 0
-          fi
-          echo "pull request $MERGED merged"
-
           # What is on main now is what has to be gated.
-          HEAD_SHA=$(gh api "repos/$REPO/commits/main" --jq '.sha' 2>/dev/null || echo "")
-          if [ -z "$HEAD_SHA" ]; then
-            echo "could not read main's head commit" >&2
-            exit 1
-          fi
-          echo "main is at $HEAD_SHA"
+          #
+          # The dispatch is repeated if main advances while it is being
+          # arranged: the dispatch is made against the mutable `main` ref, so
+          # a merge landing in between would leave the commit that was just
+          # captured without a run of its own.
+          for attempt in 1 2 3; do
+            HEAD_SHA=$(gh api "repos/$REPO/commits/main" --jq '.sha' 2>/dev/null || echo "")
+            if [ -z "$HEAD_SHA" ]; then
+              echo "could not read main's head commit" >&2
+              exit 1
+            fi
+            echo "main is at $HEAD_SHA"
 
-          # Has CI already run for it? If it has, the merge went through
-          # GitHub's own queue rather than this workflow's token, and the
-          # existing run is the one that gates the deploy.
-          EXISTING=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=20" \
-            --jq '[.workflow_runs[] | select(.name == "CI")] | length' 2>/dev/null || echo "")
-          if [ "${EXISTING:-0}" != "0" ]; then
-            echo "CI has already run for $HEAD_SHA; nothing to dispatch"
-            exit 0
-          fi
+            # Has a USABLE CI run already covered it? "Usable" means one that
+            # can satisfy the Deploy workflow's gate: a CI run on main, that
+            # either succeeded or is still running. A cancelled run, or one
+            # that ran against a pull request's merge ref, cannot — and
+            # counting those would leave main ungated while this step
+            # reported that it was already covered.
+            EXISTING=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=20" \
+              --jq '[.workflow_runs[] | select(.name == "CI" and (.event == "push" or .event == "workflow_dispatch") and (.conclusion == "success" or .conclusion == null))] | length' \
+              2>/dev/null || echo "")
+            if [ "${EXISTING:-0}" != "0" ]; then
+              echo "a usable CI run already covers $HEAD_SHA; nothing to dispatch"
+              exit 0
+            fi
 
-          echo "no CI run exists for $HEAD_SHA; dispatching one"
-          gh workflow run ci.yml --ref main \
-            || { echo "could not dispatch CI for $HEAD_SHA" >&2; exit 1; }
-          echo "CI dispatched for $HEAD_SHA; the deploy follows when it passes"
+            echo "no usable CI run covers $HEAD_SHA; dispatching one"
+            if ! gh workflow run ci.yml --ref main; then
+              echo "could not dispatch CI for $HEAD_SHA" >&2
+              exit 1
+            fi
+
+            # Did main move while the dispatch was being arranged?
+            sleep 5
+            NOW_SHA=$(gh api "repos/$REPO/commits/main" --jq '.sha' 2>/dev/null || echo "")
+            if [ "$NOW_SHA" = "$HEAD_SHA" ]; then
+              echo "CI dispatched for $HEAD_SHA; the deploy follows when it passes"
+              exit 0
+            fi
+            echo "main advanced to $NOW_SHA during the dispatch; arranging a run for it"
+          done
+
+          echo "main kept advancing; the reconciliation workflow will gate it" >&2
