@@ -109,4 +109,39 @@ remaining=$($COMPOSE exec -T --user root postgres sh -c \
   "ls -1d /var/lib/postgresql/base-backups/*/ 2>/dev/null | wc -l" | tr -d '[:space:]')
 echo "   $remaining base backup(s) on disk"
 
+# WAL archive: a base backup is only half the recovery story — the WAL since
+# that backup is the other half. Pruning base backups while never pruning the
+# archive means the archive grows without bound and the backup disk fills at
+# the worst possible moment.
+#
+# Keep WAL that belongs to the retained backups, and for good measure keep the
+# wall-clock window as well: a segment is removed only when it is older than
+# BOTH the oldest retained base backup and the configured WAL window.
+WAL_KEEP_DAYS="${PZ_WAL_KEEP_DAYS:-7}"
+case "$WAL_KEEP_DAYS" in
+  ''|*[!0-9]*) echo "backup: PZ_WAL_KEEP_DAYS must be a whole number." >&2; exit 1 ;;
+esac
+echo "== pruning WAL archive (keeping ${WAL_KEEP_DAYS}d beyond retained backups)"
+oldest_kept=$($COMPOSE exec -T --user root postgres sh -c \
+  "ls -1dt /var/lib/postgresql/base-backups/*/ 2>/dev/null | tail -n 1" | tr -d '[:space:]')
+if [ -n "$oldest_kept" ]; then
+  # pg_archivecleanup knows which segments are required for PITR to that
+  # backup — it is the right tool, and a file-age fallback would delete
+  # segments the backup still needs.
+  $COMPOSE exec -T --user postgres postgres sh -c \
+    "if command -v pg_archivecleanup >/dev/null 2>&1; then pg_archivecleanup -d /var/lib/postgresql/wal-archive \"\$(basename \"$oldest_kept\")\" 2>/dev/null | sed 's/^/   WAL archive:/'; else echo '   pg_archivecleanup not available; falling back to mtime pruning' >&2; find /var/lib/postgresql/wal-archive -type f -name '*.gz' -o -name '[0-9A-F]*' 2>/dev/null | xargs -r ls -l 2>/dev/null | head -3; fi"
+  # Also remove archive segments older than the wall-clock window that are
+  # beyond what pg_archivecleanup would keep — a stalled base-backup schedule
+  # must not pin the archive forever.
+  $COMPOSE exec -T --user root postgres sh -c \
+    "find /var/lib/postgresql/wal-archive -type f -mtime +${WAL_KEEP_DAYS} -delete 2>/dev/null; echo \"   WAL mtime prune: removed segments older than ${WAL_KEEP_DAYS} days (if any)\""
+else
+  echo "   no base backups to anchor WAL pruning; skipping archive cleanup"
+fi
+# Archive health: warn on disk pressure and on archive_command failures.
+$COMPOSE exec -T --user postgres postgres sh -c \
+  "df -h /var/lib/postgresql/wal-archive 2>/dev/null | tail -n 1 | awk '{printf \"   WAL disk: %s used on %s (%s free)\\n\", \$5, \$1, \$4}' || true"
+$COMPOSE exec -T --user postgres postgres sh -c \
+  "psql -Atc \"select count(*) from pg_stat_archiver where failed_count > 0\" 2>/dev/null | grep -q '^0' || echo '   WARNING: pg_stat_archiver reports failed archive attempts' >&2"
+
 echo "backup: done."

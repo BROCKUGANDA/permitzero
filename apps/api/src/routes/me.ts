@@ -151,7 +151,11 @@ export interface StepUpResponse {
  * encrypted form, so a lost phone means enrolling again — there is no
  * recovery path, and there is deliberately no support path either.
  */
-export async function enrolMfa(deps: MfaDeps, principal: Principal): Promise<EnrolResponse> {
+export async function enrolMfa(
+  deps: MfaDeps,
+  principal: Principal,
+  code?: string,
+): Promise<EnrolResponse> {
   requireHumanUser(principal);
   if (!deps.enabled) throw new ConflictError('MFA is disabled on this deployment.');
   const key = masterKey(deps);
@@ -175,8 +179,40 @@ export async function enrolMfa(deps: MfaDeps, principal: Principal): Promise<Enr
     );
   }
 
+  // Re-enrolling (or removing) over a confirmed enrolment is only safe
+  // with proof of the CURRENT factor: whoever holds only a bearer token
+  // must not be able to replace the victim's second factor and then mint
+  // step-up assertions from their own authenticator. Refuse with a
+  // 403-class error — the check is "forbidden without a valid current
+  // code", not "the code was wrong".
+  if (state.enrolledAt) {
+    const raw = code?.trim() ?? '';
+    if (!/^\d{6}$/.test(raw)) {
+      throw new ValidationError(
+        'This account already has MFA enrolled. Include the six-digit code from your current authenticator as "code" to replace it.',
+      );
+    }
+    if (!state.row) {
+      // Already handled above (!row && enrolledAt), but kept for
+      // exhaustiveness — the global uniqueness guarantee plus RLS
+      // should not allow this state once the second-workspace fix
+      // (0008) is applied.
+      throw new ConflictError(
+        'This account is already enrolled for MFA in another workspace. Remove that enrolment first.',
+      );
+    }
+    const currentSecret = decryptSecret(state.row.secretEncrypted, key);
+    if (!currentSecret) {
+      throw new ConflictError('The stored MFA secret could not be read. Enrol again.');
+    }
+    spendCode(state.row.lastCodeHash, key, currentSecret, raw, now);
+  }
+
   try {
     await scope(async (ex) => {
+      if (state.enrolledAt && state.row) {
+        await recordConsumedMfaCode(ex, tenantId, principal.actorId, hashConsumedCode(key, (code as string).trim()));
+      }
       await upsertMfaSecret(ex, {
         id: newId('credential'),
         tenantId,
@@ -302,7 +338,11 @@ function spendCode(lastCodeHash: string | null, key: Buffer, secret: string, cod
 }
 
 /** Remove the enrolment: the secret goes, and the account is not enrolled. */
-export async function removeMfa(deps: MfaDeps, principal: Principal): Promise<{ deleted: true }> {
+export async function removeMfa(
+  deps: MfaDeps,
+  principal: Principal,
+  code?: string,
+): Promise<{ deleted: true }> {
   requireHumanUser(principal);
   const tenantId = principal.tenantId;
   return tenantScope(
@@ -311,6 +351,26 @@ export async function removeMfa(deps: MfaDeps, principal: Principal): Promise<{ 
   )(async (ex) => {
     const row = await getMfaSecretByUserId(ex, tenantId, principal.actorId);
     if (!row) throw new NotFoundError('There is no MFA enrolment to remove.');
+    const enrolledAt = await getUserMfaEnrolledAt(ex, principal.actorId);
+    // Deleting a confirmed enrolment is only safe with proof of the
+    // current factor, for the same reason re-enrolling is — otherwise a
+    // bearer token alone can remove the victim's second factor.
+    if (enrolledAt) {
+      const raw = code?.trim() ?? '';
+      if (!/^\d{6}$/.test(raw)) {
+        throw new ValidationError(
+          'This account already has MFA enrolled. Include the six-digit code from your current authenticator as "code" to remove it.',
+        );
+      }
+      const key = masterKey(deps);
+      const now = deps.clock?.() ?? new Date();
+      const currentSecret = decryptSecret(row.secretEncrypted, key);
+      if (!currentSecret) {
+        throw new ConflictError('The stored MFA secret could not be read. Enrol again.');
+      }
+      spendCode(row.lastCodeHash, key, currentSecret, raw, now);
+      await recordConsumedMfaCode(ex, tenantId, principal.actorId, hashConsumedCode(key, raw));
+    }
     await deleteMfaSecret(ex, tenantId, principal.actorId);
     await setUserMfaEnrolledAt(ex, principal.actorId, null);
     return { deleted: true };
@@ -425,6 +485,15 @@ const mfaCodeBodySchema = z
   })
   .strict();
 
+const mfaEnrolBodySchema = z
+  .object({
+    code: z
+      .string()
+      .regex(/^\d{6}$/, 'expected the six-digit code from your current authenticator')
+      .optional(),
+  })
+  .strict();
+
 export async function meRoutes(app: ZodFastifyInstance, ctx: AppContext): Promise<void> {
   app.addHook('preHandler', async (request) => {
     request.principal = await authenticateToken(ctx.runtime, request.headers.authorization, new Date());
@@ -439,10 +508,10 @@ export async function meRoutes(app: ZodFastifyInstance, ctx: AppContext): Promis
   app.post(
     '/me/mfa/enrol',
     {
-      schema: { response: { 200: enrolResponseSchema } },
+      schema: { body: mfaEnrolBodySchema, response: { 200: enrolResponseSchema } },
       config: { rateLimit: authBudget },
     },
-    async (request) => enrolMfa(deps, request.principal),
+    async (request) => enrolMfa(deps, request.principal, (request.body as { code?: string } | undefined)?.code),
   );
 
   app.post(
@@ -466,9 +535,9 @@ export async function meRoutes(app: ZodFastifyInstance, ctx: AppContext): Promis
   app.delete(
     '/me/mfa',
     {
-      schema: { response: { 200: deleteResponseSchema } },
+      schema: { body: mfaEnrolBodySchema, response: { 200: deleteResponseSchema } },
       config: { rateLimit: authBudget },
     },
-    async (request) => removeMfa(deps, request.principal),
+    async (request) => removeMfa(deps, request.principal, (request.body as { code?: string } | undefined)?.code),
   );
 }

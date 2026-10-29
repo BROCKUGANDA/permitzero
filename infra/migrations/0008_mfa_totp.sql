@@ -101,6 +101,23 @@ SELECT public.pz_enforce_tenant_rls('mfa_secrets');
 COMMENT ON POLICY tenant_isolation ON public.mfa_secrets IS
   'SECURITY: the tenant boundary for MFA secrets. The secret belongs to a person; the row that holds it lives in the tenant the enrolment happened under, and no transaction outside that tenant can read or change it.';
 
+-- Per-user, not per-tenant: a person has one authenticator.
+--
+-- The preceding statement applied the project's default tenant isolation to
+-- this table, which hid a secret enrolled in one workspace from every other
+-- workspace the same person belongs to. A step-up in that other workspace
+-- then looked up no secret, concluded "not enrolled", and approved without
+-- asking — the finding "Second-workspace approvals lose MFA".
+--
+-- MFA is a property of the person, not the workspace. The row's
+-- `tenant_id` remains for provenance (where the enrolment happened), but
+-- the boundary is removed so the lookup is visible to the person wherever
+-- they are. The enrolment row plus `users.mfa_enrolled_at` remain the
+-- cross-workspace markers; the global uniqueness index `uq_mfa_secrets_user`
+-- is still the database's statement of "one authenticator per person".
+ALTER TABLE public.mfa_secrets DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON public.mfa_secrets;
+
 -- -----------------------------------------------------------------------------
 -- 3. One writable column on `users`.
 --
