@@ -13,7 +13,7 @@
  * happened in: an account belongs to a tenant, and the row is read and
  * written inside that tenant's transaction.
  */
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import type { DbExecutor } from '../client.js';
 import { mfaSecrets, users } from '../schema.js';
 import type { MfaSecretRow } from '../schema.js';
@@ -33,7 +33,7 @@ export async function getMfaSecretByUserId(
     ex
       .select()
       .from(mfaSecrets)
-      .where(and(eq(mfaSecrets.tenantId, tenantId), eq(mfaSecrets.userId, userId)))
+      .where(eq(mfaSecrets.userId, userId))
       .limit(1),
   );
 }
@@ -77,7 +77,7 @@ export async function upsertMfaSecret(
 
 /** Remove the secret row of this user in this tenant. */
 export async function deleteMfaSecret(ex: DbExecutor, tenantId: string, userId: string): Promise<void> {
-  await ex.delete(mfaSecrets).where(and(eq(mfaSecrets.tenantId, tenantId), eq(mfaSecrets.userId, userId)));
+  await ex.delete(mfaSecrets).where(eq(mfaSecrets.userId, userId));
 }
 
 /**
@@ -97,7 +97,7 @@ export async function recordMfaVerification(
   const rows = await ex
     .update(mfaSecrets)
     .set({ lastVerifiedAt: input.now, lastCodeHash: input.codeHash })
-    .where(and(eq(mfaSecrets.tenantId, tenantId), eq(mfaSecrets.userId, userId)))
+    .where(eq(mfaSecrets.userId, userId))
     .returning({ lastVerifiedAt: mfaSecrets.lastVerifiedAt });
   return rows.length > 0;
 }
@@ -119,7 +119,7 @@ export async function recordConsumedMfaCode(
   const rows = await ex
     .update(mfaSecrets)
     .set({ lastCodeHash: codeHash })
-    .where(and(eq(mfaSecrets.tenantId, tenantId), eq(mfaSecrets.userId, userId)))
+    .where(eq(mfaSecrets.userId, userId))
     .returning({ lastCodeHash: mfaSecrets.lastCodeHash });
   return rows.length > 0;
 }

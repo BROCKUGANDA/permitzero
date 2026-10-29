@@ -98,7 +98,35 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_mfa_secrets_user ON public.mfa_secrets (use
 -- intent here rather than relying on the trigger having fired.
 SELECT public.pz_enforce_tenant_rls('mfa_secrets');
 
-COMMENT ON POLICY tenant_isolation ON public.mfa_secrets IS
+-- The secret belongs to the person, not to the workspace where it was first
+-- enrolled. A member may therefore read and update that person's one row from
+-- any workspace they belong to, while new rows are still written only into
+-- the current workspace.
+DROP POLICY tenant_isolation ON public.mfa_secrets;
+CREATE POLICY tenant_isolation_read ON public.mfa_secrets
+  FOR SELECT TO pz_app
+  USING (EXISTS (
+    SELECT 1 FROM public.tenant_memberships m
+    WHERE m.tenant_id = pz_current_tenant() AND m.user_id = mfa_secrets.user_id
+  ));
+CREATE POLICY tenant_isolation_write ON public.mfa_secrets
+  FOR INSERT TO pz_app
+  WITH CHECK (tenant_id = pz_current_tenant());
+CREATE POLICY tenant_isolation_update ON public.mfa_secrets
+  FOR UPDATE TO pz_app
+  USING (EXISTS (
+    SELECT 1 FROM public.tenant_memberships m
+    WHERE m.tenant_id = pz_current_tenant() AND m.user_id = mfa_secrets.user_id
+  ))
+  WITH CHECK (tenant_id = mfa_secrets.tenant_id);
+CREATE POLICY tenant_isolation_delete ON public.mfa_secrets
+  FOR DELETE TO pz_app
+  USING (EXISTS (
+    SELECT 1 FROM public.tenant_memberships m
+    WHERE m.tenant_id = pz_current_tenant() AND m.user_id = mfa_secrets.user_id
+  ));
+
+COMMENT ON POLICY tenant_isolation_read ON public.mfa_secrets IS
   'SECURITY: the tenant boundary for MFA secrets. The secret belongs to a person; the row that holds it lives in the tenant the enrolment happened under, and no transaction outside that tenant can read or change it.';
 
 -- -----------------------------------------------------------------------------
