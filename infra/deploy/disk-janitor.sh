@@ -138,6 +138,12 @@ fi
 # looked six hours older than it was -- old enough to be removed while the
 # job that created it was still using it.
 STALE_CONTAINER_AGE="${PZ_STALE_CONTAINER_AGE:-3600}"
+
+# The orphaned volumes the CI service containers leave behind. They are
+# removed on the same schedule as the containers themselves: a volume that
+# outlives its container by an hour is not going to be used again, and it
+# is holding tens of megabytes of somebody's database.
+STALE_VOLUME_AGE="${PZ_STALE_VOLUME_AGE:-3600}"
 now=$(date +%s)
 while IFS='|' read -r name created; do
   [ -n "$name" ] || continue
@@ -166,6 +172,73 @@ while IFS='|' read -r name created; do
     log "removed stale service container $name (${age}s old)"
   fi
 done < <(docker ps -a --format '{{.Names}}|{{.CreatedAt}}')
+
+# The ANONYMOUS VOLUMES the CI service containers leave behind.
+#
+# A GitHub Actions service container that declares a volume gets an anonymous
+# Docker volume for it, and the runner does NOT remove it when the job ends.
+# The postgres service container writes a fresh database into one on every
+# run, so the volumes accumulate at roughly 50–100 MB each — hundreds of
+# them, tens of gigabytes, until the disk fills and every project on this
+# box starts failing.
+#
+# That is not hypothetical: this box reached 89% full with 226 orphaned
+# volumes holding about twenty gigabytes, and a CI job's `npm ci` failed
+# because of it.
+#
+# `docker volume ls --filter dangling=true` lists exactly the volumes that
+# no container references, so this cannot touch a running service's data.
+#
+# But "dangling" is not the same as "disposable". A NAMED volume — the
+# production database of any project on this box — also becomes dangling the
+# moment its container is removed, and removing it would destroy a database
+# that a `compose up` was about to reattach to. So only ANONYMOUS volumes
+# are removed: Docker names those with 64 hexadecimal characters, and the
+# CI service containers create exactly those.
+#
+# The age check is belt and braces: a volume created moments ago is left
+# alone in case its container is still starting.
+#
+# Every failure is reported. A janitor that cannot do its job and says
+# nothing is worse than one that says so: the operator sees a healthy log and
+# a full disk, and has no reason to look at the janitor at all.
+VOLUMES=$(docker volume ls -q --filter dangling=true 2>/dev/null)
+if [ $? -ne 0 ]; then
+  log "could not list the dangling volumes; none were removed"
+  VOLUMES=""
+fi
+printf '%s\n' "$VOLUMES" | while read -r VOL; do
+  [ -n "$VOL" ] || continue
+  # Only an anonymous volume. A named one belongs to a project, and this
+  # script does not get to decide that its data is garbage.
+  case "$VOL" in
+    [0-9a-f]*) ;;
+    *) continue ;;
+  esac
+  if [ "${#VOL}" -ne 64 ]; then
+    continue
+  fi
+  CREATED=$(docker volume inspect -f '{{.CreatedAt}}' "$VOL" 2>/dev/null || echo "")
+  if [ -z "$CREATED" ]; then
+    log "could not read the creation time of volume ${VOL:0:12}; leaving it alone"
+    continue
+  fi
+  EPOCH=$(date -d "$CREATED" +%s 2>/dev/null || echo 0)
+  NOW=$(date +%s)
+  if [ "$EPOCH" -eq 0 ]; then
+    # An unreadable creation time is not an authorisation to delete.
+    log "could not parse the creation time of volume ${VOL:0:12}; leaving it alone"
+    continue
+  fi
+  AGE=$((NOW - EPOCH))
+  if [ "$AGE" -gt "$STALE_VOLUME_AGE" ]; then
+    if docker volume rm "$VOL" >/dev/null 2>&1; then
+      log "removed orphaned volume ${VOL:0:12} (${AGE}s old)"
+    else
+      log "could not remove orphaned volume ${VOL:0:12}; it is still there"
+    fi
+  fi
+done
 
 # The build cache and the images.
 #
