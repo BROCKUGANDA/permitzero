@@ -109,4 +109,17 @@ remaining=$($COMPOSE exec -T --user root postgres sh -c \
   "ls -1d /var/lib/postgresql/base-backups/*/ 2>/dev/null | wc -l" | tr -d '[:space:]')
 echo "   $remaining base backup(s) on disk"
 
+# A retained base backup is the recovery floor: WAL before its START WAL
+# location cannot be used by any retained backup. pg_archivecleanup removes
+# only complete segments older than that floor; if the label cannot be read we
+# deliberately keep the archive rather than risk making recovery incomplete.
+echo "== pruning WAL before the oldest retained backup"
+$COMPOSE exec -T --user root postgres sh -c '
+  oldest=$(ls -1dt /var/lib/postgresql/base-backups/*/ 2>/dev/null | tail -n 1)
+  [ -n "$oldest" ] || exit 0
+  wal=$(tar -xOzf "$oldest/base.tar.gz" backup_label 2>/dev/null | sed -n "s/^START WAL LOCATION:.*(file \([^)]*\)).*/\1/p")
+  [ -n "$wal" ] || { echo "   WAL kept: backup label unavailable"; exit 0; }
+  pg_archivecleanup /var/lib/postgresql/wal-archive "$wal"
+'
+
 echo "backup: done."
