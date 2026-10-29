@@ -85,7 +85,9 @@ async function insertOutbox(createdAt: Date): Promise<string> {
   });
   await t.db.sql`
     UPDATE outbox_events
-       SET created_at = ${createdAt.toISOString()}
+       SET created_at = ${createdAt.toISOString()},
+           status = 'PUBLISHED',
+           published_at = ${createdAt.toISOString()}
      WHERE tenant_id = ${t.tenantId}
        AND outbox_event_id = ${row.id}
   `;
