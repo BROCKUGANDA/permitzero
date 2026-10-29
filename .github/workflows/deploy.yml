@@ -334,10 +334,23 @@ jobs:
           # would be reported as "the runtime role sees N audit rows", which
           # is a misleading statement about row-level security when the real
           # problem is a password.
-          if ROWS=$($COMPOSE exec -T postgres psql -U pz_app -d "$PZ_PG_DB" -t -A -c \
-            "SELECT count(*) FROM audit_events;" 2>&1); then
-            ROWS=$(printf '%s' "$ROWS" | tr -d '[:space:]')
-          else
+          #
+          # It RETRIES, because the deploy has just recreated the containers
+          # and a probe that loses that race reports a broken deployment that
+          # is not broken. The check that matters — that the runtime role
+          # cannot see another tenant's rows — is the same on the second
+          # attempt as on the first; only the container's readiness differs.
+          ROWS=""
+          for attempt in 1 2 3 4 5 6; do
+            if ROWS=$($COMPOSE exec -T postgres psql -U pz_app -d "$PZ_PG_DB" -t -A -c \
+              "SELECT count(*) FROM audit_events;" 2>&1); then
+              ROWS=$(printf '%s' "$ROWS" | tr -d '[:space:]')
+              break
+            fi
+            echo "  attempt $attempt: the isolation probe could not run; retrying" >&2
+            sleep 10
+          done
+          if ! printf '%s' "$ROWS" | grep -Eq '^[0-9]+$'; then
             echo "could not run the isolation probe against the live database" >&2
             printf '  %s\n' "$(printf '%s' "$ROWS" | head -c 300)" >&2
             echo "  this is a connection or authentication problem, not a row-level security failure" >&2
