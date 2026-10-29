@@ -181,7 +181,7 @@ function countRows(result: unknown): number {
  * tenant: the sweep is not selective about which rows it would have removed,
  * so it does not remove any of them.
  */
-async function activeLegalHold(tx: DbTransaction, tenantId: string, now: Date): Promise<string | null> {
+async function activeLegalHold(tx: DbTransaction, tenantId: string, _now: Date): Promise<string | null> {
   const rows = await tx.execute(sql`
     SELECT legal_hold_id, reason, operator_id, placed_at
       FROM public.legal_holds
