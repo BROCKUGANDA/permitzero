@@ -36,9 +36,11 @@ const SINGLE_KEY_ENV = 'AUDIT_HMAC_KEY';
 // This script's output IS its purpose: it prints the environment value for
 // each rotation step. Bare `console.log` is the project's logging rule
 // violation, but operator-facing CLI output is the explicitly permitted case.
+const _origLog = console.log.bind(console);
+const _origError = console.error.bind(console);
 const cliOut = {
-  log: (...args: unknown[]) => cliOut.log(...args),
-  error: (...args: unknown[]) => cliOut.error(...args),
+  log: (...args: unknown[]) => _origLog(...args),
+  error: (...args: unknown[]) => _origError(...args),
 };
 
 interface Options {
