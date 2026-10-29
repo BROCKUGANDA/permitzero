@@ -154,6 +154,18 @@ export async function consumeMfaCodeStep(
   return rows.length > 0;
 }
 
+/** Re-encrypt the stored secret under the current key after a successful
+ * read with a retained one. Without this, a rotated key would leave every
+ * existing enrolment unreadable once the old key is retired. */
+export async function reencryptMfaSecret(
+  ex: DbExecutor,
+  _tenantId: string,
+  userId: string,
+  newEncrypted: string,
+): Promise<void> {
+  await ex.update(mfaSecrets).set({ secretEncrypted: newEncrypted }).where(eq(mfaSecrets.userId, userId));
+}
+
 /**
  * Lock the MFA row for this user. Use it when the caller must read a value
  * that it will then act on in the same transaction (spendCode's check-then-
