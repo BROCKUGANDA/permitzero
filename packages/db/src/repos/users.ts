@@ -14,7 +14,7 @@
  * be visible in every workspace the person belongs to, or a step-up in a
  * second workspace looks up no secret and approves without asking.
  */
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { DbExecutor } from '../client.js';
 import { mfaSecrets, users } from '../schema.js';
 import type { MfaSecretRow } from '../schema.js';
@@ -116,6 +116,76 @@ export async function recordConsumedMfaCode(
     .set({ lastCodeHash: codeHash })
     .where(eq(mfaSecrets.userId, userId))
     .returning({ lastCodeHash: mfaSecrets.lastCodeHash });
+  return rows.length > 0;
+}
+
+/**
+ * Atomically consume a TOTP code: accept it only when its step exceeds the
+ * stored one.
+ *
+ * A TOTP code is valid for a whole thirty-second step, and the window is
+ * ±1 — so a code from step T is still "valid" when T+1 was accepted. With
+ * only `lastCodeHash` this earlier code could be replayed after a later one,
+ * because a different code means a different hash. The step counter is the
+ * monotonic replay boundary: a code whose step is not ahead of the stored
+ * one is a replay, even if its hash is different.
+ *
+ * Uses a single conditional UPDATE — zero rows updated means a replay,
+ * including a concurrent same-step replay, because the check and the write
+ * are the same statement. The caller therefore never needs a separate lock.
+ */
+export async function consumeMfaCodeStep(
+  ex: DbExecutor,
+  _tenantId: string,
+  userId: string,
+  step: number,
+  codeHash: string,
+): Promise<boolean> {
+  const rows = await ex
+    .update(mfaSecrets)
+    .set({ lastUsedStep: step, lastCodeHash: codeHash })
+    .where(
+      and(
+        eq(mfaSecrets.userId, userId),
+        sql`(${mfaSecrets.lastUsedStep} IS NULL OR ${mfaSecrets.lastUsedStep} < ${step})`,
+      ),
+    )
+    .returning({ lastUsedStep: mfaSecrets.lastUsedStep });
+  return rows.length > 0;
+}
+
+/**
+ * Lock the MFA row for this user. Use it when the caller must read a value
+ * that it will then act on in the same transaction (spendCode's check-then-
+ * write) and cannot use `consumeMfaCodeStep` yet — concurrent callers would
+ * otherwise read the same `lastCodeHash` and both accept the same code.
+ */
+export async function lockMfaSecretForUpdate(
+  ex: DbExecutor,
+  _tenantId: string,
+  userId: string,
+): Promise<MfaSecretRow | null> {
+  const rows = await ex.execute(sql`
+    SELECT * FROM public.mfa_secrets
+     WHERE user_id = ${userId}
+     FOR UPDATE
+  `);
+  const r = (rows as unknown as MfaSecretRow[])[0] ?? null;
+  return r;
+}
+
+/** Record that this account completed a step-up verification at `now`. */
+export async function touchMfaVerifiedAt(
+  ex: DbExecutor,
+  _tenantId: string,
+  userId: string,
+  now: Date,
+): Promise<boolean> {
+  const rows = await ex
+    .update(mfaSecrets)
+    .set({ lastVerifiedAt: now })
+    .where(eq(mfaSecrets.userId, userId))
+    .returning({ lastVerifiedAt: mfaSecrets.lastVerifiedAt });
   return rows.length > 0;
 }
 

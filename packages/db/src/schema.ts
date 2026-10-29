@@ -164,8 +164,16 @@ export const mfaSecrets = pgTable(
      * Keyed fingerprint of the last TOTP code this account spent. A code is
      * good for a whole thirty-second step, so without this a captured code
      * could be presented twice; with it, the second presentation is refused.
+     * Kept for backwards compatibility after the step counter was added — new
+     * code consumes the step, but the hash remains the check for a concurrent
+     * same-step replay against the old path.
      */
     lastCodeHash: text('last_code_hash'),
+    /** The TOTP step counter of the last accepted code. A code from an
+     * earlier or equal step is a replay, even if it is a different code
+     * from that step — the window is ±1, so without this a code from step
+     * T could be replayed after T+1 was accepted. */
+    lastUsedStep: bigint('last_used_step', { mode: 'number' }),
   },
   (t) => [
     uniqueIndex('uq_mfa_secrets_user').on(t.userId),
