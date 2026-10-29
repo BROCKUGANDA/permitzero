@@ -258,7 +258,12 @@ export async function enrolMfa(deps: MfaDeps, principal: Principal, code?: strin
         }
         const openedInner = decryptSecretAny(curRow.secretEncrypted, keys);
         if (openedInner) {
-          const rawInner = (code as string).trim();
+          const rawInner = code?.trim() ?? '';
+          if (!/^\d{6}$/.test(rawInner)) {
+            throw new ValidationError(
+              'This account already has MFA enrolled. Include the six-digit code from your current authenticator as "code" to replace it.',
+            );
+          }
           const stepInner = verifyTotpCodeStep(openedInner.secret, rawInner, now.getTime());
           if (stepInner === null) {
             throw new ValidationError('That code is not valid.');
@@ -620,7 +625,7 @@ export async function meRoutes(app: ZodFastifyInstance, ctx: AppContext): Promis
   app.delete(
     '/me/mfa',
     {
-      schema: { body: mfaEnrolBodySchema.optional(), response: { 200: deleteResponseSchema } },
+      schema: { response: { 200: deleteResponseSchema } },
       config: { rateLimit: authBudget },
     },
     async (request) => removeMfa(deps, request.principal, (request.body as { code?: string } | undefined)?.code),
