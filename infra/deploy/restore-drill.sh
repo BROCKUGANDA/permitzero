@@ -112,7 +112,25 @@ log "taking a base backup"
 STAMP=$($COMPOSE exec -T --user root postgres sh -c 'cat /var/lib/postgresql/base-backups/LATEST' | tr -d '[:space:]')
 [ -n "$STAMP" ] || fail "the backup script did not record which backup it took."
 BACKUP_DIR="$BACKUP_ROOT/base/$STAMP"
-[ -f "$BACKUP_DIR/base.tar.gz" ] || fail "no base.tar.gz in $BACKUP_DIR."
+
+# The backup is checked INSIDE the container, not on the host.
+#
+# `pg_basebackup` creates the backup directory mode 0700 owned by the
+# container's postgres user, which is the right mode for a copy of the whole
+# database. The consequence is that the deploying user on the host cannot
+# traverse into it, so a host-side `[ -f .../base.tar.gz ]` reports FALSE for
+# a backup that is sitting there, complete and verified. That is not a
+# cosmetic difference: a drill that cannot read its own backups will report
+# a false outage, and a drill that is trained to report false outages gets
+# ignored.
+#
+# The restore itself does not need host-side readability either — the bind
+# mount is resolved by the daemon as root — so the tight permissions cost
+# nothing and are kept.
+if ! $COMPOSE exec -T --user root postgres sh -c \
+  "test -f '/var/lib/postgresql/base-backups/$STAMP/base.tar.gz'"; then
+  fail "no base.tar.gz in $BACKUP_DIR."
+fi
 log "   backup $STAMP"
 
 # The counts the restored copy is compared against. Taken now, so the
