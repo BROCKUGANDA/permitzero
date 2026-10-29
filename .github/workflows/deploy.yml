@@ -178,7 +178,7 @@ jobs:
           fi
           echo "all three required checks are green on $SHA"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The commit CI verified, not the default branch's HEAD: on the
           # workflow_run path the two are not the same thing.

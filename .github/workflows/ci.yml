@@ -159,9 +159,9 @@ jobs:
       # The disk is reclaimed by the `reclaim` job above, which runs before
       # this one because GitHub starts this job's service containers before
       # any step in it runs.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -343,9 +343,9 @@ jobs:
       # before any step in it runs, so the disk is reclaimed by the `reclaim`
       # job that this job depends on -- which declares no services and
       # therefore runs before Docker is asked for anything.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -511,7 +511,7 @@ jobs:
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
