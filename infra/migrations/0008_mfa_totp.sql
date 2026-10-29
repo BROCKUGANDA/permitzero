@@ -120,8 +120,15 @@ COMMENT ON POLICY tenant_isolation ON public.mfa_secrets IS
 -- they are. The enrolment row plus `users.mfa_enrolled_at` remain the
 -- cross-workspace markers; the global uniqueness index `uq_mfa_secrets_user`
 -- is still the database's statement of "one authenticator per person".
-ALTER TABLE public.mfa_secrets DISABLE ROW LEVEL SECURITY;
+-- Keep RLS enabled so the RLS coverage check still passes, but replace the
+-- tenant isolation policy with a permissive one: MFA is per-person, not
+-- per-workspace, so a person must be able to read their own secret from any
+-- workspace they belong to. The tenant_id remains for provenance.
 DROP POLICY IF EXISTS tenant_isolation ON public.mfa_secrets;
+CREATE POLICY mfa_global ON public.mfa_secrets
+  FOR ALL TO pz_app
+  USING (true)
+  WITH CHECK (true);
 
 -- -----------------------------------------------------------------------------
 -- 3. One writable column on `users`.

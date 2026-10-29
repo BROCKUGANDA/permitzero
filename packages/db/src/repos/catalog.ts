@@ -7,7 +7,7 @@ import { and, asc, desc, eq, isNull } from 'drizzle-orm';
 import { newId } from '@permitzero/domain';
 import type { ActorType, EnforcementMode, Environment, VendorStatus } from '@permitzero/domain';
 import type { DbExecutor } from '../client.js';
-import { currentKey, deriveKey, encryptNullableColumn, readColumn, verificationKeys } from '../crypto.js';
+import { currentKey, deriveKey, encryptColumn, encryptNullableColumn, readColumn, verificationKeys } from '../crypto.js';
 import {
   connectorDispatches,
   connectorLedger,
@@ -278,6 +278,17 @@ export async function insertPurchaseOrder(
   return row;
 }
 
+const LEDGER_RECEIPT_PURPOSE = 'ledger-receipt';
+
+function ledgerReceiptKeys(master: string | null): Buffer[] {
+  const explicit = master ? [master, ...verificationKeys()] : verificationKeys();
+  return explicit.map((k) => deriveKey(k, LEDGER_RECEIPT_PURPOSE));
+}
+
+function withDecryptedReceipt<T extends { receiptJson: unknown }>(row: T, master: string | null): T {
+  return { ...row, receiptJson: readColumn<Record<string, unknown>>(row.receiptJson, ledgerReceiptKeys(master)) };
+}
+
 // -- Ledger -------------------------------------------------------------------
 
 export async function getLedgerEntry(
@@ -285,7 +296,7 @@ export async function getLedgerEntry(
   tenantId: string,
   connectorIdempotencyKey: string,
 ): Promise<ConnectorLedgerRow | null> {
-  return first(
+  const row = await first(
     ex
       .select()
       .from(connectorLedger)
@@ -297,6 +308,7 @@ export async function getLedgerEntry(
       )
       .limit(1),
   );
+  return row ? withDecryptedReceipt(row, currentKey()) : null;
 }
 
 /** The exactly-once guard: concurrent identical inserts collapse to the first. */
@@ -318,6 +330,8 @@ export async function putLedgerEntryIfAbsent(
     recordedAt: Date;
   },
 ): Promise<{ inserted: boolean; entry: ConnectorLedgerRow }> {
+  const master = currentKey();
+  const receiptJson = master ? encryptColumn(input.receipt, deriveKey(master, LEDGER_RECEIPT_PURPOSE)) : input.receipt;
   const inserted = await ex
     .insert(connectorLedger)
     .values({
@@ -328,7 +342,7 @@ export async function putLedgerEntryIfAbsent(
       operation: input.operation,
       externalReference: input.externalReference,
       receiptHash: typeof input.receipt['receiptHash'] === 'string' ? (input.receipt['receiptHash'] as string) : '',
-      receiptJson: input.receipt,
+      receiptJson,
       amountMinor: input.amountMinor ?? null,
       currency: input.currency ?? null,
       beneficiaryRef: input.beneficiaryRef ?? null,
@@ -340,18 +354,20 @@ export async function putLedgerEntryIfAbsent(
     })
     .onConflictDoNothing({ target: [connectorLedger.tenantId, connectorLedger.connectorIdempotencyKey] })
     .returning();
-  if (inserted[0]) return { inserted: true, entry: inserted[0] };
+  if (inserted[0]) return { inserted: true, entry: withDecryptedReceipt(inserted[0], master) };
   const existing = await getLedgerEntry(ex, input.tenantId, input.connectorIdempotencyKey);
   if (!existing) throw new Error('ledger entry vanished after conflict');
   return { inserted: false, entry: existing };
 }
 
 export async function listLedger(ex: DbExecutor, tenantId: string): Promise<ConnectorLedgerRow[]> {
-  return ex
+  const rows = await ex
     .select()
     .from(connectorLedger)
     .where(eq(connectorLedger.tenantId, tenantId))
     .orderBy(asc(connectorLedger.createdAt));
+  const master = currentKey();
+  return rows.map((r) => withDecryptedReceipt(r, master));
 }
 
 // -- Dispatch markers ---------------------------------------------------------

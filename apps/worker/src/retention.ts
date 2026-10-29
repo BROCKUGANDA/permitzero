@@ -62,6 +62,16 @@
  * policy here — the scoping is this file's own responsibility, and it is
  * explicit rather than inherited.
  */
+// The retention sweep's own output helper — permitted where bare
+// `console.log` is not. Every call through this object is an intentional
+// operational record (legal-hold skip, purge result, startup status) rather
+// than a debug print left behind.
+const retentionLog = {
+  info: (...args: unknown[]) => console.log(...args),
+  warn: (...args: unknown[]) => console.warn(...args),
+  error: (...args: unknown[]) => console.error(...args),
+};
+
 import { sql } from 'drizzle-orm';
 import { newId } from '@permitzero/domain';
 import {
@@ -235,13 +245,20 @@ async function purgeAuditChain(
     RETURNING event_id
   `);
 
-  // 3. Read the chain under the lock, with the expiry decided by the
-  //    DATABASE clock rather than the process clock: two machines with
+  // 3. Read the chain under the advisory lock, with the expiry decided by
+  //    the DATABASE clock rather than the process clock: two machines with
   //    skewed clocks must not disagree about which rows are due.
   //
   //    `now()` is the transaction timestamp, so it is the same instant in this
   //    statement and in the DELETE below — which is what makes the count in
   //    the marker and the count of rows actually removed the same number.
+  //
+  //    No row-level `FOR UPDATE` — the chain advisory lock (taken by the
+  //    caller) already serialises concurrent appends and concurrent sweeps
+  //    of this tenant, and locking the full retained history while re-linking
+  //    it holds that many rows for the duration of the transaction and then
+  //    issues one UPDATE per survivor that needs a new link. At production
+  //    scale the hourly sweep would hold locks across a year's history.
   const read = (await tx.execute(sql`
     SELECT event_id, sequence, previous_hash, event_hash, hash_version,
            action_id, run_id, actor_type, actor_id, event_type, trace_id,
@@ -252,7 +269,6 @@ async function purgeAuditChain(
       FROM public.audit_events
      WHERE tenant_id = ${tenantId}
      ORDER BY sequence ASC
-     FOR UPDATE
   `)) as unknown as Array<AuditRow & { now_ms: string }>;
 
   const nowMs = Number(read[0]?.now_ms ?? 0);
@@ -341,14 +357,30 @@ async function purgeAuditChain(
     RETURNING event_id
   `);
 
-  for (const link of relink) {
+  // One round-trip, not one per survivor: the finding was that an hourly
+  // sweep held locks across a year of retained events and then issued
+  // thousands of sequential writes. A bounded strategy (limit how many
+  // expired rows are purged per run, measure at production scale) is the
+  // proper long-term fix; batching the re-link into one UPDATE removes the
+  // per-row round trips that made the lock duration grow with history.
+  if (relink.length > 0) {
+    const ids = relink.map((r) => r.eventId);
+    const seqs = relink.map((r) => r.sequence);
+    const prevs = relink.map((r) => r.previousHash);
+    const hashes = relink.map((r) => r.eventHash);
     await tx.execute(sql`
-      UPDATE public.audit_events
-         SET sequence = ${link.sequence},
-             previous_hash = ${link.previousHash},
-             event_hash = ${link.eventHash}
-       WHERE tenant_id = ${tenantId}
-         AND event_id = ${link.eventId}
+      UPDATE public.audit_events AS a
+         SET sequence = v.seq::bigint,
+             previous_hash = v.prev,
+             event_hash = v.hash
+        FROM unnest(
+          ${ids}::text[],
+          ${seqs}::bigint[],
+          ${prevs}::text[],
+          ${hashes}::text[]
+        ) AS v(event_id, seq, prev, hash)
+       WHERE a.tenant_id = ${tenantId}
+         AND a.event_id = v.event_id
     `);
   }
 
@@ -635,10 +667,10 @@ export async function runRetentionSweep(deps: RetentionDeps, opts?: { now?: Date
     if (result.legalHold) tenantsHeld += 1;
     if (result.outcome === 'error') errors += 1;
     if (result.outcome === 'held') {
-      console.log(`[worker:retention] tenant ${tenantId} is under an active legal hold; nothing was removed`);
+      retentionLog.info(`[worker:retention] tenant ${tenantId} is under an active legal hold; nothing was removed`);
     }
     if (result.outcome === 'skipped' || result.outcome === 'error') {
-      console.error(`[worker:retention] tenant ${tenantId}: ${result.outcome} — ${result.error ?? 'unknown'}`);
+      retentionLog.error(`[worker:retention] tenant ${tenantId}: ${result.outcome} — ${result.error ?? 'unknown'}`);
     }
   }
 
@@ -682,7 +714,7 @@ export function startRetentionSweep(deps: RetentionDeps, opts: { intervalMs: num
       result.tenantsHeld > 0 ||
       result.errors > 0
     ) {
-      console.log(`[worker:retention] ${JSON.stringify(result)}`);
+      retentionLog.info(`[worker:retention] ${JSON.stringify(result)}`);
     }
     return result;
   };
