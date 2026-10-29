@@ -215,11 +215,25 @@ jobs:
             #
             # This is also what keeps a fork out of a workflow that holds a
             # write token: a fork's pull request is not authored by
-            # dependabot[bot], so it never reaches the merge step.
-            if [ "$AUTHOR" != "dependabot[bot]" ]; then
-              echo "author is $AUTHOR, not dependabot[bot]; not promoting"
-              continue
-            fi
+            # Dependabot, so it never reaches the merge step.
+            #
+            # BOTH of Dependabot's logins are accepted. GitHub has been moving
+            # its bots into the `app/` namespace — a pull request opened
+            # against the current API reports its author as `app/dependabot`
+            # rather than `dependabot[bot]` — and a check that only knows the
+            # old name declines every real dependency bump while reporting
+            # that it is behaving correctly.
+            #
+            # The old name is quoted, because `dependabot[bot]` in a case
+            # pattern is a GLOB: the brackets mean "one character from this
+            # set", so the unquoted form matches nothing at all.
+            case "$AUTHOR" in
+              'dependabot[bot]' | 'app/dependabot') ;;
+              *)
+                echo "author is $AUTHOR, not Dependabot; not promoting"
+                continue
+                ;;
+            esac
 
             # --- 3. the draft flag blocks promotion --------------------------
             if [ "$DRAFT" = "true" ]; then
