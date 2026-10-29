@@ -302,7 +302,7 @@ export const SLOS: readonly SloDefinition[] = [
     window: { windowDays: 30, shortWindowMinutes: 5, longWindowMinutes: 60 },
     page: false,
     description:
-      'Age of the oldest unpublished outbox row. Side effects are dispatched by the worker, so a growing lag delays execution without changing any decision.',
+      "Age of the oldest outbox row that has not been published yet, measured in the database rather than in the queue: a wedged dispatcher leaves unpublished rows behind and an empty queue, so the queue's own age would read zero while delivery is hours late. Side effects are dispatched by the worker, so a growing lag delays execution without changing any decision. Dead-lettered rows are excluded — they are a delivery failure with their own signal, not a delivery that is still late.",
     measuredBy: { source: 'metrics', metric: 'pz_outbox_oldest_unpublished_age_seconds' },
   },
 ] as const;

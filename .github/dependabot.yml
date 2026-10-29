@@ -1,0 +1,94 @@
+# Dependabot configuration.
+#
+# Two kinds of update, handled differently because they carry different risk:
+#
+#   · Security updates are never grouped. A grouped security bump hides an
+#     advisory behind a diff that touches four unrelated packages, which is
+#     exactly when a security fix gets skipped.
+#   · Version updates are grouped, so one PR moves one coherent set of
+#     packages. The repository's own dependency gate (npm run audit:gate)
+#     decides whether the result is acceptable, and the auto-promote
+#     workflow merges the PR once that gate is green.
+#
+# The mechanism is `groups`, and only `groups`.
+#
+# Dependabot accepts ONE update entry per (ecosystem, directory): a second
+# npm entry for "/" is not "one for versions, one for security", it is a
+# conflicting configuration for the same directory, and the split has to be
+# expressed inside the single entry.
+#
+# The split is `applies-to` INSIDE a group. A group is scoped to the kind of
+# update it collects, and it defaults to version updates, so:
+#
+#   · a group that says `applies-to: version-updates` collects version
+#     updates only -- the version updates of one workspace arrive together;
+#   · security updates are never collected by a group, so they arrive on
+#     their own, one advisory per PR, with nothing else in the diff.
+#
+# `applies-to` is a GROUP option. On the entry itself it is not a way to
+# split the two kinds of update: an entry that carried it would scope the
+# whole entry to one kind and switch the other kind off, which is the
+# opposite of "security updates are never delayed".
+#
+# The entry's `schedule` governs the version-update check, and
+# `open-pull-requests-limit` bounds the version-update PRs; security update
+# PRs have their own fixed limit, which that key cannot change.
+version: 2
+
+updates:
+  # --- npm: version updates, grouped by workspace ---------------------------
+  # Each group covers one workspace so a bump in the web console cannot be
+  # bundled with a bump in the database package. A grouped PR that mixes
+  # unrelated packages is harder to review and harder to revert.
+  #
+  # There is no second npm entry for security updates. Dependabot keeps
+  # security updates on their own stream, and a group that only collects
+  # version updates leaves that stream alone: the advisory arrives in its
+  # own PR, on its own, the day it is raised.
+  - package-ecosystem: npm
+    directory: /
+    open-pull-requests-limit: 5
+    schedule:
+      interval: weekly
+    labels: ['dependencies']
+    commit-message:
+      prefix: 'chore(deps):'
+    groups:
+      api:
+        applies-to: version-updates
+        patterns: ['@permitzero/api', 'fastify*', '@fastify/*']
+      web:
+        applies-to: version-updates
+        patterns: ['@permitzero/web', 'next', 'react', 'react-dom']
+      db:
+        applies-to: version-updates
+        patterns: ['@permitzero/db', 'drizzle-orm', 'drizzle-kit', 'postgres']
+      policy:
+        applies-to: version-updates
+        patterns: ['@permitzero/policy', '@permitzero/schemas', 'zod']
+      observability:
+        applies-to: version-updates
+        patterns: ['@permitzero/observability', 'prom-client']
+      tooling:
+        applies-to: version-updates
+        patterns:
+          - 'typescript'
+          - 'eslint'
+          - 'prettier'
+          - 'vitest'
+          - '@vitest/*'
+          - 'tsx'
+          - '@types/*'
+
+  # --- GitHub Actions --------------------------------------------------------
+  # One entry, no groups: an action bump is one package, and grouping it
+  # with another action bump only makes the diff harder to read. With no
+  # groups there is nothing to scope, so there is no `applies-to` to write,
+  # and the entry covers both kinds of update.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: ['dependencies']
+    commit-message:
+      prefix: 'chore(ci):'

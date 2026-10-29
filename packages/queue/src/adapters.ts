@@ -9,11 +9,29 @@ import type { DbStores } from '@permitzero/db';
 import type { AuditSink, OutboxStore } from './names.js';
 
 export function adaptDbOutbox(store: DbStores['outbox'], clock: () => Date = () => new Date()): OutboxStore {
+  /**
+   * The tenant a write is scoped to.
+   *
+   * The durable side refuses a write without one — the outbox row's tenant is
+   * part of its identity, and a write that cannot name its tenant is a write
+   * that could land on another tenant's row. Failing loudly here is the
+   * point: a silent no-op would look like a successful publish.
+   */
+  const tenant = (tenantId: string | undefined): string => {
+    if (!tenantId) {
+      throw new Error(
+        'outbox store: a tenant-scoped write was called without a tenant id, so it cannot be scoped to one row.',
+      );
+    }
+    return tenantId;
+  };
+
   return {
     claimPending: (limit, now) => store.claimPending(limit, now),
-    markPublished: (id) => store.markPublished(id, clock()),
-    markFailed: (id, errorClass, nextAttemptAt) => store.markFailed(id, errorClass, nextAttemptAt ?? clock()),
-    markDead: (id, errorClass) => store.markDead(id, errorClass),
+    markPublished: (id, tenantId) => store.markPublished(id, clock(), tenant(tenantId)),
+    markFailed: (id, errorClass, nextAttemptAt, tenantId) =>
+      store.markFailed(id, errorClass, nextAttemptAt ?? clock(), tenant(tenantId)),
+    markDead: (id, errorClass, tenantId) => store.markDead(id, errorClass, tenant(tenantId)),
     countByStatus: async () => {
       const counts = await store.countByStatus();
       return {
@@ -23,7 +41,7 @@ export function adaptDbOutbox(store: DbStores['outbox'], clock: () => Date = () 
         DEAD: counts['DEAD'] ?? 0,
       };
     },
-    redrive: (id, reason, actorId) => store.redrive(id, reason, actorId),
+    redrive: (id, reason, actorId, tenantId) => store.redrive(id, reason, actorId, tenant(tenantId)),
     insert: (draft) => store.insert(draft),
   };
 }

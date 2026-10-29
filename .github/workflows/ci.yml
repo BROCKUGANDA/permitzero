@@ -5,17 +5,143 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
+# A new push supersedes an in-flight run for the same ref. The deploy job is
+# excluded deliberately: it has its own concurrency group and cancelling it
+# halfway would leave the old containers down.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+# --- runner selection --------------------------------------------------------
+#
+# Every job in this file that touches the repository selects its runner with
+# the SAME expression:
+#
+#   ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest'
+#        || vars.CI_RUNNER || 'ubuntu-latest' }}
+#
+# `vars.CI_RUNNER` is a SELF-HOSTED runner on the shared VPS that also runs
+# four other projects' production stacks and holds the deployment credentials.
+# A pull request from a FORK checks out the fork's code and then runs it:
+# `npm ci` executes the fork's package lifecycle scripts, the suite runs the
+# fork's tests, and the `.mjs` gates run the fork's code. On the self-hosted
+# runner that is remote code execution on the machine that holds
+# infra/deploy/permitzero.env and has Docker access -- so an attacker only
+# has to open a pull request.
+#
+# The fork test is therefore the FIRST term of the expression, and it wins:
+# a fork pull request never selects the self-hosted runner. The fallback is
+# `ubuntu-latest`, which is isolated, disposable and holds no credentials.
+#
+# `pull_request_target` is NOT used anywhere and must not be introduced: it
+# runs the workflow file from the BASE branch while checking out the pull
+# request's code, with the base repository's secrets and a write token. It is
+# the other way of getting a fork's code onto a privileged runner.
+#
+# One consequence is worth stating plainly: this account's hosted runners are
+# unavailable (the account is under a billing lock), so in practice a fork
+# pull request gets no runner at all and its CI never reports a conclusion.
+# That is the intended outcome. An unverifiable pull request must not be able
+# to run, and it must not be able to pick the runner that holds the
+# credentials. Merging one is a job for a human with the repository.
 jobs:
+  reclaim:
+    name: Reclaim disk space
+    # This job declares NO service containers, and that is the entire reason
+    # it exists as a job of its own.
+    #
+    # GitHub starts a job's service containers BEFORE the job's first step
+    # runs, so a reclaim step inside the service-backed jobs was always too
+    # late: if the volume was too full for Docker to pull or start postgres,
+    # the job died before it reclaimed anything or reported its threshold --
+    # and the disk stayed full, so the next job died exactly the same way.
+    #
+    # A job with no services starts as soon as a runner picks it up, so the
+    # room is made before anything needs it, and the jobs that do need
+    # containers wait for this one.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - name: Reclaim disk space
+        # This runner is the deploy host, which also serves four other
+        # projects. A CI job that fills the disk takes the production stack
+        # down with it -- and that is not hypothetical: the first run of this
+        # workflow filled a 96 GB volume to 100% and every service on the box
+        # started failing.
+        #
+        # So the job makes room for itself BEFORE it needs it, and reports how
+        # much room it found.
+        #
+        # The reclaimable set is deliberately narrow AND scoped to this
+        # project. A global `docker image prune -af` removes the unreferenced
+        # images of the four other projects too -- including the rollback
+        # images the deploy script is required to keep -- and a global
+        # `docker builder prune -af` deletes every other project's BuildKit
+        # cache, which is how the disk filled up in the first place. Compose
+        # labels the images it builds with the project name, so the label
+        # filter prunes this project's dangling images and nobody else's.
+        #
+        # The global build cache is NOT pruned from here. It cannot be scoped
+        # to a project, and the host janitor (infra/deploy/disk-janitor.sh)
+        # already reclaims build space on a threshold, where a full disk is
+        # a fact rather than a guess.
+        #
+        # It deliberately does NOT remove containers. The service containers
+        # the jobs that depend on this one are about to use are named by a
+        # hash prefix, exactly like the leftovers from an earlier job, so a
+        # cleanup that removed "the containers a previous job left behind"
+        # would remove those jobs' own databases -- and the next step would
+        # fail to connect to a server that had just been deleted underneath
+        # it. Stale service containers are the host janitor's job, which runs
+        # on a threshold and only touches containers old enough that no
+        # running job can be using them.
+        run: |
+          set -uo pipefail
+          echo "=== disk before ==="
+          df -h / | tail -1
+          docker image prune -f --filter label=com.docker.compose.project=permitzero >/dev/null 2>&1 || true
+          echo "=== disk after ==="
+          df -h / | tail -1
+          AVAIL=$(df --output=avail -k / | tail -1 | tr -d ' ')
+          if [ "$AVAIL" -lt 8388608 ]; then
+            echo "only $((AVAIL / 1024)) MiB free; this job needs roughly 8 GiB" >&2
+            echo "only this project's dangling images were reclaimed; other projects' images and build cache were left alone on purpose" >&2
+            exit 1
+          fi
+
   verify:
-    name: Verify (typecheck, lint, tests, build, format)
-    runs-on: ubuntu-latest
+    name: Verify (typecheck, lint, tests, build, format, gates)
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
+    # The reclaim job first: it is the job that makes room for the service
+    # containers this job's first step depends on.
+    needs: reclaim
+    timeout-minutes: 45
+    # Each job publishes its services on DIFFERENT host ports.
+    #
+    # GitHub starts a job's service containers before the job's first step
+    # runs, and it publishes them on the HOST. Two jobs that both publish
+    # 5432 therefore collide: the second container cannot bind the port, and
+    # GitHub reports "Initialize containers" as a success anyway — so the job
+    # carried on and ran against the OTHER job's database. That is an
+    # intermittent failure that looks like a flaky test and is not: the suite
+    # was reading and truncating a database another job was using.
+    #
+    # The ports are therefore per-job, and the step below checks that the
+    # port this job was given is actually the one its container is serving.
+    env:
+      PG_PORT: '5433'
+      REDIS_PORT: '6380'
     services:
       postgres:
         image: postgres:17
         env:
           POSTGRES_PASSWORD: postgres
-        ports: ['5432:5432']
+        ports: ['5433:5432']
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -23,46 +149,408 @@ jobs:
           --health-retries 5
       redis:
         image: redis:7
-        ports: ['6379:6379']
+        ports: ['6380:6379']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # The order below is a dependency chain, not a preference: the environment
+      # file first, then the schema and the seed data, then the verify gate
+      # (typecheck, lint, the suite, the build, the format check and the
+      # evidence-map gate), and only then the checks that need a running stack.
+      #
+      # The disk is reclaimed by the `reclaim` job above, which runs before
+      # this one because GitHub starts this job's service containers before
+      # any step in it runs.
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
+
       - run: npm ci
-      - run: cp .env.example .env
-      - run: |
-          sed -i 's/^DATABASE_URL=.*/DATABASE_URL=postgres:\/\/postgres:postgres@127.0.0.1:5432\/permitzero/' .env
-          sed -i 's/^DATABASE_URL_TEST=.*/DATABASE_URL_TEST=postgres:\/\/postgres:postgres@127.0.0.1:5432\/permitzero_test/' .env
-          sed -i 's/^REDIS_URL=.*/REDIS_URL=redis:\/\/127.0.0.1:6379/' .env
+
+      - name: Write the CI environment
+        run: |
+          set -euo pipefail
+          # The ports this job's own service containers were published on. They
+          # are not 5432 and 6379, because those belong to the SLO job and to
+          # whatever else this host is running — a container that cannot bind
+          # its port fails silently here, and the job then talks to someone
+          # else's database.
+          cp .env.example .env
+          sed -i "s|^DATABASE_URL=.*|DATABASE_URL=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero|" .env
+          sed -i "s|^DATABASE_URL_TEST=.*|DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero_test|" .env
+          sed -i "s|^REDIS_URL=.*|REDIS_URL=redis://127.0.0.1:${REDIS_PORT}|" .env
+          # The RLS role's password is substituted into migration 0006 as SQL
+          # text. CI uses a fixed value because the database is thrown away
+          # after the run, but it must match what the runtime role uses or
+          # every tenant-isolation assertion would pass while proving nothing.
+          sed -i 's|^PZ_RLS_ROLE_PASSWORD=.*|PZ_RLS_ROLE_PASSWORD=pz_app_ci|' .env
+          # The runtime URL has to name the SAME password as the role the
+          # migration creates. The template ships the development default, and
+          # a mismatch fails at boot with "password authentication failed for
+          # user pz_app" — which reads like a database problem and is a
+          # configuration one.
+          sed -i "s|^DATABASE_URL_RUNTIME=.*|DATABASE_URL_RUNTIME=postgres://pz_app:pz_app_ci@127.0.0.1:${PG_PORT}/permitzero|" .env
+          # The API refuses to boot without a permit signing key, and refuses
+          # to run outside development or test without an audit HMAC key —
+          # an unkeyed audit chain is not tamper-evident, so the key is
+          # required rather than defaulted.
+          sed -i 's|^PERMIT_SIGNING_KEY=.*|PERMIT_SIGNING_KEY=ci-permit-signing-key-0123456789|' .env
+          sed -i 's|^AUDIT_HMAC_KEY=.*|AUDIT_HMAC_KEY=ci-audit-hmac-key-0123456789abcdef|' .env
+
+          # The same values are exported to the environment as well as written
+          # to the file.
+          #
+          # A command that reads the root `.env` finds them there. A test
+          # harness that reads `process.env` finds them here. The harnesses
+          # now do both, but exporting them means a harness that forgets
+          # cannot silently fall back to a passwordless URL and fail with
+          # "password authentication failed" — which is what happened the
+          # first time this workflow ran for real.
+          # The signing and hashing keys the API refuses to boot without.
+          # The drill builds a real API, so it needs them too.
+          #
+          # AUDIT_HMAC_KEY is not optional outside development and test: an
+          # audit chain hashed with a plain SHA-256 is not tamper-evident, so
+          # the API fails boot rather than silently downgrading it.
+          {
+            echo "DATABASE_URL=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero"
+            echo "DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero_test"
+            echo "REDIS_URL=redis://127.0.0.1:${REDIS_PORT}"
+            echo "PZ_RLS_ROLE_PASSWORD=pz_app_ci"
+            echo "PERMIT_SIGNING_KEY=ci-permit-signing-key-0123456789"
+            echo "AUDIT_HMAC_KEY=ci-audit-hmac-key-0123456789abcdef"
+          } >> "$GITHUB_ENV"
+
+      - name: Confirm this job's database is the one it was given
+        # A service container that cannot publish its port fails silently:
+        # GitHub reports "Initialize containers" as a success and the job
+        # carries on. The symptom is then an intermittent failure somewhere
+        # unrelated — here, a secret scan that passed on its own and
+        # failed against another job's tree.
+        #
+        # So the job checks that the port it was given is serving a
+        # PostgreSQL that answers with the password this job expects. If it
+        # is not, the job stops here, with the reason, instead of spending
+        # ten minutes failing somewhere confusing.
+        run: |
+          set -euo pipefail
+          if ! docker ps --format '{{.Names}}' | grep -q "postgres17"; then
+            echo "this job's postgres service container is not running" >&2
+            docker ps -a --format '{{.Names}} :: {{.Status}}' >&2
+            exit 1
+          fi
+          if ! (echo > /dev/tcp/127.0.0.1/"${PG_PORT}") 2>/dev/null; then
+            echo "nothing is serving 127.0.0.1:${PG_PORT}" >&2
+            echo "another job's service container may have taken the port" >&2
+            exit 1
+          fi
+          echo "postgres is serving 127.0.0.1:${PG_PORT} for this job"
+
       - run: npm run db:migrate
       - run: npm run db:seed
+
+      # typecheck, lint at --max-warnings=0, the full suite, the production
+      # build, the compliance evidence gate and the format check.
       - run: npm run verify -- --strict
-      - run: npm run secret:scan
+
+      - name: Secret scan (gitleaks)
+        # The scanner is not on every runner image, and a step that cannot run
+        # is a step that reports a failure it never measured. The dedicated
+        # secret-scan job below always runs it — that job installs the
+        # binary itself and checks the history out — so a runner without
+        # gitleaks has the scan covered rather than red.
+        #
+        # This step is the fast opinion on the WORKING TREE, and it is
+        # deliberately a file scan rather than a history scan: the verify
+        # job's checkout is shallow (a merge ref, depth 1), so `git log -p`
+        # has no history to walk and gitleaks in git mode would either fail
+        # or scan almost nothing while LOOKING like it had scanned
+        # everything. The dedicated job below is the one that walks the
+        # history, and it does that with an unshallow checkout.
+        run: |
+          if command -v gitleaks > /dev/null 2>&1; then
+            gitleaks detect --source . --no-git --redact --verbose --exit-code 1
+          else
+            echo "gitleaks is not installed on this runner; the secret-scan job scans the history"
+          fi
+
       # Dependency vulnerabilities, gated by named exception rather than by a
-      # threshold that the current tree already fails. Fails on anything that is
-      # not individually justified in infra/security/dependency-exceptions.json,
+      # threshold that the current tree already fails. Fails on anything that
+      # is not individually justified in infra/security/dependency-exceptions.json,
       # and on a listed exception whose review date has passed.
       - run: npm run audit:gate
+
       # docs/compliance/EVIDENCE.md is the file a reviewer reads to check the
-      # README's claims, so CI resolves every citation in it and refuses a map whose
-      # documented absences have been quietly deleted or relabelled.
+      # README's claims, so CI resolves every citation in it and refuses a map
+      # whose documented absences have been quietly deleted or relabelled.
       - run: npm run compliance:gate
+
       # The outage drill runs against the CI Postgres/Redis services, so the
       # resilience claims in the README are measured on every push.
       - run: npm run drill:resilience
         env:
-          DATABASE_URL_TEST: postgres://postgres:postgres@127.0.0.1:5432/permitzero_test
-          PZ_RLS_ROLE_PASSWORD: pz_app_dev
+          DATABASE_URL_TEST: postgres://postgres:postgres@127.0.0.1:${{ env.PG_PORT }}/permitzero_test
+          PZ_RLS_ROLE_PASSWORD: pz_app_ci
+
+      - name: Release the disk this job used
+        # A job that leaves its node_modules and its checkout behind is a job
+        # that makes the NEXT job fail. The runner reuses its work directory,
+        # so the space has to go back.
+        #
+        # The prune is scoped to this project for the same reason the reclaim
+        # job's is: this host serves four other projects, and a global prune
+        # takes their unreferenced images and their rollback images with it.
+        # The global build cache is left alone -- it cannot be scoped to a
+        # project, and the host janitor reclaims it when the disk is actually
+        # under pressure.
+        if: always()
+        run: |
+          set -uo pipefail
+          rm -rf "${GITHUB_WORKSPACE:-.}/node_modules" 2>/dev/null || true
+          docker image prune -f --filter label=com.docker.compose.project=permitzero >/dev/null 2>&1 || true
+          df -h / | tail -1
+
+  slo:
+    name: SLO report (live scrape, strict)
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    # The reclaim job is listed as well as verify, so the dependency is
+    # visible here rather than only implied by verify's own `needs`.
+    needs: [reclaim, verify]
+    # Its own ports, for the same reason the verify job has its own: two
+    # service containers publishing the same host port collide, and the
+    # collision is silent.
+    env:
+      PG_PORT: '5434'
+      REDIS_PORT: '6381'
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5434:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports: ['6381:6379']
+    steps:
+      # No reclaim step here: GitHub starts this job's service containers
+      # before any step in it runs, so the disk is reclaimed by the `reclaim`
+      # job that this job depends on -- which declares no services and
+      # therefore runs before Docker is asked for anything.
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Write the CI environment
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          sed -i "s|^DATABASE_URL=.*|DATABASE_URL=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero|" .env
+          sed -i "s|^DATABASE_URL_TEST=.*|DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero_test|" .env
+          sed -i "s|^REDIS_URL=.*|REDIS_URL=redis://127.0.0.1:${REDIS_PORT}|" .env
+          sed -i 's|^PZ_RLS_ROLE_PASSWORD=.*|PZ_RLS_ROLE_PASSWORD=pz_app_ci|' .env
+          # The SLO report refuses to scrape an unauthenticated /metrics, and
+          # the endpoint is not registered at all without a token.
+          echo "METRICS_TOKEN=ci-metrics-token" >> .env
+          {
+            echo "DATABASE_URL=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero"
+            echo "DATABASE_URL_TEST=postgres://postgres:postgres@127.0.0.1:${PG_PORT}/permitzero_test"
+            echo "REDIS_URL=redis://127.0.0.1:${REDIS_PORT}"
+            echo "PZ_RLS_ROLE_PASSWORD=pz_app_ci"
+            echo "METRICS_TOKEN=ci-metrics-token"
+          } >> "$GITHUB_ENV"
+
+      - name: Confirm this job's database is the one it was given
+        run: |
+          set -euo pipefail
+          if ! docker ps --format '{{.Names}}' | grep -q "postgres17"; then
+            echo "this job's postgres service container is not running" >&2
+            docker ps -a --format '{{.Names}} :: {{.Status}}' >&2
+            exit 1
+          fi
+          if ! (echo > /dev/tcp/127.0.0.1/"${PG_PORT}") 2>/dev/null; then
+            echo "nothing is serving 127.0.0.1:${PG_PORT}" >&2
+            exit 1
+          fi
+          echo "postgres is serving 127.0.0.1:${PG_PORT} for this job"
+
+      - run: npm run db:migrate
+      - run: npm run db:seed
+
+      - name: Start the API
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:${{ env.PG_PORT }}/permitzero
+          DATABASE_URL_RUNTIME: postgres://pz_app:pz_app_ci@127.0.0.1:${{ env.PG_PORT }}/permitzero
+          REDIS_URL: redis://127.0.0.1:${{ env.REDIS_PORT }}
+          PERMIT_SIGNING_KEY: ci-permit-signing-key-0123456789
+          AUDIT_HMAC_KEY: ci-audit-hmac-key-0123456789abcdef
+          METRICS_TOKEN: ci-metrics-token
+          # A port of this project's own choosing, not 8080.
+          #
+          # The runner is a shared host: another project's Caddy already
+          # listens on 127.0.0.1:8080, so an API started there dies with
+          # EADDRINUSE and the readiness wait times out on a server that
+          # never started. The port is checked before the API is launched, so
+          # the failure says "the port is taken" rather than "the API did
+          # not become ready" sixty seconds later.
+          PORT: '8181'
+          HOST: 127.0.0.1
+        run: |
+          set -euo pipefail
+          if ss -ltn | grep -q ":${PORT} "; then
+            echo "port ${PORT} is already in use on this host" >&2
+            ss -ltnp | grep ":${PORT} " >&2 || true
+            exit 1
+          fi
+          # `setsid` gives the API its own process group. `npm run` starts the
+          # API as a child of a shell, so killing the npm process alone would
+          # leave the API listening on the port for the rest of the job — and a
+          # leftover server is a stack the next step cannot tell from the one it
+          # just started.
+          setsid npm run start:api > /tmp/pz-api.log 2>&1 &
+          echo "API_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for readiness
+        run: |
+          set -uo pipefail
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8181/health/ready || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "API is ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "API did not become ready; last log lines:" >&2
+          tail -40 /tmp/pz-api.log >&2 || true
+          exit 1
+
+      - name: Drive traffic so the rates are not vacuous
+        run: |
+          # The report is explicit that an endpoint with no observed traffic makes
+          # every rate meaningless, and the decision-latency objective needs an
+          # actual decision rather than a liveness answer. So this drives real
+          # intakes with the seeded agent credential: the body comes from the
+          # repository's own load workload, so the request shape cannot drift
+          # from the one the API accepts, and an unauthenticated request would
+          # only add a 401 to the counter.
+          cat > /tmp/pz-slo-traffic.mjs <<'NODE'
+          import { pathToFileURL } from 'node:url';
+
+          const repo = process.env.GITHUB_WORKSPACE ?? process.cwd();
+          const { loadCredentials, intakeBody } = await import(
+            pathToFileURL(`${repo}/scripts/lib/load-workload.mjs`).href
+          );
+          const { agentId, token } = loadCredentials(repo);
+          const base = 'http://127.0.0.1:8181';
+          let decided = 0;
+          for (let i = 0; i < 5; i += 1) {
+            const res = await fetch(`${base}/v1/actions`, {
+              method: 'POST',
+              headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+              body: intakeBody(agentId, i),
+            });
+            const text = await res.text();
+            console.log(`intake ${i}: HTTP ${res.status}`);
+            if (res.ok) decided += 1;
+            else console.log(text.slice(0, 300));
+          }
+          if (decided === 0) {
+            console.error('the API decided nothing; the report below would be measuring an empty stack');
+            process.exit(1);
+          }
+          NODE
+          npx tsx /tmp/pz-slo-traffic.mjs
+
+      - name: SLO report
+        env:
+          # The same token the API was started with. A literal here would be one
+          # more place for the two to drift apart, and a scrape with the wrong
+          # token answers 401 — which the report would report as a stack it
+          # could not measure.
+          METRICS_TOKEN: ci-metrics-token
+        run: npm run slo:report -- --url http://127.0.0.1:8181 --token "$METRICS_TOKEN" --strict
+
+      - name: Stop the API
+        if: always()
+        # The whole group first, then the process itself, then anything still
+        # answering to the API's command line: `npm run` starts the API as a
+        # grandchild, so any one of those three can be the one holding the
+        # port. A gate that leaves a server behind is a gate that can make the
+        # next measurement wrong. The bracket in the pattern keeps the matcher
+        # from matching its own command line.
+        run: |
+          kill -- -"$API_PID" 2>/dev/null || true
+          kill "$API_PID" 2>/dev/null || true
+          pkill -f '[s]rc/server.ts' 2>/dev/null || true
+
+      - name: Release the disk this job used
+        # Same rule as the verify job: this project's dangling images only.
+        # The host serves four other projects, and a global prune takes their
+        # images -- and their rollback images -- with it.
+        if: always()
+        run: |
+          set -uo pipefail
+          rm -rf "${GITHUB_WORKSPACE:-.}/node_modules" 2>/dev/null || true
+          docker image prune -f --filter label=com.docker.compose.project=permitzero >/dev/null 2>&1 || true
+          df -h / | tail -1
 
   secret-scan:
     name: Secret scan (gitleaks)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The gitleaks binary is installed directly rather than through
+      # gitleaks/gitleaks-action.
+      #
+      # The action uploads its report as a workflow artifact, and this
+      # account's artifact storage quota is exhausted — so the upload failed
+      # and took the whole job with it, even though the scan itself had
+      # found nothing. A scan that cannot store its output is a scan whose
+      # result nobody will look at, and one that fails the build for a
+      # reason that has nothing to do with secrets.
+      #
+      # Running the binary directly has no artifact step at all: the exit
+      # code is the result, and the output is in the job log where a person
+      # reading a failed job will actually see it.
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          VERSION=8.24.3
+          URL="https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
+          curl -fsSL "$URL" -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Scan for secrets
+        run: |
+          set -euo pipefail
+          # `--redact` so a detected secret is never echoed into the log.
+          # The exit code is the verdict: 1 means a leak was found.
+          #
+          # The scan runs over the HISTORY, not over the working tree. The
+          # `--no-git` flag this used to carry turned gitleaks into a plain
+          # file scanner, so a secret that was committed and later deleted
+          # from the tree was never found -- which is the case that matters,
+          # because a secret stays leaked after it is removed from the file.
+          # The checkout above is unshallow (`fetch-depth: 0`) precisely so
+          # that `git log -p` has the whole history to walk.
+          #
+          # `--no-git` is deliberately NOT set here.
+          gitleaks detect --source . --redact --verbose --exit-code 1

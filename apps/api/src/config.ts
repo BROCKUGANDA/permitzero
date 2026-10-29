@@ -130,10 +130,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   const modelProvider: ApiConfig['modelProvider'] = explicitOff
     ? 'disabled'
     : (requested as ApiConfig['modelProvider']);
+  const appEnv = env['APP_ENV'] ?? 'development';
   return {
     host: env['HOST'] ?? '127.0.0.1',
     port: intIn(env, 'PORT', 3000, 1, 65535),
-    appEnv: env['APP_ENV'] ?? 'development',
+    appEnv,
     version: env['APP_VERSION'] ?? '0.1.0',
     databaseUrl: required(env, 'DATABASE_URL'),
     databaseRuntimeUrl: env['DATABASE_URL_RUNTIME'] ?? env['DATABASE_URL'] ?? '',
@@ -143,7 +144,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     permitSigningKeyId: env['PERMIT_SIGNING_KEY_ID'] ?? 'k1',
     permitTtlSeconds: intIn(env, 'PERMIT_TTL_SECONDS', 300, 1, 3600),
     modelProvider,
-    auditHmacKey: env['AUDIT_HMAC_KEY'] ?? null,
+    // AUDIT_HMAC_KEY is required outside development and test: without it the
+    // audit chain is a plain unkeyed SHA-256 and the tamper-evidence property
+    // is downgraded to a hash anybody with database access can recompute.
+    // Development and test are exempt so the suite needs no secret to run.
+    auditHmacKey:
+      env['AUDIT_HMAC_KEY']?.trim() ||
+      (appEnv === 'development' || appEnv === 'test' ? null : required(env, 'AUDIT_HMAC_KEY')),
     rateLimitMax: intIn(env, 'RATE_LIMIT_MAX', 500, 1, 100000),
     rateLimitWindowMs: intIn(env, 'RATE_LIMIT_WINDOW_MS', 60_000, 1000, 3_600_000),
     rateLimitMutations: intIn(env, 'RATE_LIMIT_MUTATIONS_PER_MIN', 120, 1, 100000),

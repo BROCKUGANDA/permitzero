@@ -1,0 +1,364 @@
+name: Deploy
+
+on:
+  # The deploy is triggered by the CI workflow's completion, not by the push.
+  #
+  # A `push` trigger fires the moment the commit lands, while CI is still
+  # running — so a deploy could start for a commit whose CI was still red,
+  # and the "confirm the commit is the one that passed CI" step that used to
+  # be there only echoed the SHA and checked nothing. `workflow_run` fires
+  # when CI has actually concluded, and it carries the verdict and the exact
+  # commit CI ran against.
+  #
+  # `workflow_dispatch` is kept for the operator who wants to deploy by hand;
+  # that path has no CI payload, so it verifies CI itself before deploying.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy
+        required: false
+        default: staging
+
+# One deploy at a time per environment, and never cancel a running one: a
+# deploy cancelled halfway has already removed the old containers and not yet
+# started the new ones.
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || 'staging' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # The manual path reads the check runs of the commit it is about to deploy,
+  # and that is a Checks API read.
+  checks: read
+
+jobs:
+  deploy:
+    name: Deploy to ${{ github.event.inputs.environment || 'staging' }}
+    # A deploy runs on the deploy host and ships to production, so it only
+    # happens for a commit that CI has finished and passed.
+    #
+    # `head_branch == 'main'` keeps pull-request runs out: a CI run that was
+    # triggered by a pull request has the pull request's branch as its head
+    # branch. `head_repository.full_name` closes the same hole from the other
+    # side: a fork whose branch is called `main` would otherwise satisfy the
+    # branch test, and a `workflow_run` payload can name a commit that only
+    # exists in the fork.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ${{ vars.DEPLOY_RUNNER || 'self-hosted' }}
+    environment:
+      name: ${{ github.event.inputs.environment || 'staging' }}
+    timeout-minutes: 60
+    steps:
+      - name: Determine the commit to deploy
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # `workflow_run` runs with the default branch checked out, so
+          # `github.sha` is NOT the commit CI ran against — it is whatever
+          # main happened to be when the event was delivered. The commit
+          # under test is in the payload, and it is that one that gets
+          # deployed.
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            SHA="$RUN_SHA"
+          else
+            SHA="$DISPATCH_SHA"
+          fi
+          if [ -z "$SHA" ]; then
+            echo "no commit to deploy" >&2
+            exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "deploying commit $SHA"
+
+      - name: Confirm the commit passed CI
+        # The three required checks have to be PRESENT and SUCCESSFUL on this
+        # exact commit. Not "the checks are green in general", and not a
+        # count of failures: a count is wrong in both directions — it counts
+        # the checks that have not reported yet as failures, and an empty
+        # list counts as zero failures, which reads as "everything passed".
+        #
+        # On the workflow_run path the CI workflow's own conclusion is
+        # already the verdict, and this confirms it by name. On the manual
+        # path there is no such payload at all, so this is the only thing
+        # standing between a stale or failing commit and production.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          # The gate below needs the GitHub CLI. The runner image has it, but
+          # this job has to work on whatever `DEPLOY_RUNNER` points at, and a
+          # deploy that cannot read the check runs must not proceed — so it
+          # is fetched into a temporary directory rather than assumed.
+          if ! command -v gh > /dev/null 2>&1; then
+            GH_VERSION=2.63.2
+            curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" -o /tmp/gh.tar.gz
+            tar -xzf /tmp/gh.tar.gz -C /tmp
+            export PATH="/tmp/gh_${GH_VERSION}_bin:$PATH"
+            echo "/tmp/gh_${GH_VERSION}_bin" >> "$GITHUB_PATH"
+          fi
+
+          REQUIRED_CHECKS=(
+            "Verify (typecheck, lint, tests, build, format, gates)"
+            "SLO report (live scrape, strict)"
+            "Secret scan (gitleaks)"
+          )
+
+          # Prints one line per required check and sets VERDICT to:
+          #   ok       every check is present and successful
+          #   pending  a check has not reported yet, or has not finished
+          #   failed   a check reported a conclusion that is not success
+          VERDICT=pending
+          report_checks() {
+            local sha="$1"
+            local runs line name status conclusion
+            VERDICT=ok
+            runs=$(gh api "repos/$REPO/commits/$sha/check-runs" --paginate \
+              --jq '.check_runs[] | [.name, .status, (.conclusion // "none")] | join("|")') \
+              || { echo "  could not read the check runs for $sha" >&2; VERDICT=failed; return 0; }
+            for name in "${REQUIRED_CHECKS[@]}"; do
+              line=$(printf '%s\n' "$runs" | grep -F -- "$name|" | head -n 1 || true)
+              if [ -z "$line" ]; then
+                echo "  $name: has not reported on $sha"
+                VERDICT=pending
+                continue
+              fi
+              status=$(printf '%s' "$line" | cut -d'|' -f2)
+              conclusion=$(printf '%s' "$line" | cut -d'|' -f3)
+              if [ "$status" != "completed" ]; then
+                echo "  $name: $status (not finished)"
+                VERDICT=pending
+                continue
+              fi
+              if [ "$conclusion" != "success" ]; then
+                echo "  $name: $conclusion"
+                VERDICT=failed
+                continue
+              fi
+              echo "  $name: success"
+            done
+          }
+
+          # A check that has not reported yet may simply be a check that is
+          # still running, or one the API has not caught up with — so that
+          # case is waited out. A check that reported a failure is waited
+          # out for nothing, and fails the deploy immediately.
+          for attempt in 1 2 3 4 5 6; do
+            echo "required checks on $SHA (attempt $attempt):"
+            report_checks "$SHA"
+            if [ "$VERDICT" = "ok" ]; then
+              break
+            fi
+            if [ "$VERDICT" = "failed" ]; then
+              echo "a required check did not pass; not deploying" >&2
+              exit 1
+            fi
+            if [ "$attempt" -lt 6 ]; then
+              sleep 20
+            fi
+          done
+
+          if [ "$VERDICT" != "ok" ]; then
+            echo "the required checks are not all green on $SHA; not deploying" >&2
+            exit 1
+          fi
+          echo "all three required checks are green on $SHA"
+
+      - uses: actions/checkout@v7
+        with:
+          # The commit CI verified, not the default branch's HEAD: on the
+          # workflow_run path the two are not the same thing.
+          ref: ${{ steps.target.outputs.sha }}
+          # The deploy builds images from a known commit, so the tree that
+          # ships is the tree that was verified. A shallow clone is enough
+          # and keeps the runner's disk usage down — this box is shared.
+          fetch-depth: 1
+
+      - name: Reclaim disk space
+        # The build produces four images of roughly 1.5 GB each. The runner
+        # shares a volume with the running deployment and three other
+        # projects, so the space has to be found before it is needed.
+        #
+        # The reclaimable set is narrow on purpose AND scoped to this
+        # project. A global `docker image prune -af` on this host removes the
+        # unreferenced images of the other projects as well — including the
+        # rollback images the deploy script is required to keep — and a
+        # global `docker builder prune -af` deletes every other project's
+        # build cache. Compose labels the images it builds with the project
+        # name, so the label filter prunes this project's dangling images
+        # and nobody else's.
+        #
+        # The global build cache is deliberately NOT pruned from here. It
+        # cannot be scoped to a project, and the host janitor
+        # (infra/deploy/disk-janitor.sh) reclaims build space on a threshold,
+        # where a full disk is a measured fact rather than a guess. If the
+        # threshold below is not met, the message says so instead of quietly
+        # taking the other projects' cache to get there.
+        run: |
+          set -uo pipefail
+          df -h / | tail -1
+          docker image prune -f --filter label=com.docker.compose.project=permitzero >/dev/null 2>&1 || true
+          df -h / | tail -1
+          AVAIL=$(df --output=avail -k / | tail -1 | tr -d ' ')
+          if [ "$AVAIL" -lt 8388608 ]; then
+            echo "only $((AVAIL / 1024)) MiB free; the build needs roughly 8 GiB" >&2
+            echo "only this project's dangling images were reclaimed; other projects' images and build cache were left alone on purpose" >&2
+            exit 1
+          fi
+
+      - name: Copy the verified tree onto the host
+        # The deployment lives in a fixed directory on this host, and that
+        # directory holds the env file with the permit signing key and the
+        # audit HMAC key. Those two values must not change: rotating the
+        # signing key invalidates every permit already issued, and rotating
+        # the audit key breaks the existing audit chain.
+        #
+        # So the source is copied over and the env file is left alone. The
+        # script's own upgrade path adds the settings an older host is
+        # missing, without touching the ones it already has.
+        run: |
+          set -euo pipefail
+          DEPLOY_DIR="${PZ_DEPLOY_DIR:-$HOME/permitzero}"
+          echo "deploying ${{ steps.target.outputs.sha }} to $DEPLOY_DIR"
+          mkdir -p "$DEPLOY_DIR"
+          # --delete keeps the target a faithful copy of the verified commit,
+          # so a file removed from the repository is removed from the host
+          # too. The excludes are the two things that belong to the host
+          # rather than to the repository: the env file and the runtime
+          # state the seed writes.
+          rsync -a --delete \
+            --exclude '.git' \
+            --exclude 'infra/deploy/permitzero.env' \
+            --exclude 'storage/' \
+            --exclude 'node_modules/' \
+            "${GITHUB_WORKSPACE}/" "$DEPLOY_DIR/"
+          # The scripts have to be executable on the host. rsync preserves the
+          # mode it is given, and a checkout does not always carry the execute
+          # bit, so it is set explicitly rather than discovered at deploy time
+          # as "Permission denied".
+          chmod +x "$DEPLOY_DIR"/infra/deploy/*.sh
+          echo "tree copied"
+          ls "$DEPLOY_DIR/infra/migrations/" | tail -3
+
+      - name: Deploy
+        run: |
+          set -euo pipefail
+          cd "${PZ_DEPLOY_DIR:-$HOME/permitzero}"
+          # The durable state — the env file with the permit signing key and
+          # the audit HMAC key — lives OUTSIDE the tree, in a directory the
+          # checkout cannot reach.
+          #
+          # `actions/checkout` removes untracked and ignored files, so an env
+          # file inside the tree would be erased by the next checkout. The
+          # script would then generate NEW keys against the EXISTING database
+          # volume: every previously issued permit would stop verifying, and
+          # the existing audit chain would stop verifying. Neither failure
+          # announces itself; they show up later as unexplained rejections.
+          #
+          # So the state has one home outside the workspace, and the tree is
+          # a copy of the verified commit rather than the place the state
+          # lives.
+          export PZ_STATE_DIR="${PZ_STATE_DIR:-$HOME/.permitzero-state}"
+          mkdir -p "$PZ_STATE_DIR"
+          ./infra/deploy/deploy-vps.sh
+
+      - name: Verify the deployment
+        run: |
+          set -euo pipefail
+          # The script already verified readiness and tenant isolation from
+          # inside the compose network. This is the second opinion from
+          # outside, through the edge, exactly as a visitor would arrive.
+          for i in $(seq 1 30); do
+            code=$(curl -sk -o /tmp/pz-verify.json -w '%{http_code}' \
+              --resolve permitzero.svalley.tech:8450:127.0.0.1 \
+              https://permitzero.svalley.tech:8450/health/ready || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "readiness: $(cat /tmp/pz-verify.json)"
+              exit 0
+            fi
+            echo "attempt $i: /health/ready returned $code"
+            sleep 5
+          done
+          echo "the deployment did not become ready" >&2
+          cat /tmp/pz-verify.json >&2 2>/dev/null || true
+          exit 1
+
+      - name: Verify tenant isolation from the database
+        # The deployment script checks this from inside the compose network.
+        # This checks it again, from outside, against the running container —
+        # because the property is about the database, and the only way to be
+        # sure is to ask the database what a runtime role with no tenant
+        # context can see.
+        run: |
+          set -euo pipefail
+          cd "${PZ_DEPLOY_DIR:-$HOME/permitzero}"
+          STATE_DIR="${PZ_STATE_DIR:-$HOME/.permitzero-state}"
+          ENV_FILE="$STATE_DIR/permitzero.env"
+          [ -f "$ENV_FILE" ] || ENV_FILE="infra/deploy/permitzero.env"
+          COMPOSE="docker compose --env-file $ENV_FILE -f infra/docker-compose.yml"
+
+          # PZ_PG_DB is read by Docker Compose out of the --env-file, and
+          # Compose does not export it into this shell. Under `set -u` an
+          # unset "$PZ_PG_DB" aborts the step BEFORE psql ever runs, so the
+          # deploy failed on a perfectly healthy database — the shell exited
+          # on the expansion, not on the query.
+          #
+          # So the value is read from the same file Compose reads it from,
+          # exactly the way the deployment script itself reads it, and it is
+          # checked for emptiness before it is used.
+          set -a
+          . "$ENV_FILE"
+          set +a
+          if [ -z "${PZ_PG_DB:-}" ]; then
+            echo "PZ_PG_DB is not set in $ENV_FILE" >&2
+            exit 1
+          fi
+
+          # The probe's exit status decides the branch. Piping psql's output
+          # through `tr` and then comparing the result to a number cannot tell
+          # an authentication failure from a row count — and a failure here
+          # would be reported as "the runtime role sees N audit rows", which
+          # is a misleading statement about row-level security when the real
+          # problem is a password.
+          if ROWS=$($COMPOSE exec -T postgres psql -U pz_app -d "$PZ_PG_DB" -t -A -c \
+            "SELECT count(*) FROM audit_events;" 2>&1); then
+            ROWS=$(printf '%s' "$ROWS" | tr -d '[:space:]')
+          else
+            echo "could not run the isolation probe against the live database" >&2
+            printf '  %s\n' "$(printf '%s' "$ROWS" | head -c 300)" >&2
+            echo "  this is a connection or authentication problem, not a row-level security failure" >&2
+            exit 1
+          fi
+          echo "audit rows visible to the runtime role with no tenant context: $ROWS"
+          if [ "$ROWS" != "0" ]; then
+            echo "the deployment does NOT enforce tenant isolation" >&2
+            exit 1
+          fi
+          # A zero count is only meaningful if there was something to hide.
+          # A deployment that has never served a request has an empty table,
+          # and "the runtime role sees zero rows" is then true for the wrong
+          # reason. So the admin role — which is exempt from row-level
+          # security — is asked what it can see, and the result is reported
+          # rather than assumed.
+          ADMIN_ROWS=$($COMPOSE exec -T postgres psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -t -A -c \
+            "SELECT count(*) FROM audit_events;" 2>/dev/null | tr -d '[:space:]' || echo "")
+          if printf '%s' "$ADMIN_ROWS" | grep -Eq '^[0-9]+$' && [ "$ADMIN_ROWS" -gt 0 ]; then
+            echo "tenant isolation verified from the database: the admin role sees $ADMIN_ROWS row(s) and the runtime role sees none"
+          else
+            echo "tenant isolation verified from the database, but the table is empty," >&2
+            echo "so the zero count shows only that there is nothing to leak yet." >&2
+          fi

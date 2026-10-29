@@ -18,6 +18,7 @@ import {
   migrate,
   resetDb,
   seed,
+  loadRootEnv,
   type Db,
   type SeedResult,
 } from '@permitzero/db';
@@ -25,14 +26,46 @@ import { buildApp } from '../src/app.js';
 import type { ApiConfig } from '../src/config.js';
 import { createModelAdapter } from '../src/model.js';
 
+// The root `.env` is loaded before the URLs are read.
+//
+// The harness used to read `process.env` alone, which worked on a developer
+// machine — where `postgres://postgres@127.0.0.1` authenticates by trust — and
+// failed in CI, where the service container has a real password and the URL
+// without one is refused.
+//
+// CI writes DATABASE_URL_TEST into `.env` precisely because that is where
+// every other command in this repository reads it from, via `loadRootEnv`.
+// An explicit environment still wins: `loadRootEnv` never overwrites a value
+// that is already set.
+loadRootEnv();
+
 const poolId = process.env['VITEST_POOL_ID'] ?? '1';
 const workerId = process.env['VITEST_WORKER_ID'] ?? '1';
 const BASE_URL = process.env['DATABASE_URL_TEST'] ?? 'postgres://postgres@127.0.0.1:5432/permitzero_test';
 
+/**
+ * The database name for this worker.
+ *
+ * The `api` segment is what keeps this harness from colliding with the other
+ * two that compute a name the same way (`packages/db/test/db-test.ts` and
+ * `apps/worker/test/helpers.ts`).
+ *
+ * Without it, all three derived the SAME database from the same
+ * `<base>_<pool>_<worker>` inputs — and vitest's pool and worker ids are per
+ * PROCESS, not per file. Two test files in different packages that happened to
+ * run on the same worker id therefore shared one database, and each one's
+ * `resetDb` truncated the rows the other was about to read. The symptom was
+ * a `uq_tenants_slug` collision on the demo tenant, or a foreign-key failure
+ * on a tenant that had just been seeded and then truncated by a neighbour.
+ * Neither failure was in the code under test; both were two suites fighting
+ * over one table.
+ */
+const DB_NAMESPACE = 'api';
+
 function workerUrl(): string {
   const url = new URL(BASE_URL);
   const baseName = url.pathname.replace(/^\//, '') || 'permitzero_test';
-  url.pathname = `/${baseName}_${poolId}_${workerId}`;
+  url.pathname = `/${baseName}_${DB_NAMESPACE}_${poolId}_${workerId}`;
   return url.toString();
 }
 

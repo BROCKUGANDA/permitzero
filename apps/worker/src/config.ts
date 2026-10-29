@@ -58,15 +58,25 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
   if (permitSigningKey.length < 16) {
     throw new Error('PERMIT_SIGNING_KEY must be at least 16 characters.');
   }
+  const appEnv = env['APP_ENV'] ?? 'development';
   return {
-    appEnv: env['APP_ENV'] ?? 'development',
+    appEnv,
     databaseUrl: required(env, 'DATABASE_URL'),
     databaseRuntimeUrl: env['DATABASE_URL_RUNTIME'] ?? env['DATABASE_URL'] ?? '',
     runtimePoolMax: intIn(env, 'RUNTIME_POOL_MAX', 10, 1, 200),
     redisUrl: env['REDIS_URL'] ?? null,
     permitSigningKey,
     permitSigningKeyId: env['PERMIT_SIGNING_KEY_ID'] ?? 'k1',
-    auditHmacKey: env['AUDIT_HMAC_KEY'] ?? null,
+    // AUDIT_HMAC_KEY is required outside development and test.
+    //
+    // The worker appends to the same audit chain the API writes, and a chain
+    // keyed with one key and appended to with another is two chains. Without
+    // the key the append falls back to a plain unkeyed hash, which verifies
+    // against the keyed rows as a break — so a worker that booted without the
+    // key would corrupt the evidence product rather than merely omit it.
+    auditHmacKey:
+      env['AUDIT_HMAC_KEY']?.trim() ||
+      (appEnv === 'development' || appEnv === 'test' ? null : required(env, 'AUDIT_HMAC_KEY')),
     shutdownGraceMs: intIn(env, 'SHUTDOWN_GRACE_MS', 10_000, 100, 120_000),
     dispatchPollMs: intIn(env, 'DISPATCH_POLL_MS', 500, 50, 60_000),
     sweepIntervalMs: intIn(env, 'SWEEP_INTERVAL_MS', 30_000, 1_000, 3_600_000),

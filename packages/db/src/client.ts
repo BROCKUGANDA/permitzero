@@ -77,6 +77,26 @@ const DEFAULT_MIGRATIONS_DIR = fileURLToPath(new URL('../../../infra/migrations'
 const RLS_PASSWORD_PLACEHOLDER = /\{\{PZ_RLS_ROLE_PASSWORD\}\}/g;
 const RLS_PASSWORD_PATTERN = /^[A-Za-z0-9_.-]{1,128}$/;
 
+/**
+ * The advisory lock key that serialises migrations.
+ *
+ * The key is derived from the DATABASE NAME rather than being a constant, and
+ * that detail matters: `pg_advisory_lock` is cluster-wide, so a single fixed
+ * key would serialise migrations across every database in the cluster. The
+ * test harness gives each worker its own database and each migrates
+ * concurrently, so a fixed key turned an independent set of test databases
+ * into one queue — every worker waiting for the worker before it, for no
+ * reason.
+ *
+ * Hashing the current database name gives the same guarantee within a
+ * database (which is the guarantee that matters — two replicas of the same
+ * deployment must not both apply the same file) without coupling unrelated
+ * databases together.
+ *
+ * The result is a bigint, which is what `pg_advisory_lock` wants.
+ */
+const MIGRATION_LOCK_NAMESPACE = 'permitzero:migrations:';
+
 export function renderMigrationSql(text: string, env: NodeJS.ProcessEnv = process.env): string {
   if (!RLS_PASSWORD_PLACEHOLDER.test(text)) return text;
   RLS_PASSWORD_PLACEHOLDER.lastIndex = 0;
@@ -95,19 +115,56 @@ export interface MigrateResult {
 
 export async function migrate(db: Db, opts?: { migrationsDir?: string }): Promise<MigrateResult> {
   const dir = opts?.migrationsDir ?? DEFAULT_MIGRATIONS_DIR;
-  await db.sql`CREATE TABLE IF NOT EXISTS _migrations (filename text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-  const appliedRows = await db.sql<{ filename: string }[]>`SELECT filename FROM _migrations`;
-  const applied = new Set(appliedRows.map((r) => r.filename));
   const files = (await readdir(dir)).filter((f) => f.endsWith('.sql')).sort();
   const newly: string[] = [];
-  for (const file of files) {
-    if (applied.has(file)) continue;
-    const text = await readFile(path.join(dir, file), 'utf8');
-    await withTransaction(db, async (tx) => {
-      await tx.execute(sql.raw(renderMigrationSql(text)));
-      await tx.execute(sql`INSERT INTO _migrations (filename) VALUES (${file})`);
-    });
-    newly.push(file);
+
+  // The whole read-apply-record sequence runs under one advisory lock.
+  //
+  // Without it, two replicas booting at the same time both read the same
+  // `_migrations` snapshot, both decide file N is pending, and both apply it.
+  // The loser then fails on the `_migrations` primary key and crashes at
+  // boot — a crash loop caused by nothing more than two pods starting
+  // together. Serialising the whole sequence makes the second process wait
+  // and then observe the first one's work.
+  //
+  // The lock is SESSION-scoped, so it has to be taken and released on one
+  // physical connection. `db.sql` is a pool: a bare `pg_advisory_lock` there
+  // would land on whichever connection was free, and the matching unlock
+  // would land on a different one — leaving the lock held forever and
+  // blocking the next deploy. `reserve()` pins one connection for the whole
+  // sequence so both statements run on the same session.
+  const connection = await db.sql.reserve();
+  try {
+    // The key is computed IN the database, from the database's own name, so
+    // two processes migrating the same database take the same lock and two
+    // processes migrating different databases do not block each other.
+    await connection`SELECT pg_advisory_lock(hashtextextended(${MIGRATION_LOCK_NAMESPACE} || current_database(), 0))`;
+    try {
+      // The bookkeeping table is created under the lock, not before it:
+      // `CREATE TABLE IF NOT EXISTS` is not itself race-free — two sessions
+      // creating the same table at the same moment can collide in the
+      // catalog — and this is exactly the collision the lock exists to
+      // prevent.
+      await connection`CREATE TABLE IF NOT EXISTS _migrations (filename text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
+      const appliedRows = await connection<{ filename: string }[]>`SELECT filename FROM _migrations`;
+      const applied = new Set(appliedRows.map((r) => r.filename));
+      for (const file of files) {
+        if (applied.has(file)) continue;
+        const text = await readFile(path.join(dir, file), 'utf8');
+        await withTransaction(db, async (tx) => {
+          await tx.execute(sql.raw(renderMigrationSql(text)));
+          await tx.execute(sql`INSERT INTO _migrations (filename) VALUES (${file})`);
+        });
+        newly.push(file);
+      }
+    } finally {
+      // Released explicitly rather than relying on the connection closing:
+      // the pool keeps connections alive, so a lock left held would block the
+      // next deploy indefinitely.
+      await connection`SELECT pg_advisory_unlock(hashtextextended(${MIGRATION_LOCK_NAMESPACE} || current_database(), 0))`;
+    }
+  } finally {
+    connection.release();
   }
   return { applied: newly };
 }

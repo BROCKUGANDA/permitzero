@@ -492,7 +492,28 @@ describe('database triggers', () => {
       payload: {},
     });
     await markOutboxPublished(db.db, row.outboxEventId, new Date());
-    await expect(markOutboxFailed(db.db, row.outboxEventId, 'X', new Date())).rejects.toSatisfy(isSqlstate('0A000'));
+
+    // The repository refuses to move a published row, and it refuses QUIETLY:
+    // the update matches no row and the caller is told so by a false return.
+    //
+    // This used to be an exception. The 0005 trigger raised
+    // `feature_not_supported` on any UPDATE of a published row, and that
+    // exception escaped `publishRow` and aborted the whole batch — so a
+    // stale dispatcher that lost a race to a peer cost every other row in
+    // its batch a lease, and the error was swallowed by an empty catch. A
+    // row that is already delivered is not a failure, so it is reported as
+    // "nothing to do" rather than raised as one.
+    await expect(markOutboxFailed(db.db, row.outboxEventId, 'X', new Date())).resolves.toBe(false);
+    const stillPublished = await db.sql<{ status: string }[]>`
+      SELECT status FROM outbox_events WHERE outbox_event_id = ${row.outboxEventId}`;
+    expect(stillPublished[0]?.status).toBe('PUBLISHED');
+
+    // The trigger is still the backstop for anything that reaches the row
+    // by another route: a direct UPDATE is refused by the database itself,
+    // not by the application remembering to check.
+    await expect(
+      db.sql`UPDATE outbox_events SET status = 'FAILED' WHERE outbox_event_id = ${row.outboxEventId}`,
+    ).rejects.toSatisfy(isSqlstate('0A000'));
   });
 
   it('keeps action updated_at fresh via trigger', async () => {

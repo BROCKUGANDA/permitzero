@@ -16,19 +16,24 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import sensible from '@fastify/sensible';
 import { serializerCompiler, validatorCompiler, type ZodTypeProvider } from 'fastify-type-provider-zod';
-import { NotFoundError } from '@permitzero/domain';
+import { NotFoundError, RateLimitedError } from '@permitzero/domain';
 import type { Principal } from '@permitzero/domain';
 import type { Broker } from '@permitzero/broker';
 import { createBroker } from '@permitzero/db';
 import type { Db, DbStores } from '@permitzero/db';
 import { rlsEnforcementState } from '@permitzero/db';
 import { createMetrics, type MetricsBundle } from '@permitzero/observability';
-import { installRequestObservability, metricsRoute } from './observability.js';
+import {
+  AuditChainMonitor,
+  installRequestObservability,
+  metricsRoute,
+  oldestUnpublishedOutboxAgeSeconds,
+} from './observability.js';
 import { adaptDbOutbox, createOutboxDispatcher } from '@permitzero/queue';
 import type { OutboxDispatcher, QueueFactory, RedisLike } from '@permitzero/queue';
 import type { ApiConfig } from './config.js';
 import { toHttpError } from './errors.js';
-import type { ModelAdapter } from './model.js';
+import { breakerStateValue, type ModelAdapter } from './model.js';
 import type { IntakeDeps } from './intake.js';
 import type { ApprovalDeps } from './approvals.js';
 import type { CollectDeps } from './permits.js';
@@ -220,6 +225,45 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
   // `traceparent` so an agent's own trace and our audit chain become one query.
   installRequestObservability(app, { metrics });
 
+  // The model adapter reports its screening activity to this registry. The
+  // adapter is built before the app — the provider client belongs to
+  // server.ts — so the two are joined here rather than injected.
+  deps.model.attachMetrics?.({
+    modelScreenings: metrics.modelScreenings,
+    modelLatency: metrics.modelLatency,
+  });
+
+  // The credential budget, charged on top of whatever the route's own limiter
+  // charged.
+  //
+  // `createRateLimit` rather than a second `config.rateLimit` on the route,
+  // because @fastify/rate-limit marks a request as already limited the first
+  // time any limiter runs on it: a second limiter in the same chain is skipped
+  // outright, and the one that would be skipped is the route's own mutation
+  // budget. `createRateLimit` applies a limiter without setting that flag, so
+  // both budgets are charged — which is the point of having two.
+  //
+  // Keyed on the client address rather than on the credential. A brute-force
+  // attempt presents a different token every time, so a per-token bucket would
+  // be a fresh bucket per guess and would never trip; the address is what a
+  // guessing attempt has in common.
+  const authBudget = rateLimitPresets(deps.config).auth;
+  let authLimiter: ReturnType<FastifyInstance['createRateLimit']> | null = null;
+  app.addHook('onRequest', async (request, reply) => {
+    if (!request.headers.authorization) return;
+    // Created on first use: @fastify/rate-limit decorates the instance when it
+    // loads, and plugins load at ready() — after this hook is registered.
+    const limiter = (authLimiter ??= app.createRateLimit({
+      max: authBudget.max,
+      timeWindow: authBudget.timeWindow,
+      keyGenerator: (req) => req.ip,
+    }));
+    const result = await limiter(request);
+    if (result.isAllowed || !result.isExceeded) return;
+    reply.header('retry-after', String(result.ttlInSeconds));
+    throw new RateLimitedError(result.ttlInSeconds);
+  });
+
   app.setErrorHandler((err, request, reply) => {
     const traceId = (request as { traceId?: string }).traceId ?? null;
     const { status, envelope } = toHttpError(err, traceId);
@@ -245,6 +289,13 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
   // Operational gauges are refreshed at scrape time rather than on a timer: an
   // idle process then costs no database traffic, and a scrape never reports a
   // number that is stale by a whole poll interval.
+  //
+  // The audit chain is verified on an interval instead of on every scrape: a
+  // full verification recomputes every hash of every tenant's trail, which is
+  // unbounded work in the number of events, and a scrape that outlasts
+  // Prometheus's timeout takes the target down instead of reporting a slow
+  // gauge. The monitor caches the answer for a minute.
+  const auditChain = new AuditChainMonitor(runtime, { hmacKey: deps.config.auditHmacKey });
   await app.register(async (scope) =>
     metricsRoute(scope, {
       metrics,
@@ -254,15 +305,36 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
         for (const [status, n] of Object.entries(counts)) {
           metrics.outboxByStatus.set({ status }, n);
         }
+        // Delivery lag is a property of the DATABASE, not of the queue. A
+        // wedged dispatcher leaves unpublished rows behind and an empty queue,
+        // so the queue's age would read zero while the delivery is hours late.
+        metrics.outboxOldestAgeSeconds.set(await oldestUnpublishedOutboxAgeSeconds(runtime));
         const probe = ctx.queues.probeOutboxDepth;
         if (probe) {
           const depth = await probe().catch(() => null);
-          if (depth) metrics.outboxOldestAgeSeconds.set((depth.oldestJobAgeMs ?? 0) / 1000);
+          // The queue's own backlog age, published under its own name. Zero is
+          // the honest answer for an empty queue: there is no job to be late.
+          if (depth) metrics.outboxOldestJobAgeSeconds.set((depth.oldestJobAgeMs ?? 0) / 1000);
         }
         // One probe, not two: this asked the database the same question twice per
         // scrape on the first pass, and the answer is a single row.
         const isolation = await rlsEnforcementState(runtime);
         metrics.tenantIsolationEnforced.set({ role: isolation.role }, isolation.enforced ? 1 : 0);
+        // The provider's circuit breaker, read from the client that owns the
+        // state machine. `status()` advances the breaker's cooldown clock, but
+        // `analyze()` does the same before it refuses a call, so a scrape
+        // cannot change which requests are attempted.
+        const provider = ctx.model.status();
+        metrics.breakerState.set({ dependency: ctx.model.providerName }, breakerStateValue(provider.breaker));
+        try {
+          const sweep = await auditChain.refresh();
+          if (sweep) metrics.auditChainBreaks.set(sweep.breaks);
+        } catch (err) {
+          // A verification that could not run leaves the previous value in
+          // place. Publishing zero here would claim a clean chain that nobody
+          // checked, which is the one thing this gauge must never say.
+          app.log.error({ err }, 'audit chain verification failed');
+        }
       },
     }),
   );

@@ -1,0 +1,295 @@
+name: Auto-promote
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  # The second chance.
+  #
+  # The pull_request event fires when the pull request is opened or updated —
+  # which is BEFORE CI has run. Every required check is still pending at that
+  # moment, so the gate below finds nothing green and declines, and nothing
+  # ever asks again: the workflow had only ever run once, on the pull
+  # request. Auto-promotion therefore never happened, and the old gate made
+  # that look like a check-counting bug rather than a missing trigger.
+  #
+  # `workflow_run` fires when the CI workflow has actually concluded, which
+  # is the moment the verdict exists. It carries the head commit, and the
+  # pull request at that commit is found by asking the API for it.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+# One promotion attempt per pull request at a time. Without this, three
+# pushes in a minute start three merge attempts and GitHub's auto-merge queue
+# rejects the extras.
+#
+# The group is keyed on the pull request when the event names one directly.
+#
+# A workflow-level concurrency group is evaluated before any step runs, so it
+# cannot know the pull request number for a `workflow_run` event — that number
+# has to be looked up from the completed run, which is a step. So the
+# workflow_run path falls back to the run's id, and the SERIALISATION that
+# actually matters happens in the job below, whose concurrency group IS keyed
+# by the resolved pull request number. Both attempts for one pull request
+# therefore reach `gh pr merge` one at a time.
+#
+# Keying on the head commit — which is what an earlier version did — put the
+# two attempts for ONE pull request into two different groups, because a
+# `pull_request` CI run is made against a merge ref and its SHA is not the
+# pull request's head.
+concurrency:
+  group: auto-promote-${{ github.event.pull_request.number || github.event.workflow_run.id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  # The gate reads the check runs of the head commit.
+  checks: read
+  # The gate also reads the COMPLETED RUN to find which pull request it
+  # belonged to. Without this the lookup is refused and every promotion
+  # silently stops — a permission error and "there was nothing to promote"
+  # look the same from the outside, which is why the lookup's failure is now
+  # reported rather than swallowed.
+  actions: read
+
+jobs:
+  resolve:
+    name: Resolve the pull requests to promote
+    # A fork pull request may not run on the self-hosted runner. This
+    # workflow holds a write token, and on the pull_request path the
+    # workflow file itself comes from the pull request's merge ref — so a
+    # fork that edits this file would otherwise be running its own code,
+    # with write access, on the machine that holds the deployment
+    # credentials. The workflow_run path is unaffected: that event always
+    # uses the workflow file from the default branch, and nothing in this
+    # job checks out or runs repository code.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    outputs:
+      prs: ${{ steps.targets.outputs.prs }}
+    steps:
+      - name: Resolve the pull requests to consider
+        id: targets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The repository every `gh` call is about.
+          #
+          # Without it, `gh` infers the repository from the git remote of the
+          # current directory — so the command only worked because a checkout
+          # happened to be lying there. On a fresh runner, or after the host
+          # janitor cleared the runner's work directory, there is no remote,
+          # `gh` fails, and the step aborts under `set -e`. It also meant a
+          # pull_request-triggered run silently skipped every pull request
+          # whose repository could not be inferred.
+          GH_REPO: ${{ github.repository }}
+          # The same repository, under the name the `gh api` path uses. `gh`
+          # reads GH_REPO for its own default, but the URL in the command is
+          # built by the shell, and an undefined variable there is a step that
+          # aborts before it can do anything.
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          # The id of the completed run. The pull requests it belonged to are
+          # read back from it, because the workflow_run payload's branch and
+          # SHA describe the completed run rather than the pull request.
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "prs=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "considering pull request $PR_NUMBER at $PR_HEAD_SHA"
+            exit 0
+          fi
+
+          # A CI run that was not triggered by a pull request is not about a
+          # pull request. A push to main has none to promote.
+          if [ "$RUN_EVENT" != "pull_request" ]; then
+            echo "the CI run was triggered by $RUN_EVENT, not by a pull request; nothing to promote"
+            echo "prs=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The pull request is identified by the `pull_requests` array the
+          # workflow_run payload carries — the one field that names the pull
+          # request the run belonged to.
+          #
+          # Nothing else in the payload identifies it. `head_branch` and
+          # `head_sha` describe the COMPLETED CI RUN: for a `pull_request` run
+          # that is the pull request's own branch and head commit, and for a
+          # push to main it is `main`. So the branch name cannot serve as the
+          # identity — a fork can name a branch after an open Dependabot
+          # branch, and a name is not an identity.
+          #
+          # The array is empty for a run that had no pull request, which is
+          # exactly the push-to-main case: nothing to promote.
+          #
+          # The parsing is done by `gh`, which is already required and is
+          # present on every runner. A separate `jq` is not: a runner without
+          # it would make this step fail in a way that looks like "there was
+          # nothing to promote", and a gate that cannot run is
+          # indistinguishable from a gate that decided not to act.
+          #
+          # A FAILED lookup is reported as a failure, not as "there was
+          # nothing to promote". The two are different facts, and conflating
+          # them means a transient API error silently stops every promotion.
+          if ! PICKED=$(gh api "repos/$REPO/actions/runs/$RUN_ID" \
+            --jq '[.pull_requests[]?.number] | join(" ")' 2>&1); then
+            echo "could not read the completed run $RUN_ID" >&2
+            printf '         %s\n' "$PICKED" >&2
+            exit 1
+          fi
+          if [ -z "$PICKED" ]; then
+            echo "the completed run was not associated with a pull request; nothing to promote"
+            echo "prs=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PRS=$(echo $PICKED)
+          echo "prs=$PRS" >> "$GITHUB_OUTPUT"
+          echo "considering pull request(s) $PRS"
+
+  promote:
+    name: Enable auto-merge when the gates are green
+    needs: resolve
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    # The serialisation that actually matters, keyed by the pull request the
+    # RESOLVE step found.
+    #
+    # The workflow-level group cannot do this: it is evaluated before any step
+    # runs, so for a workflow_run event it does not yet know which pull
+    # request the completed run belonged to. Keying it by the run's id instead
+    # puts the run-triggered attempt and the pull-request-triggered attempt
+    # for the SAME pull request in two different groups, and both reach
+    # `gh pr merge` — the second of which GitHub rejects, leaving the
+    # rejection in a log nobody reads.
+    #
+    # So the promotion itself is a separate job whose concurrency group IS the
+    # pull request number. Two attempts for one pull request now queue; two
+    # attempts for two different pull requests do not.
+    concurrency:
+      group: auto-promote-pr-${{ needs.resolve.outputs.prs }}
+      cancel-in-progress: false
+    steps:
+      - name: Check whether these pull requests are eligible
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          REPO: ${{ github.repository }}
+          PRS: ${{ needs.resolve.outputs.prs }}
+        run: |
+          set -euo pipefail
+
+          REQUIRED_CHECKS=(
+            "Verify (typecheck, lint, tests, build, format, gates)"
+            "SLO report (live scrape, strict)"
+            "Secret scan (gitleaks)"
+          )
+
+          for PR in ${PRS:-}; do
+            echo "=== pull request $PR ==="
+
+            META=$(gh pr view "$PR" --json baseRefName,author,isDraft,headRefOid \
+              --jq '"\(.baseRefName)|\(.author.login)|\(.isDraft)|\(.headRefOid)"') \
+              || { echo "could not read pull request $PR; not promoting" >&2; continue; }
+            IFS='|' read -r BASE AUTHOR DRAFT HEAD <<< "$META"
+
+            # --- 1. the pull request must target the protected branch -----
+            if [ "$BASE" != "main" ]; then
+              echo "not targeting main ($BASE); not promoting"
+              continue
+            fi
+
+            # --- 2. only Dependabot's dependency bumps are auto-promoted -----
+            # A human-authored change is merged by a human. Auto-merging those
+            # would let a push to a branch bypass review, which is the opposite
+            # of what branch protection is for. Dependabot's bumps are
+            # mechanical, and they are the ones that actually rot when nobody
+            # merges them.
+            #
+            # This is also what keeps a fork out of a workflow that holds a
+            # write token: a fork's pull request is not authored by
+            # Dependabot, so it never reaches the merge step.
+            #
+            # BOTH of Dependabot's logins are accepted. GitHub has been moving
+            # its bots into the `app/` namespace — a pull request opened
+            # against the current API reports its author as `app/dependabot`
+            # rather than `dependabot[bot]` — and a check that only knows the
+            # old name declines every real dependency bump while reporting
+            # that it is behaving correctly.
+            #
+            # The old name is quoted, because `dependabot[bot]` in a case
+            # pattern is a GLOB: the brackets mean "one character from this
+            # set", so the unquoted form matches nothing at all.
+            case "$AUTHOR" in
+              'dependabot[bot]' | 'app/dependabot') ;;
+              *)
+                echo "author is $AUTHOR, not Dependabot; not promoting"
+                continue
+                ;;
+            esac
+
+            # --- 3. the draft flag blocks promotion --------------------------
+            if [ "$DRAFT" = "true" ]; then
+              echo "pull request is a draft; not promoting"
+              continue
+            fi
+
+            # --- 4. every required check must have passed on THIS commit ----
+            # Not "the checks are green" in general, but green at this exact
+            # SHA. A check that passed on an earlier commit says nothing about
+            # the code being merged.
+            #
+            # And not a COUNT of failures. The count was wrong in both
+            # directions: it counted the checks that had not reported yet as
+            # failures — which includes this workflow's own in-progress
+            # check-run, so the gate always declined — and an empty check list
+            # counted as zero failures, so the gate would have promoted a pull
+            # request on which nothing at all had been verified.
+            #
+            # What is required instead is that each of the three named
+            # required checks is PRESENT and SUCCESSFUL on the head commit.
+            # A missing one, an unfinished one and a red one are all reasons
+            # not to promote, and each one is named in the output so the
+            # reason is visible in the log.
+            RUNS=$(gh api "repos/$REPO/commits/$HEAD/check-runs" --paginate \
+              --jq '.check_runs[] | [.name, .status, (.conclusion // "none")] | join("|")') \
+              || { echo "could not read the check runs for $HEAD; not promoting" >&2; continue; }
+
+            GREEN=1
+            for NAME in "${REQUIRED_CHECKS[@]}"; do
+              LINE=$(printf '%s\n' "$RUNS" | grep -F -- "$NAME|" | head -n 1 || true)
+              if [ -z "$LINE" ]; then
+                echo "  $NAME: has not reported on $HEAD; not promoting"
+                GREEN=0
+                break
+              fi
+              STATUS=$(printf '%s' "$LINE" | cut -d'|' -f2)
+              CONCLUSION=$(printf '%s' "$LINE" | cut -d'|' -f3)
+              if [ "$STATUS" != "completed" ] || [ "$CONCLUSION" != "success" ]; then
+                echo "  $NAME: $STATUS/$CONCLUSION on $HEAD; not promoting"
+                GREEN=0
+                break
+              fi
+              echo "  $NAME: success"
+            done
+            if [ "$GREEN" -ne 1 ]; then
+              continue
+            fi
+
+            # --- 5. enable auto-merge ----------------------------------------
+            # `gh pr merge --auto` registers the merge with GitHub rather than
+            # merging immediately: GitHub merges it once the branch protection
+            # rules are satisfied, which includes the required status checks.
+            # If the merge cannot happen, the request stays queued and GitHub
+            # tells us why.
+            echo "enabling auto-merge"
+            gh pr merge "$PR" --squash --auto --delete-branch \
+              || echo "auto-merge could not be enabled; GitHub will report the reason on the pull request"
+          done
