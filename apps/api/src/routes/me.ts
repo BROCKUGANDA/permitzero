@@ -455,7 +455,9 @@ export async function removeMfa(deps: MfaDeps, principal: Principal, code?: stri
         const codeHash = hashConsumedCode(key, raw);
         const ok = await consumeMfaCodeStep(ex, tenantId, principal.actorId, step, codeHash);
         if (!ok) {
-          throw new ValidationError('That code has already been used. Enter the code your authenticator is showing now.');
+          throw new ValidationError(
+            'That code has already been used. Enter the code your authenticator is showing now.',
+          );
         }
       }
       // else: unreadable secret — the factor is gone, so there is nothing
