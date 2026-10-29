@@ -36,6 +36,7 @@ export * from './repos/execution.js';
 export * from './repos/audit.js';
 export * from './repos/outbox.js';
 export * from './repos/catalog.js';
+export * from './crypto.js';
 export * from './stores.js';
 export * from './seed.js';
 export * from './seed-policy.js';

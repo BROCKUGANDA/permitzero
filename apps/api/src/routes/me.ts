@@ -47,10 +47,12 @@ import {
   getUserMfaEnrolledAt,
   recordConsumedMfaCode,
   recordMfaVerification,
+  reencryptMfaSecret,
   setUserMfaEnrolledAt,
   tenantScope,
   touchMfaVerifiedAt,
   upsertMfaSecret,
+  verificationKeys,
 } from '@permitzero/db';
 import type { Db } from '@permitzero/db';
 import {
@@ -118,6 +120,43 @@ function masterKey(deps: MfaDeps): Buffer {
   return deriveMfaSecretKey(deps.auditHmacKey);
 }
 
+/** The ordered keyring that protects MFA secrets — current first, then every
+ * retained verification key. A secret encrypted under any of them can still
+ * be read after a rotation; a new secret is always encrypted under the
+ * current one. */
+function mfaKeyRing(deps: MfaDeps): Buffer[] {
+  const current = masterKey(deps);
+  const rawRing: string[] = verificationKeys();
+  const ring = [deps.auditHmacKey as string, ...rawRing]
+    .filter((k): k is string => typeof k === 'string' && k.length > 0)
+    .map((k) => deriveMfaSecretKey(k));
+  const seen = new Set<string>();
+  return ring.filter((k) => {
+    const f = k.toString('hex');
+    if (seen.has(f)) return false;
+    seen.add(f);
+    return true;
+  });
+}
+
+/** Try each key in the ring. Null only when no key could open the row. */
+function decryptSecretAny(payload: string, keys: Buffer[]): { secret: string; keyIndex: number } | null {
+  for (let i = 0; i < keys.length; i++) {
+    const s = decryptSecret(payload, keys[i] as Buffer);
+    if (s !== null) return { secret: s, keyIndex: i };
+  }
+  return null;
+}
+
+/** Hash a code under each key in the ring — a spent-code fingerprint must
+ * be checked against all of them, because the hash is keyed and the stored
+ * fingerprint was made under whichever key was current when the code was
+ * spent. */
+function hashedCodesForRing(keys: Buffer[], code: string): string[] {
+  const t = code.trim();
+  return keys.map((k) => hashConsumedCode(k, t));
+}
+
 /** The name an authenticator app shows for this account. */
 function accountLabel(principal: Principal): string {
   return principal.displayName || principal.actorId;
@@ -162,6 +201,7 @@ export async function enrolMfa(
   requireHumanUser(principal);
   if (!deps.enabled) throw new ConflictError('MFA is disabled on this deployment.');
   const key = masterKey(deps);
+  const keys = mfaKeyRing(deps);
   const now = deps.clock?.() ?? new Date();
   const tenantId = principal.tenantId;
   const secret = generateTotpSecret();
@@ -204,11 +244,11 @@ export async function enrolMfa(
         'This account is already enrolled for MFA in another workspace. Remove that enrolment first.',
       );
     }
-    const currentSecret = decryptSecret(state.row.secretEncrypted, key);
-    if (!currentSecret) {
+    const opened0 = decryptSecretAny(state.row.secretEncrypted, keys);
+    if (!opened0) {
       throw new ConflictError('The stored MFA secret could not be read. Enrol again.');
     }
-    const reEnrolStep = verifyTotpCodeStep(currentSecret, raw, now.getTime());
+    const reEnrolStep = verifyTotpCodeStep(opened0.secret, raw, now.getTime());
     if (reEnrolStep === null) {
       throw new ValidationError('That code is not valid.');
     }
@@ -218,7 +258,21 @@ export async function enrolMfa(
     await scope(async (ex) => {
       if (state.enrolledAt && state.row) {
         const rawInner = (code as string).trim();
-        const stepInner = verifyTotpCodeStep(decryptSecret(state.row.secretEncrypted, key) as string, rawInner, now.getTime());
+        // Re-read inside the transaction for the authoritative check — the
+        // outer read's row could be stale if another workspace rotated the
+        // secret between the two transactions. The conditional UPDATE makes
+        // a concurrent replay fail with 0 rows rather than silently succeeding.
+        const curRow = await getMfaSecretByUserId(ex, tenantId, principal.actorId);
+        if (!curRow) {
+          throw new ConflictError(
+            'This account is already enrolled for MFA in another workspace. Remove that enrolment first.',
+          );
+        }
+        const openedInner = decryptSecretAny(curRow.secretEncrypted, keys);
+        if (!openedInner) {
+          throw new ConflictError('The stored MFA secret could not be read. Enrol again.');
+        }
+        const stepInner = verifyTotpCodeStep(openedInner.secret, rawInner, now.getTime());
         if (stepInner === null) {
           throw new ValidationError('That code is not valid.');
         }
@@ -226,6 +280,9 @@ export async function enrolMfa(
         const ok = await consumeMfaCodeStep(ex, tenantId, principal.actorId, stepInner, hashInner);
         if (!ok) {
           throw new ValidationError('That code has already been used. Enter the code your authenticator is showing now.');
+        }
+        if (openedInner.keyIndex !== 0) {
+          await reencryptMfaSecret(ex, tenantId, principal.actorId, encryptSecret(openedInner.secret, key));
         }
       }
       await upsertMfaSecret(ex, {
@@ -274,6 +331,7 @@ export async function confirmMfa(deps: MfaDeps, principal: Principal, code: stri
   requireHumanUser(principal);
   if (!deps.enabled) throw new ConflictError('MFA is disabled on this deployment.');
   const key = masterKey(deps);
+  const keys = mfaKeyRing(deps);
   const now = deps.clock?.() ?? new Date();
   const tenantId = principal.tenantId;
 
@@ -285,9 +343,13 @@ export async function confirmMfa(deps: MfaDeps, principal: Principal, code: stri
     if (!row) {
       throw new ConflictError('There is no MFA enrolment in progress for this account. Start one first.');
     }
-    const secret = decryptSecret(row.secretEncrypted, key);
-    if (!secret) {
+    const opened = decryptSecretAny(row.secretEncrypted, keys);
+    if (!opened) {
       throw new ConflictError('The stored MFA secret could not be read. Enrol again.');
+    }
+    const { secret, keyIndex } = opened;
+    if (keyIndex !== 0) {
+      await reencryptMfaSecret(ex, tenantId, principal.actorId, encryptSecret(secret, key));
     }
     const step = verifyTotpCodeStep(secret, code, now.getTime());
     if (step === null) {
@@ -316,6 +378,7 @@ export async function verifyMfa(deps: MfaDeps, principal: Principal, code: strin
   requireHumanUser(principal);
   if (!deps.enabled) throw new ConflictError('MFA is disabled on this deployment.');
   const key = masterKey(deps);
+  const keys = mfaKeyRing(deps);
   const now = deps.clock?.() ?? new Date();
   const tenantId = principal.tenantId;
 
@@ -328,9 +391,13 @@ export async function verifyMfa(deps: MfaDeps, principal: Principal, code: strin
     if (!row || !enrolledAt) {
       throw new ConflictError('MFA is not enrolled for this account. Enrol and confirm it first.');
     }
-    const secret = decryptSecret(row.secretEncrypted, key);
-    if (!secret) {
+    const opened = decryptSecretAny(row.secretEncrypted, keys);
+    if (!opened) {
       throw new ConflictError('The stored MFA secret could not be read. Enrol again.');
+    }
+    const { secret, keyIndex } = opened;
+    if (keyIndex !== 0) {
+      await reencryptMfaSecret(ex, tenantId, principal.actorId, encryptSecret(secret, key));
     }
     const step = verifyTotpCodeStep(secret, code, now.getTime());
     if (step === null) {
@@ -390,12 +457,16 @@ export async function removeMfa(
         );
       }
       const key = masterKey(deps);
+      const keys = mfaKeyRing(deps);
       const now = deps.clock?.() ?? new Date();
-      const currentSecret = decryptSecret(row.secretEncrypted, key);
-      if (!currentSecret) {
+      const opened = decryptSecretAny(row.secretEncrypted, keys);
+      if (!opened) {
         throw new ConflictError('The stored MFA secret could not be read. Enrol again.');
       }
-      const step = verifyTotpCodeStep(currentSecret, raw, now.getTime());
+      if (opened.keyIndex !== 0) {
+        await reencryptMfaSecret(ex, tenantId, principal.actorId, encryptSecret(opened.secret, key));
+      }
+      const step = verifyTotpCodeStep(opened.secret, raw, now.getTime());
       if (step === null) {
         throw new ValidationError('That code is not valid.');
       }
