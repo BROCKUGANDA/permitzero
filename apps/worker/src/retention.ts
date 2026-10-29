@@ -511,92 +511,72 @@ async function recordRun(
  */
 async function sweepTenant(deps: RetentionDeps, tenantId: string, now: Date): Promise<TenantRetentionResult> {
   const startedAt = now;
+  const held = await deps.db.db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT set_config('pz.retention_purge', 'on', true)`);
+    return activeLegalHold(tx, tenantId, now);
+  });
+  if (held !== null) {
+    await recordRun(deps, {
+      tenantId,
+      startedAt,
+      finishedAt: new Date(),
+      outcome: 'held',
+      auditRowsPurged: 0,
+      outboxRowsPurged: 0,
+      auditRowsRelinked: 0,
+      legalHold: true,
+      chainHeadBefore: null,
+      chainHeadAfter: null,
+      chainBoundaryHash: null,
+      detail: { legal_hold: JSON.parse(held) as unknown },
+    });
+    return {
+      tenantId,
+      outcome: 'held',
+      auditRowsPurged: 0,
+      outboxRowsPurged: 0,
+      auditRowsRelinked: 0,
+      legalHold: true,
+      chainHeadBefore: null,
+      chainHeadAfter: null,
+      chainBoundaryHash: null,
+    };
+  }
 
   try {
     const outcome = await deps.db.db.transaction(async (tx) => {
-      // The gate the append-only trigger checks. Transaction-local, so it
-      // cannot leak onto the next borrower of this pooled connection.
       await tx.execute(sql`SELECT set_config('pz.retention_purge', 'on', true)`);
-      // The chain lock, the same key the chain trigger takes. Without it an
-      // append could land between the read of the head and the re-anchor,
-      // and the re-anchor would then link to a head that has moved.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended('pz_audit_chain:' || ${tenantId}, 0))`);
-
-      // The hold check belongs AFTER the lock and INSIDE the same
-      // transaction as the deletes: the outer check committed before the
-      // purge transaction started, so a hold placed between those two
-      // transactions was still ignored by the deletions. Coordinating on
-      // the same advisory lock (see 0010) is what makes the hold visible.
-      const heldJson = await activeLegalHold(tx, tenantId, now);
-      if (heldJson !== null) {
-        const finishedAtH = new Date();
-        await tx.execute(sql`
-          INSERT INTO public.retention_runs
-            (retention_run_id, tenant_id, started_at, finished_at, outcome,
-             audit_retention_days, outbox_retention_days, audit_cutoff, outbox_cutoff,
-             audit_rows_purged, outbox_rows_purged, audit_rows_relinked, legal_hold,
-             chain_head_before, chain_head_after, chain_boundary_hash, operator_id, detail)
-          VALUES
-            (${newId('run')}, ${tenantId}, ${startedAt.toISOString()}, ${finishedAtH.toISOString()},
-             'held', ${deps.config.auditRetentionDays}, ${deps.config.outboxRetentionDays},
-             ${new Date(startedAt.getTime() - deps.config.auditRetentionDays * DAY_MS).toISOString()},
-             ${new Date(startedAt.getTime() - deps.config.outboxRetentionDays * DAY_MS).toISOString()},
-             0, 0, 0, true,
-             NULL, NULL, NULL,
-             ${deps.config.operatorId}, ${JSON.stringify({ legal_hold: JSON.parse(heldJson) as unknown })}::jsonb)
-        `);
-        return { held: true as const, heldJson };
-      }
-
       const audit = await purgeAuditChain(tx, deps, tenantId, now);
       const outbox = await purgeOutbox(tx, deps, tenantId);
-      // The successful run record lives in the SAME transaction as the
-      // deletions. If this insert fails, the deletions roll back with it —
-      // a committed deletion must never be left with no run record.
-      const finishedAtP = new Date();
-      await tx.execute(sql`
-        INSERT INTO public.retention_runs
-          (retention_run_id, tenant_id, started_at, finished_at, outcome,
-           audit_retention_days, outbox_retention_days, audit_cutoff, outbox_cutoff,
-           audit_rows_purged, outbox_rows_purged, audit_rows_relinked, legal_hold,
-           chain_head_before, chain_head_after, chain_boundary_hash, operator_id, detail)
-        VALUES
-          (${newId('run')}, ${tenantId}, ${startedAt.toISOString()}, ${finishedAtP.toISOString()},
-           'purged', ${deps.config.auditRetentionDays}, ${deps.config.outboxRetentionDays},
-           ${new Date(startedAt.getTime() - deps.config.auditRetentionDays * DAY_MS).toISOString()},
-           ${new Date(startedAt.getTime() - deps.config.outboxRetentionDays * DAY_MS).toISOString()},
-           ${audit.purged}, ${outbox.purged}, ${audit.relinked}, false,
-           ${audit.headBefore}, ${audit.headAfter}, ${audit.boundaryHash},
-           ${deps.config.operatorId}, ${JSON.stringify({ outbox_rows_stamped: outbox.stamped })}::jsonb)
-      `);
-      return { held: false as const, audit, outbox };
+      return { audit, outbox };
     });
 
-    if ((outcome as { held: boolean }).held) {
-      return {
-        tenantId,
-        outcome: 'held',
-        auditRowsPurged: 0,
-        outboxRowsPurged: 0,
-        auditRowsRelinked: 0,
-        legalHold: true,
-        chainHeadBefore: null,
-        chainHeadAfter: null,
-        chainBoundaryHash: null,
-      };
-    }
+    await recordRun(deps, {
+      tenantId,
+      startedAt,
+      finishedAt: new Date(),
+      outcome: 'purged',
+      auditRowsPurged: outcome.audit.purged,
+      outboxRowsPurged: outcome.outbox.purged,
+      auditRowsRelinked: outcome.audit.relinked,
+      legalHold: false,
+      chainHeadBefore: outcome.audit.headBefore,
+      chainHeadAfter: outcome.audit.headAfter,
+      chainBoundaryHash: outcome.audit.boundaryHash,
+      detail: { outbox_rows_stamped: outcome.outbox.stamped },
+    });
 
-    const purged = outcome as { held: false; audit: AuditPurgeOutcome; outbox: { purged: number; stamped: number } };
     return {
       tenantId,
       outcome: 'purged',
-      auditRowsPurged: purged.audit.purged,
-      outboxRowsPurged: purged.outbox.purged,
-      auditRowsRelinked: purged.audit.relinked,
+      auditRowsPurged: outcome.audit.purged,
+      outboxRowsPurged: outcome.outbox.purged,
+      auditRowsRelinked: outcome.audit.relinked,
       legalHold: false,
-      chainHeadBefore: purged.audit.headBefore,
-      chainHeadAfter: purged.audit.headAfter,
-      chainBoundaryHash: purged.audit.boundaryHash,
+      chainHeadBefore: outcome.audit.headBefore,
+      chainHeadAfter: outcome.audit.headAfter,
+      chainBoundaryHash: outcome.audit.boundaryHash,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
