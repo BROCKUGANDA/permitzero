@@ -10,8 +10,27 @@
 # Without a receiver, a `severity: page` rule produces no page, and the
 # alerting posture is a file nobody reads.
 #
-# The routing is deliberately simple: severity decides the destination, and
-# the receiver is one webhook rather than a PagerDuty integration. A webhook
+# TWO webhook configurations under one receiver, and the reason for the second
+# one is the whole point of this file:
+#
+#   · The API's own sink is the destination that always exists. It is the
+#     default, and it is what makes the alerting path end somewhere: the
+#     deployment script substitutes __PZ_ALERT_WEBHOOK_URL__ with the null
+#     receiver (http://127.0.0.1:9/null) whenever the operator has not set
+#     PZ_ALERT_WEBHOOK_URL, so before this entry existed every notification was
+#     evaluated and then discarded.
+#   · The operator's own receiver is the override. The deployment script
+#     substitutes the placeholder below with $PZ_ALERT_WEBHOOK_URL when it is
+#     set. Because that substitution is unconditional, the entry is ADDITIVE
+#     rather than exclusive: with an operator URL configured the notification
+#     goes to the operator's receiver AND to the API's sink, and the API keeps
+#     its own record of it either way. With no operator URL configured the
+#     placeholder renders as the null receiver and Alertmanager logs a
+#     delivery failure for it — the API's sink above still received the
+#     notification, which is the difference this file exists to make.
+#
+# The routing is deliberately simple: severity decides the destination, and the
+# receiver is one webhook rather than a PagerDuty integration. A webhook
 # endpoint is enough to prove the path works end to end, and a vendor
 # integration would put a credential in the compose file for no operational
 # gain at this stage.
@@ -59,6 +78,31 @@ inhibit_rules:
 receivers:
   - name: webhook
     webhook_configs:
+      # The API's own sink. The default destination, and the one that exists
+      # whatever the operator configured.
+      #
+      # The credential travels as a bearer token rather than as an
+      # `x-alert-token` header because the pinned Alertmanager
+      # (prom/alertmanager:v0.27.0, set in infra/docker-compose.yml) cannot
+      # send a custom header at all: prometheus/common did not gain
+      # `http_headers` until after the version it vendors, and a config
+      # carrying a field that release does not know is a config the container
+      # refuses to start with. The sink accepts the secret in either carrier;
+      # this is the one this receiver can produce.
+      #
+      # The file is the metrics token the deployment script already stages
+      # into the secrets volume (`run/pz_metrics_token`, copied to
+      # /etc/alertmanager/pz_metrics_token). A dedicated alert token is
+      # better and is what ALERT_INGEST_TOKEN is for; until the deployment
+      # stages one, this is the secret both sides already share.
+      - url: http://api:3000/v1/internal/alerts
+        send_resolved: true
+        max_alerts: 0
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/pz_metrics_token
+      # The operator's own receiver. See the note at the top of this file.
       - url: __PZ_ALERT_WEBHOOK_URL__
         send_resolved: true
         max_alerts: 0

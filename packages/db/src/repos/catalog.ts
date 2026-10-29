@@ -7,6 +7,7 @@ import { and, asc, desc, eq, isNull } from 'drizzle-orm';
 import { newId } from '@permitzero/domain';
 import type { ActorType, EnforcementMode, Environment, VendorStatus } from '@permitzero/domain';
 import type { DbExecutor } from '../client.js';
+import { currentKey, deriveKey, encryptNullableColumn, readColumn, verificationKeys } from '../crypto.js';
 import {
   connectorDispatches,
   connectorLedger,
@@ -475,6 +476,18 @@ export async function setEnforcementMode(
 
 // -- Model evaluations --------------------------------------------------------
 
+/** The domain-separation label for the model-evaluation output's encryption key. */
+const MODEL_EVALUATION_PAYLOAD_PURPOSE = 'model-evaluation-payload';
+
+/** The keys that may decrypt a model-evaluation output. */
+function modelEvaluationKeys(explicit?: string | null): Buffer[] {
+  const masters: string[] = [];
+  for (const master of [explicit, ...verificationKeys()]) {
+    if (typeof master === 'string' && master.length > 0 && !masters.includes(master)) masters.push(master);
+  }
+  return masters.map((master) => deriveKey(master, MODEL_EVALUATION_PAYLOAD_PURPOSE));
+}
+
 export async function insertModelEvaluation(
   ex: DbExecutor,
   input: {
@@ -492,7 +505,10 @@ export async function insertModelEvaluation(
     tokenUsage?: Record<string, number> | null;
     errorClass?: string | null;
   },
+  opts?: { hmacKey?: string | null },
 ): Promise<ModelEvaluationRow> {
+  const master = opts?.hmacKey ?? currentKey();
+  const output = input.outputValidated ?? null;
   const [row] = await ex
     .insert(modelEvaluations)
     .values({
@@ -504,7 +520,13 @@ export async function insertModelEvaluation(
       promptVersion: input.promptVersion,
       schemaVersion: input.schemaVersion,
       inputHash: input.inputHash,
-      outputJsonValidated: input.outputValidated ?? null,
+      // The validated model output is decision content: the risk hints a model
+      // produced about an action. It is stored encrypted and read back in the
+      // clear, so the reader above the repository sees the same shape it
+      // always did.
+      outputJsonValidated: master
+        ? encryptNullableColumn(output, deriveKey(master, MODEL_EVALUATION_PAYLOAD_PURPOSE))
+        : output,
       status: input.status,
       latencyMs: input.latencyMs ?? null,
       tokenUsageJson: input.tokenUsage ?? null,
@@ -512,9 +534,21 @@ export async function insertModelEvaluation(
     })
     .returning();
   if (!row) throw new Error('model evaluation insert returned no row');
-  return row;
+  return withDecryptedOutput(row, modelEvaluationKeys(master));
+}
+
+/**
+ * The row as the application sees it: the model output in the clear.
+ *
+ * An output written before encryption was enabled holds plaintext and is read
+ * as it is.
+ */
+function withDecryptedOutput(row: ModelEvaluationRow, keys: readonly Buffer[]): ModelEvaluationRow {
+  return { ...row, outputJsonValidated: readColumn<Record<string, unknown> | null>(row.outputJsonValidated, keys) };
 }
 
 export async function listRecentModelEvaluations(ex: DbExecutor, limit: number): Promise<ModelEvaluationRow[]> {
-  return ex.select().from(modelEvaluations).orderBy(desc(modelEvaluations.createdAt)).limit(limit);
+  const rows = await ex.select().from(modelEvaluations).orderBy(desc(modelEvaluations.createdAt)).limit(limit);
+  const keys = modelEvaluationKeys();
+  return rows.map((row) => withDecryptedOutput(row, keys));
 }

@@ -70,7 +70,35 @@ export interface ApiConfig {
    * or the container is SIGKILLed mid-shutdown and the pools never close cleanly.
    */
   shutdownGraceMs: number;
+  /**
+   * How recent a step-up verification must be for the assertion it produces to
+   * be issued.
+   *
+   * This is the "how long ago did you prove it" window, not the lifetime of
+   * the assertion itself: an assertion is bound to one action and expires on
+   * its own schedule. Five minutes is the same order as the assertion's
+   * lifetime, so a person who verified a moment ago is not asked to verify
+   * again for every approval they work through.
+   *
+   * Optional because callers may build this configuration by hand — the API's
+   * test harness does — and a missing value must not be a crash. `loadConfig`
+   * always sets it; `DEFAULT_MFA_STEP_UP_WINDOW_SECONDS` is what a caller
+   * that leaves it out gets.
+   */
+  mfaStepUpWindowSeconds?: number;
+  /**
+   * Whether MFA enrolment and step-up are offered at all.
+   *
+   * Turning this off does NOT satisfy a policy's `require_mfa`. With no
+   * assertion to be issued, such a policy stays unsatisfied and the approval
+   * is refused — the switch is for deployments that have not enrolled
+   * anybody yet, and it is deliberately not a bypass.
+   */
+  mfaEnabled?: boolean;
 }
+
+/** The step-up window used when the configuration does not name one. */
+export const DEFAULT_MFA_STEP_UP_WINDOW_SECONDS = 300;
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name];
@@ -112,6 +140,22 @@ function intIn(env: NodeJS.ProcessEnv, name: string, def: number, min: number, m
     throw new Error(`${name} must be an integer within ${min}..${max}.`);
   }
   return parsed;
+}
+
+/**
+ * A boolean switch, parsed rather than coerced.
+ *
+ * `MFA_ENABLED=false` and `MFA_ENABLED=0` and `MFA_ENABLED=no` all mean off;
+ * anything else is a typo, and a typo that silently leaves the control ON is
+ * the kind of thing nobody finds until an audit.
+ */
+function booleanOf(env: NodeJS.ProcessEnv, name: string, def: boolean): boolean {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') return def;
+  const normalized = raw.trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  throw new Error(`${name} must be one of true/false/1/0/yes/no/on/off (got "${raw}").`);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
@@ -161,5 +205,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     logLevel: logLevelOf(env),
     metricsToken: env['METRICS_TOKEN']?.trim() ? env['METRICS_TOKEN'].trim() : null,
     shutdownGraceMs: intIn(env, 'SHUTDOWN_GRACE_MS', 10_000, 100, 120_000),
+    mfaStepUpWindowSeconds: intIn(env, 'MFA_STEP_UP_WINDOW_SECONDS', DEFAULT_MFA_STEP_UP_WINDOW_SECONDS, 30, 3600),
+    mfaEnabled: booleanOf(env, 'MFA_ENABLED', true),
   };
 }

@@ -1,35 +1,50 @@
 {
   "$comment": [
-    "Reviewed exceptions to `npm audit --omit=dev --json`.",
+    "Reviewed exceptions to `npm audit --json`.",
     "",
     "A dependency audit gate that is set to a level the current tree already",
     "fails is not a control, it is theatre: either CI is red on the day it is",
     "added, so people ignore it, or it is quietly tuned until it passes, so it",
     "reports safety it is not checking. This file is the alternative — every",
     "accepted advisory is named, with the reason it is accepted, what actually",
-    "mitigates it here, who decided, and when it must be looked at again. Anything",
-    "NOT listed fails the gate, so a new advisory cannot be absorbed silently and",
-    "an accepted one cannot outlive its justification.",
+    "mitigates it here, who decided, and when it must be looked at again.",
+    "Anything NOT listed fails the gate, so a new advisory cannot be absorbed",
+    "silently and an accepted one cannot outlive its justification.",
     "",
-    "Source of truth: `npm audit --omit=dev --json`. See scripts/audit-gate.mjs.",
+    "Source of truth: `npm audit --json` over the WHOLE tree, devDependencies",
+    "included. See scripts/audit-gate.mjs. The scope was widened from",
+    "`--omit=dev` because an advisory that lives only in a build-time",
+    "dependency was outside the gate, and build-time dependencies still run",
+    "code on a developer's machine and in CI on a pull request.",
+    "",
+    "Each entry names the ADVISORIES it accepts, not just the package. A",
+    "package that carries three advisories is three findings, and a new",
+    "advisory on a package that is already listed here fails the build until",
+    "it is named: the `advisories` array is the allowlist, and the package",
+    "name is only a heading.",
     "",
     "These four were removed in 7f2ceb9 on the strength of a run in which npm",
     "had failed with a configuration error and the gate had parsed the error",
     "envelope as an empty report. The gate now refuses to pass when npm cannot",
     "produce a report at all, and with that fixed these four came back.",
     "",
-    "Scope, stated so the file is not read as total coverage: the gate runs",
-    "`npm audit --json --omit=dev`, so advisories that live only in devDependencies",
-    "are not counted here. GitHub Dependabot reports a wider set under its own",
-    "source and scope. That difference is a property of the two tools, not",
-    "evidence that either is wrong, and the compliance map records it as a limit",
-    "rather than resolving it by quietly widening the gate."
+    "Scope, stated so the file is not read as total coverage: this is the",
+    "advisory database npm ships with. GitHub Dependabot reports under its own",
+    "source and scope, and a package with no advisory today can have one",
+    "tomorrow — which is what the gate is for."
   ],
   "exceptions": [
     {
       "package": "zod",
       "severity": "high",
       "advisory": "memory exhaustion while validating oversized constrained collections",
+      "advisories": [
+        {
+          "id": "GHSA-mrhx-c7xc-m3w5",
+          "severity": "high",
+          "title": "Zod can exhaust memory while validating oversized constrained collections"
+        }
+      ],
       "vulnerableRange": "<4.6.6",
       "acceptedBecause": [
         "The fix is a Zod 3 -> 4 major, which changes the API used across 94 call sites in packages/schemas and the Fastify type provider alongside it. That is a migration, not a bump, and it is not something to absorb while the product is being hardened.",
@@ -46,6 +61,8 @@
       "package": "fastify-type-provider-zod",
       "severity": "high",
       "advisory": "inherits the advisory of its zod peer dependency",
+      "advisories": [],
+      "inheritsFrom": "zod",
       "vulnerableRange": "<=4.0.2",
       "acceptedBecause": [
         "It has no independent fix: the advisory is the transitive zod one above, and the version that resolves it requires the same Zod 4 migration."
@@ -59,22 +76,47 @@
     {
       "package": "postcss",
       "severity": "high",
-      "advisory": "arbitrary file read and information disclosure via an attacker-controlled sourceMappingURL in CSS comments",
-      "vulnerableRange": "<=8.5.11",
-      "acceptedBecause": [
-        "The advisory is reached through `next`, which pins its own postcss. Fixing it at the root means a Next major upgrade, and the version that carries the fix is a major whose own release notes change the bundler behaviour this project depends on.",
-        "The vulnerable path is CSS PROCESSING of a stylesheet that an attacker would have to get onto the server's disk. PermitZero serves no user-uploaded CSS and no user-supplied stylesheet is compiled at runtime: the console's styles are bundled at build time from this repository."
+      "advisory": "file read and path traversal through an attacker-controlled sourceMappingURL in CSS comments",
+      "advisories": [
+        {
+          "id": "GHSA-qx2v-qp2m-jg93",
+          "severity": "moderate",
+          "title": "PostCSS has XSS via Unescaped </style> in its CSS Stringify Output"
+        },
+        {
+          "id": "GHSA-6g55-p6wh-862q",
+          "severity": "high",
+          "title": "PostCSS: Arbitrary file read and information disclosure via attacker-controlled sourceMappingURL in CSS comments"
+        },
+        {
+          "id": "GHSA-fxqj-rqcc-2cmp",
+          "severity": "moderate",
+          "title": "PostCSS: incomplete fix of GHSA-6g55-p6wh-862q — attacker-controlled sourceMappingURL reads arbitrary .map files when `from` is unset"
+        },
+        {
+          "id": "GHSA-r28c-9q8g-f849",
+          "severity": "high",
+          "title": "PostCSS: Path Traversal in Previous Source Map Auto-Loading (sourceMappingURL) leads to Arbitrary .map File Disclosure"
+        }
       ],
-      "residualRisk": "A dependency that lets an attacker write a stylesheet onto the build host, or a future feature that compiles CSS at runtime, would turn this into a file-read primitive. The console is a static bundle today; a user-content rendering path would change that.",
-      "compensatingControl": "No user-supplied CSS is compiled at runtime; the stylesheets are bundled at build time from the repository, and Caddy serves the built asset.",
+      "vulnerableRange": "<=8.5.22",
+      "acceptedBecause": [
+        "The vulnerable copy is `node_modules/next/node_modules/postcss` — next pins its own postcss, and the root postcss (8.5.32, the version the console builds with) is not affected. The advisories are reached through next, and the versions that resolve them inside next require a Next major whose own release notes change the bundler behaviour this project depends on.",
+        "The vulnerable path is CSS PROCESSING of a stylesheet that an attacker would have to get onto the build host's disk. PermitZero serves no user-uploaded CSS and no user-supplied stylesheet is compiled at runtime: the console's styles are bundled at build time from this repository, and the shipped image is the Next standalone output, which contains no postcss at all.",
+        "The XSS advisory (GHSA-qx2v-qp2m-jg93) needs a stylesheet whose stringified output is written into a page. Nothing in this repository stringifies attacker-supplied CSS, and the console's pages are built from the committed sources only."
+      ],
+      "residualRisk": "A dependency that lets an attacker write a stylesheet onto the build host, or a future feature that compiles CSS at runtime, would turn this into a file-read primitive. The console is a static bundle today; a user-content rendering path would change that. The cheap fix worth trying before accepting this again: a root-level npm `overrides` entry forcing next's postcss to ^8.5.23 — apps/web already declares that override, but npm only honours overrides declared in the ROOT package.json, so the one there has no effect.",
+      "compensatingControl": "No user-supplied CSS is compiled at runtime; the stylesheets are bundled at build time from the repository, and the deployed web image is the Next standalone bundle, which carries no postcss.",
       "decidedBy": "PermitZero engineering",
-      "decidedOn": "2026-10-28",
-      "reviewBy": "2027-01-28"
+      "decidedOn": "2026-10-29",
+      "reviewBy": "2027-01-29"
     },
     {
       "package": "next",
       "severity": "moderate",
       "advisory": "inherits the advisory of its postcss dependency",
+      "advisories": [],
+      "inheritsFrom": "postcss",
       "vulnerableRange": "9.3.4-canary.0 - 16.3.0-preview.10",
       "acceptedBecause": [
         "It has no independent fix: the advisory is the transitive postcss one above, and the version that resolves it is a Next major."
@@ -82,8 +124,228 @@
       "residualRisk": "Same as the postcss entry.",
       "compensatingControl": "Same as the postcss entry.",
       "decidedBy": "PermitZero engineering",
-      "decidedOn": "2026-10-28",
-      "reviewBy": "2027-01-28"
+      "decidedOn": "2026-10-29",
+      "reviewBy": "2027-01-29"
+    },
+    {
+      "package": "vitest",
+      "severity": "critical",
+      "advisory": "test runner: path traversal / arbitrary file read via a mock, and code injection via unauthenticated manual mock registration",
+      "advisories": [
+        {
+          "id": "GHSA-82fw-gwwq-j7x9",
+          "severity": "moderate",
+          "title": "Vitest: Path Traversal / Arbitrary File Read via @vitest/mocker Redirect Mock"
+        }
+      ],
+      "inheritsFrom": "tinypool",
+      "vulnerableRange": "0.0.95 - 4.1.10",
+      "acceptedBecause": [
+        "The critical severity comes from tinypool's advisories, which are named in the tinypool entry below; the advisory of vitest's own is the mock one named here.",
+        "Every one of these paths is reachable only by someone who can already change this repository's test files or its CI configuration. The mock registration advisory needs a malicious test file; the tinypool prototype-pollution gadget needs worker options that vitest takes from the repository's own configuration. An attacker at that level can already run arbitrary code in CI by editing a workflow file or an install script, so the advisory does not describe a new capability.",
+        "The fix is a Vitest 4 major (the range ends at 4.1.10), and this repository pins Vitest 3 across every workspace and 400 dev dependencies. That is a migration of the test toolchain, not a version bump, and it cannot be verified in isolation: the whole suite would have to move with it."
+      ],
+      "residualRisk": "A compromised upstream tarball of Vitest, or a malicious pull request that adds a test file, would have a code-execution path in CI that the advisory database describes precisely. CI runs pull requests with a read-only token and no deployment secrets, which is what limits this.",
+      "compensatingControl": "Vitest is a devDependency and is not installed in the api, worker or web runtime images (infra/docker/Dockerfile installs the runtimes with `npm ci --omit=dev`), so the vulnerable code is not present in anything deployed; CI runs untrusted pull requests with a read-only token and without deployment secrets.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-29",
+      "reviewBy": "2027-01-29"
+    },
+    {
+      "package": "@vitest/mocker",
+      "severity": "moderate",
+      "advisory": "test runner internals: path traversal / arbitrary file read via a redirect mock, and code injection via unauthenticated manual mock registration",
+      "advisories": [
+        {
+          "id": "GHSA-82fw-gwwq-j7x9",
+          "severity": "moderate",
+          "title": "Vitest: Path Traversal / Arbitrary File Read via @vitest/mocker Redirect Mock"
+        },
+        {
+          "id": "GHSA-qxg6-89mg-rqv8",
+          "severity": "moderate",
+          "title": "Vitest: Code injection via unauthenticated manual mock registration"
+        }
+      ],
+      "vulnerableRange": "<=4.1.11",
+      "acceptedBecause": [
+        "This is Vitest's mocking internals, reached only by a test file or a test configuration in this repository. The code-injection advisory is exactly that: `vi.mock` with a manual mock that the runner executes, which only a repository contributor can write.",
+        "It is fixed in the same Vitest 4 major as the vitest entry above, and it cannot be patched independently: the package is published in lockstep with the runner."
+      ],
+      "residualRisk": "Same as the vitest entry: a malicious test file or a compromised upstream tarball.",
+      "compensatingControl": "Dev-only dependency, absent from every runtime image; CI runs untrusted pull requests without deployment secrets.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-29",
+      "reviewBy": "2027-01-29"
+    },
+    {
+      "package": "@vitest/coverage-v8",
+      "severity": "moderate",
+      "advisory": "inherits the advisories of the vitest runner it wraps",
+      "advisories": [],
+      "inheritsFrom": "vitest",
+      "vulnerableRange": "2.1.0-beta.1 - 4.1.10",
+      "acceptedBecause": [
+        "It has no independent fix: the advisories are the vitest ones above, and the coverage provider is versioned with the runner."
+      ],
+      "residualRisk": "Same as the vitest entry.",
+      "compensatingControl": "Dev-only dependency, absent from every runtime image; CI runs untrusted pull requests without deployment secrets.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-29",
+      "reviewBy": "2027-01-29"
+    },
+    {
+      "package": "tinypool",
+      "severity": "critical",
+      "advisory": "worker pool: prototype pollution gadget in worker options leads to remote code execution",
+      "advisories": [
+        {
+          "id": "GHSA-5gmw-xhrv-c9v3",
+          "severity": "critical",
+          "title": "Tinypool: Prototype Pollution gadget in worker options leads to Remote Code Execution"
+        },
+        {
+          "id": "GHSA-85c8-ppgw-ccpr",
+          "severity": "critical",
+          "title": "Tinypool: Prototype Pollution Gadget to RCE in run() options"
+        }
+      ],
+      "vulnerableRange": "<=2.1.1",
+      "acceptedBecause": [
+        "The gadget is in the options an embedder passes to the pool. In this repository the embedder is Vitest, and the options come from the repository's own vitest configuration and test files — so the attacker precondition is the same as for the vitest entry: the ability to change this repository's tests.",
+        "The fix is a Vitest 4 major (this pool is released with the runner), not a patch to this package alone."
+      ],
+      "residualRisk": "Same as the vitest entry: a malicious test file or a compromised upstream tarball. The gadget is not reachable from anything that accepts network input.",
+      "compensatingControl": "Dev-only dependency, absent from every runtime image; CI runs untrusted pull requests with a read-only token and without deployment secrets.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-29",
+      "reviewBy": "2027-01-29"
+    },
+    {
+      "package": "esbuild",
+      "severity": "moderate",
+      "advisory": "the development server accepts requests from any website and returns the response",
+      "advisories": [
+        {
+          "id": "GHSA-67mh-4wv8-2f99",
+          "severity": "moderate",
+          "title": "esbuild enables any website to send any requests to the development server and read the response"
+        }
+      ],
+      "vulnerableRange": "<=0.24.2",
+      "acceptedBecause": [
+        "The advisory is about esbuild's SERVICE API — the local development server that serves modules to a browser. This copy is the one nested under `@esbuild-kit/core-utils`, which drizzle-kit's ESM loader pulls in for its own configuration loading; it is used to transpile files, and nothing in this repository starts esbuild's service and exposes its port.",
+        "It is reachable only by a developer running the migration tooling locally, on their own machine, while a malicious website is open in the same browser. The fix is a newer `@esbuild-kit/core-utils`, which is pulled by a newer drizzle-kit — see the drizzle-kit entry."
+      ],
+      "residualRisk": "A developer running the migration tooling with a hostile website open in the same browser could have the dev server answer a cross-origin request. Nothing in the deployed stack runs this code.",
+      "compensatingControl": "Dev-only dependency, absent from every runtime image; the esbuild service is never started by this repository's scripts.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-29",
+      "reviewBy": "2027-01-29"
+    },
+    {
+      "package": "@esbuild-kit/core-utils",
+      "severity": "moderate",
+      "advisory": "inherits the advisory of the esbuild version it pins",
+      "advisories": [],
+      "inheritsFrom": "esbuild",
+      "vulnerableRange": "*",
+      "acceptedBecause": [
+        "It has no independent fix: the advisory is the esbuild one above, and the version that resolves it comes with a newer drizzle-kit."
+      ],
+      "residualRisk": "Same as the esbuild entry.",
+      "compensatingControl": "Dev-only dependency, absent from every runtime image.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-29",
+      "reviewBy": "2027-01-29"
+    },
+    {
+      "package": "@esbuild-kit/esm-loader",
+      "severity": "moderate",
+      "advisory": "inherits the advisory of the esbuild toolchain it wraps",
+      "advisories": [],
+      "inheritsFrom": "@esbuild-kit/core-utils",
+      "vulnerableRange": "*",
+      "acceptedBecause": [
+        "It has no independent fix: the advisory is the transitive esbuild one above, and the version that resolves it comes with a newer drizzle-kit."
+      ],
+      "residualRisk": "Same as the esbuild entry.",
+      "compensatingControl": "Dev-only dependency, absent from every runtime image.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-29",
+      "reviewBy": "2027-01-29"
+    },
+    {
+      "package": "drizzle-kit",
+      "severity": "moderate",
+      "advisory": "inherits the advisory of the esbuild toolchain it loads configuration with",
+      "advisories": [],
+      "inheritsFrom": "@esbuild-kit/esm-loader",
+      "vulnerableRange": "0.19.0 - 1.0.0-beta.1-fd8bfcc",
+      "acceptedBecause": [
+        "It has no independent advisory: the finding is the transitive esbuild one above, reached through `@esbuild-kit/esm-loader`. drizzle-kit is the schema migration tool, and it is used by hand on a developer machine; it is not part of any runtime.",
+        "It was already bumped to 0.31.11 (the version this repository asks for) and the remaining advisory is the esbuild copy that `@esbuild-kit/core-utils` still pins."
+      ],
+      "residualRisk": "Same as the esbuild entry: a local developer running the migration tooling with a hostile website open in the same browser.",
+      "compensatingControl": "devDependency of @permitzero/db, absent from every runtime image; the migration container in the deployment runs the handwritten SQL migrations, not drizzle-kit.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-29",
+      "reviewBy": "2027-01-29"
+    },
+    {
+      "package": "autocannon",
+      "severity": "moderate",
+      "advisory": "inherits the advisory of the uuid version its request-id generator pins",
+      "advisories": [],
+      "inheritsFrom": "hyperid",
+      "vulnerableRange": ">=2.1.0",
+      "acceptedBecause": [
+        "It has no independent fix: the advisory is the transitive uuid one below, which comes through hyperid, which pins uuid 8.x — a line with no patched release.",
+        "autocannon is the load-test harness. It is a devDependency of the repository root, it is run by hand against a host the operator chooses, and it is not part of any deployed service."
+      ],
+      "residualRisk": "Same as the uuid entry, and confined to the load-test harness.",
+      "compensatingControl": "Dev-only dependency, absent from every runtime image; the load harness talks to the API as an ordinary client with an ordinary credential.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-29",
+      "reviewBy": "2027-01-29"
+    },
+    {
+      "package": "hyperid",
+      "severity": "moderate",
+      "advisory": "inherits the advisory of the uuid version it pins",
+      "advisories": [],
+      "inheritsFrom": "uuid",
+      "vulnerableRange": "<=1.2.0 || 1.3.1 - 3.3.0",
+      "acceptedBecause": [
+        "It has no independent fix: the advisory is the transitive uuid one below, and hyperid pins uuid 8.x, a line with no patched release. The only way to move it is an npm `overrides` entry forcing uuid ^11.1.1, which changes a CommonJS dependency to an ESM-first release — a change that has to be verified against the load harness rather than assumed."
+      ],
+      "residualRisk": "Same as the uuid entry, and confined to the load-test harness.",
+      "compensatingControl": "Dev-only dependency, absent from every runtime image.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-29",
+      "reviewBy": "2027-01-29"
+    },
+    {
+      "package": "uuid",
+      "severity": "moderate",
+      "advisory": "missing buffer bounds check in v3/v5/v6 when a buffer is supplied",
+      "advisories": [
+        {
+          "id": "GHSA-w5hq-g745-h8pq",
+          "severity": "moderate",
+          "title": "uuid: Missing buffer bounds check in v3/v5/v6 when buf is provided"
+        }
+      ],
+      "vulnerableRange": "<11.1.1",
+      "acceptedBecause": [
+        "The advisory needs a caller to pass an explicit output BUFFER to uuid's v3, v5 or v6. The only consumer in this tree is hyperid, which calls uuid.v4 with no buffer at all, so the vulnerable path is not reachable.",
+        "The pinned copy is uuid 8.3.2, which has no patched release in its line: the fix is 11.1.1. Moving hyperid onto uuid 11 is an npm `overrides` change that this repository has not verified."
+      ],
+      "residualRisk": "If hyperid ever passed a buffer to uuid, the advisory would become reachable — but the package is used only by the load-test harness, on a developer's machine, and never with untrusted input.",
+      "compensatingControl": "Dev-only dependency, absent from every runtime image; the only call site uses uuid.v4 without a buffer.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-10-29",
+      "reviewBy": "2027-01-29"
     }
   ]
 }
