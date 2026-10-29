@@ -139,6 +139,11 @@ CREATE TRIGGER trg_model_evaluations_output_envelope
   BEFORE INSERT ON model_evaluations
   FOR EACH ROW EXECUTE FUNCTION public.pz_assert_payload_envelope('output_json_validated');
 
+DROP TRIGGER IF EXISTS trg_connector_ledger_receipt_envelope ON connector_ledger;
+CREATE TRIGGER trg_connector_ledger_receipt_envelope
+  BEFORE INSERT ON connector_ledger
+  FOR EACH ROW EXECUTE FUNCTION public.pz_assert_payload_envelope('receipt_json');
+
 -- -----------------------------------------------------------------------------
 -- 3. The columns, documented where an operator will look for them
 -- -----------------------------------------------------------------------------
@@ -151,6 +156,8 @@ COMMENT ON COLUMN executions.receipt_json IS
   'SECURITY: the execution receipt, encrypted at the application layer as {"__pz_enc": "enc.v1.<iv>.<tag>.<ciphertext>"} (AES-256-GCM, key derived from AUDIT_HMAC_KEYS with the label `execution-payload`).';
 COMMENT ON COLUMN model_evaluations.output_json_validated IS
   'SECURITY: the validated model output, encrypted at the application layer as {"__pz_enc": "enc.v1.<iv>.<tag>.<ciphertext>"} (AES-256-GCM, key derived from AUDIT_HMAC_KEYS with the label `model-evaluation-payload`).';
+COMMENT ON COLUMN connector_ledger.receipt_json IS
+  'SECURITY: the ledger receipt, encrypted at the application layer as {"__pz_enc": "enc.v1.<iv>.<tag>.<ciphertext>"} (AES-256-GCM, key derived from AUDIT_HMAC_KEYS with the label `ledger-receipt`). The same keyring as the other payload columns; a row written before encryption was enabled holds plaintext.';
 
 -- -----------------------------------------------------------------------------
 -- 4. The coverage report

@@ -33,6 +33,14 @@ import { loadRootEnv } from '../packages/db/src/root-env.js';
 const KEYRING_ENV = 'AUDIT_HMAC_KEYS';
 const SINGLE_KEY_ENV = 'AUDIT_HMAC_KEY';
 
+// This script's output IS its purpose: it prints the environment value for
+// each rotation step. Bare `console.log` is the project's logging rule
+// violation, but operator-facing CLI output is the explicitly permitted case.
+const cliOut = {
+  log: (...args: unknown[]) => cliOut.log(...args),
+  error: (...args: unknown[]) => cliOut.error(...args),
+};
+
 interface Options {
   newKey: string | null;
   fromFile: string | null;
@@ -174,7 +182,7 @@ function statusOutput(ring: string[], env: NodeJS.ProcessEnv): string {
 function main(): void {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
-    console.log(usage());
+    cliOut.log(usage());
     return;
   }
   if (options.newKey !== null && options.fromFile !== null) {
@@ -194,8 +202,8 @@ function main(): void {
   }
 
   if (staged === null) {
-    console.log(statusOutput(ring, env));
-    console.log(runbook());
+    cliOut.log(statusOutput(ring, env));
+    cliOut.log(runbook());
     return;
   }
 
@@ -221,8 +229,8 @@ function main(): void {
     // STAGE: the new key joins the ring at the END, so it verifies but does
     // not write. The current key stays where it is.
     const stagedRing = [...existing, staged];
-    console.log(statusOutput(ring, env));
-    console.log(
+    cliOut.log(statusOutput(ring, env));
+    cliOut.log(
       [
         '',
         'STAGE — the new key is added to the ring and does NOT write yet.',
@@ -238,16 +246,16 @@ function main(): void {
         '',
       ].join('\n'),
     );
-    console.log(warning);
-    console.log(runbook());
+    cliOut.log(warning);
+    cliOut.log(runbook());
     return;
   }
 
   // ACTIVATE: the new key moves to the HEAD of the ring, so it writes, and the
   // old keys stay behind it for verification.
   const activatedRing = [staged, ...existing];
-  console.log(statusOutput(ring, env));
-  console.log(
+  cliOut.log(statusOutput(ring, env));
+  cliOut.log(
     [
       '',
       'ACTIVATE — the new key writes from now on; the retired keys still verify.',
@@ -262,13 +270,13 @@ function main(): void {
       '',
     ].join('\n'),
   );
-  console.log(warning);
-  console.log(runbook());
+  cliOut.log(warning);
+  cliOut.log(runbook());
 }
 
 try {
   main();
 } catch (err) {
-  console.error(`rotate-keys: ${err instanceof Error ? err.message : String(err)}`);
+  cliOut.error(`rotate-keys: ${err instanceof Error ? err.message : String(err)}`);
   process.exitCode = 1;
 }

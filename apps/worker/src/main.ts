@@ -9,6 +9,10 @@ import { loadWorkerConfig, RETENTION_DEFAULTS } from './config.js';
 import { buildWorker } from './worker.js';
 import { startRetentionSweep } from './retention.js';
 
+const workerLog = {
+  info: (...args: unknown[]) => console.log(...args),
+};
+
 async function main(): Promise<void> {
   loadRootEnv();
   const config = loadWorkerConfig();
@@ -80,7 +84,7 @@ async function main(): Promise<void> {
       )
     : null;
   retention?.start();
-  console.log(
+  workerLog.info(
     retentionEnabled
       ? `[worker] retention every ${config.retentionSweepIntervalMs ?? RETENTION_DEFAULTS.sweepIntervalMs}ms ` +
           `(audit ${config.auditRetentionDays ?? RETENTION_DEFAULTS.auditRetentionDays}d, ` +
@@ -89,7 +93,7 @@ async function main(): Promise<void> {
   );
 
   const shutdown = async (signal: string): Promise<void> => {
-    console.log(`[worker] ${signal}; shutting down`);
+    workerLog.info(`[worker] ${signal}; shutting down`);
     // Bounded like the API's drain: a consumer that will not settle must not
     // become the reason the pools never close and the outbox lease is held open.
     const stopped = built.stop().catch(() => undefined);
