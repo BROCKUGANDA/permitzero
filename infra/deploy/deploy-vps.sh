@@ -334,6 +334,14 @@ printf '%s' "${METRICS_TOKEN:-}" > run/pz_metrics_token
 # permissions into a container that runs as `nobody`.
 chmod 600 run/pz_metrics_token
 echo "== rendered run/pz_metrics_token ($(wc -c < run/pz_metrics_token) bytes)"
+# The alert path's token: prefer the dedicated ALERT_INGEST_TOKEN, falling
+# back to METRICS_TOKEN — matching the API's expectedAlertToken preference.
+# Without this, setting ALERT_INGEST_TOKEN makes the API expect a token the
+# Alertmanager never sends, and every alert 401s after it has been evaluated.
+ALERT_SOURCE="${ALERT_INGEST_TOKEN:-${METRICS_TOKEN:-}}"
+printf '%s' "$ALERT_SOURCE" > run/pz_alert_token
+chmod 600 run/pz_alert_token
+echo "== rendered run/pz_alert_token ($(wc -c < run/pz_alert_token) bytes)"
 
 if [ -n "${PZ_ALERT_WEBHOOK_URL:-}" ]; then
   # The URL is substituted into a sed REPLACEMENT, where `&` means "the text
