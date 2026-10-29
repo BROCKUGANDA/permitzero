@@ -151,10 +151,18 @@ log "   backup $STAMP"
 # The counts the restored copy is compared against. Taken now, so the
 # comparison is "the restored copy holds at least what the backup held, and
 # no more than the live database holds" — a range, not a single number.
+#
+# The drill's own scratch table is excluded from the table count on BOTH
+# sides. It is created after this count is taken, so the live database does
+# not have it and the restored copy does — and the drill failed on exactly
+# that: "the restored database has MORE tables than the live one (31 > 30)".
+# The extra table was the drill's own, and the restored copy was right.
+# Counting the application schema means counting the application schema.
 PROD_AUDIT_NOW=$($COMPOSE exec -T postgres psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -tAc \
   'SELECT count(*) FROM audit_events' | tr -d '[:space:]')
 PROD_TABLES_NOW=$($COMPOSE exec -T postgres psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -tAc \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" | tr -d '[:space:]')
+  "SELECT count(*) FROM information_schema.tables
+    WHERE table_schema='public' AND table_name <> 'pz_restore_drill_marker'" | tr -d '[:space:]')
 log "   live database: $PROD_AUDIT_NOW audit row(s), $PROD_TABLES_NOW table(s)"
 
 # --- 2. the marker ---------------------------------------------------------
@@ -327,7 +335,8 @@ MARKER_COUNT=$(q "SELECT count(*) FROM pz_restore_drill_marker WHERE marker = '$
 [ "$MARKER_COUNT" = "1" ] || fail "the restored database does not contain the marker (found $MARKER_COUNT). It restored to a point BEFORE the marker, so the WAL was not replayed."
 log "   the marker is present: the WAL really was replayed"
 
-RESTORED_TABLES=$(q "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")
+RESTORED_TABLES=$(q "SELECT count(*) FROM information_schema.tables
+    WHERE table_schema='public' AND table_name <> 'pz_restore_drill_marker'")
 [ "${RESTORED_TABLES:-0}" -ge 20 ] || fail "the restored database has only $RESTORED_TABLES table(s) — that is not the application schema."
 [ "$RESTORED_TABLES" -le "$PROD_TABLES_NOW" ] || fail "the restored database has MORE tables than the live one ($RESTORED_TABLES > $PROD_TABLES_NOW)."
 
