@@ -267,38 +267,7 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
   const authBudget = presets.auth;
   const sharedBudgets = await createSharedBudgets(deps.config, presets, metrics, app.log);
   let authLimiter: ReturnType<FastifyInstance['createRateLimit']> | null = null;
-  let failedIpLimiter: ReturnType<FastifyInstance['createRateLimit']> | null = null;
   app.addHook('onRequest', async (request, reply) => {
-    // The failed-auth IP budget: a token that does not exist must not get a
-    // fresh credential bucket per guess. Guessing 20 different random tokens
-    // at 20/min must trip the same budget. Keep the per-credential budgets
-    // for authenticated callers, but add a second, IP-keyed budget that is
-    // charged only for 401s (see onResponse below) and enforced here before
-    // the credential check. Without the pre-check, each guess would get a
-    // fresh bucket and only the global ceiling would remain.
-    const hadAuthHeader = Boolean(request.headers.authorization);
-    if (hadAuthHeader) {
-      void (failedIpLimiter ??= app.createRateLimit({
-        max: authBudget.max,
-        timeWindow: authBudget.timeWindow,
-        keyGenerator: (req) => `failed-auth:${req.ip}`,
-      }));
-      // This does charge the IP bucket even for a request that will turn out
-      // valid — which would penalise a NAT with many legitimate callers — so
-      // we only enforce the shared counter's decision here and let valid
-      // callers through on the local floor. The shared IP budget is charged
-      // only for 401s in onResponse, so a burst of guesses from one address
-      // still fills the shared bucket and the next onRequest sees it refused.
-      const sharedIp = await sharedBudgets.failedAuth?.charge(request.ip);
-      if (sharedIp && !sharedIp.allowed && !sharedIp.unavailable) {
-        metrics.sharedRateLimitCharges?.inc?.({ scope: 'auth-failed-ip', outcome: 'refused' } as never);
-        reply.header('retry-after', String(sharedIp.retryAfterSeconds));
-        throw new RateLimitedError(sharedIp.retryAfterSeconds);
-      }
-      // Local floor: only enforced after the shared budget says so, to avoid
-      // double-charging valid NAT traffic. The shared check above is the gate;
-      // the local limiter is charged only in onResponse alongside it.
-    }
     // The alert sink presents the alerting secret rather than a tenant
     // credential, so it is not a credential-bearing request and must not be
     // charged against the credential budget. It stays in the global limit.
@@ -371,42 +340,6 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
     }
     reply.header('retry-after', String(local.ttlInSeconds));
     throw new RateLimitedError(local.ttlInSeconds);
-  });
-
-  app.addHook('onResponse', async (request, reply) => {
-    if (reply.statusCode !== 401) return;
-    if (!request.headers.authorization) return;
-    // Charge the IP budget for this failed authentication — valid callers
-    // never reach 401, so this does not penalise a NAT with many legitimate
-    // users. The next onRequest from this IP will see the shared budget
-    // refused before the credential budget is even consulted.
-    const ip = request.ip;
-    // Local floor, charged alongside the shared counter.
-    const localIp = (failedIpLimiter ??= app.createRateLimit({
-      max: authBudget.max,
-      timeWindow: authBudget.timeWindow,
-      keyGenerator: (req) => `failed-auth:${req.ip}`,
-    }));
-    // Touch the local limiter so its in-memory count moves with the shared
-    // one — a replica that never saw the 401's onResponse (sticky sessions)
-    // still has a floor to enforce, and the shared counter is the cross-
-    // replica truth.
-    try {
-      await localIp(request as never);
-    } catch {
-      // Local limiter throws RateLimitedError when the IP is over the local
-      // floor; onResponse must not turn a 401 into a second error.
-    }
-    const shared = await sharedBudgets.failedAuth?.charge(ip);
-    if (shared) {
-      if (shared.unavailable) {
-        metrics.sharedRateLimitFailures.inc();
-      } else if (!shared.allowed) {
-        metrics.sharedRateLimitCharges.inc({ scope: 'auth-failed-ip', outcome: 'refused' } as never);
-      } else {
-        metrics.sharedRateLimitCharges.inc({ scope: 'auth-failed-ip', outcome: 'allowed' } as never);
-      }
-    }
   });
 
   // The limiter's own Redis connection, closed with the app. A process that
@@ -671,9 +604,6 @@ export interface SharedBudgets {
   auth: SharedRateLimiter | null;
   /** The mutation budget, shared across replicas. Null when there is no Redis. */
   mutation: SharedRateLimiter | null;
-  /** The IP-keyed budget for failed authentications — without it, each bad
-   * token gets a fresh credential bucket. Null when there is no Redis. */
-  failedAuth: SharedRateLimiter | null;
   close: () => Promise<void>;
 }
 
@@ -718,7 +648,7 @@ export async function createSharedBudgets(
   const redisUrl = config.redisUrl;
   if (!redisUrl) {
     metrics.sharedRateLimitEnabled.set(0);
-    return { auth: null, mutation: null, failedAuth: null, close: async () => undefined };
+    return { auth: null, mutation: null, close: async () => undefined };
   }
   const client = new IORedis(redisUrl, limiterRedisOptions());
   // ioredis emits 'error' on every failed reconnect, and an unhandled 'error'
@@ -755,13 +685,6 @@ export async function createSharedBudgets(
       scope: 'mutation',
       max: presets.mutation.max,
       timeWindowMs: presets.mutation.timeWindow,
-    }),
-    failedAuth: new SharedRateLimiter({
-      store,
-      prefix,
-      scope: 'auth-failed-ip',
-      max: presets.auth.max,
-      timeWindowMs: presets.auth.timeWindow,
     }),
     close: async () => {
       client.disconnect();
