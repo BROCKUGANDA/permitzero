@@ -198,7 +198,16 @@ done < <(docker ps -a --format '{{.Names}}|{{.CreatedAt}}')
 #
 # The age check is belt and braces: a volume created moments ago is left
 # alone in case its container is still starting.
-docker volume ls -q --filter dangling=true 2>/dev/null | while read -r VOL; do
+#
+# Every failure is reported. A janitor that cannot do its job and says
+# nothing is worse than one that says so: the operator sees a healthy log and
+# a full disk, and has no reason to look at the janitor at all.
+VOLUMES=$(docker volume ls -q --filter dangling=true 2>/dev/null)
+if [ $? -ne 0 ]; then
+  log "could not list the dangling volumes; none were removed"
+  VOLUMES=""
+fi
+printf '%s\n' "$VOLUMES" | while read -r VOL; do
   [ -n "$VOL" ] || continue
   # Only an anonymous volume. A named one belongs to a project, and this
   # script does not get to decide that its data is garbage.
@@ -211,17 +220,23 @@ docker volume ls -q --filter dangling=true 2>/dev/null | while read -r VOL; do
   fi
   CREATED=$(docker volume inspect -f '{{.CreatedAt}}' "$VOL" 2>/dev/null || echo "")
   if [ -z "$CREATED" ]; then
+    log "could not read the creation time of volume ${VOL:0:12}; leaving it alone"
     continue
   fi
   EPOCH=$(date -d "$CREATED" +%s 2>/dev/null || echo 0)
   NOW=$(date +%s)
   if [ "$EPOCH" -eq 0 ]; then
     # An unreadable creation time is not an authorisation to delete.
+    log "could not parse the creation time of volume ${VOL:0:12}; leaving it alone"
     continue
   fi
   AGE=$((NOW - EPOCH))
   if [ "$AGE" -gt "$STALE_VOLUME_AGE" ]; then
-    docker volume rm "$VOL" >/dev/null 2>&1 && log "removed orphaned volume ${VOL:0:12} (${AGE}s old)"
+    if docker volume rm "$VOL" >/dev/null 2>&1; then
+      log "removed orphaned volume ${VOL:0:12} (${AGE}s old)"
+    else
+      log "could not remove orphaned volume ${VOL:0:12}; it is still there"
+    fi
   fi
 done
 
