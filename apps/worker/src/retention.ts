@@ -583,7 +583,6 @@ async function sweepTenant(deps: RetentionDeps, tenantId: string, now: Date): Pr
     });
 
     if ((outcome as { held: boolean }).held) {
-      const h = outcome as { held: true; heldJson: string };
       return {
         tenantId,
         outcome: 'held',

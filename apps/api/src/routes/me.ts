@@ -45,8 +45,6 @@ import {
   deleteMfaSecret,
   getMfaSecretByUserId,
   getUserMfaEnrolledAt,
-  recordConsumedMfaCode,
-  recordMfaVerification,
   reencryptMfaSecret,
   setUserMfaEnrolledAt,
   tenantScope,
@@ -68,7 +66,6 @@ import {
   hashConsumedCode,
   issueMfaAssertion,
   totpUri,
-  verifyTotpCode,
   verifyTotpCodeStep,
 } from '@permitzero/policy';
 import type { AppContext, ZodFastifyInstance } from '../app.js';
@@ -125,7 +122,6 @@ function masterKey(deps: MfaDeps): Buffer {
  * be read after a rotation; a new secret is always encrypted under the
  * current one. */
 function mfaKeyRing(deps: MfaDeps): Buffer[] {
-  const current = masterKey(deps);
   const rawRing: string[] = verificationKeys();
   const ring = [deps.auditHmacKey as string, ...rawRing]
     .filter((k): k is string => typeof k === 'string' && k.length > 0)
@@ -146,15 +142,6 @@ function decryptSecretAny(payload: string, keys: Buffer[]): { secret: string; ke
     if (s !== null) return { secret: s, keyIndex: i };
   }
   return null;
-}
-
-/** Hash a code under each key in the ring — a spent-code fingerprint must
- * be checked against all of them, because the hash is keyed and the stored
- * fingerprint was made under whichever key was current when the code was
- * spent. */
-function hashedCodesForRing(keys: Buffer[], code: string): string[] {
-  const t = code.trim();
-  return keys.map((k) => hashConsumedCode(k, t));
 }
 
 /** The name an authenticator app shows for this account. */
@@ -193,11 +180,7 @@ export interface StepUpResponse {
  * encrypted form, so a lost phone means enrolling again — there is no
  * recovery path, and there is deliberately no support path either.
  */
-export async function enrolMfa(
-  deps: MfaDeps,
-  principal: Principal,
-  code?: string,
-): Promise<EnrolResponse> {
+export async function enrolMfa(deps: MfaDeps, principal: Principal, code?: string): Promise<EnrolResponse> {
   requireHumanUser(principal);
   if (!deps.enabled) throw new ConflictError('MFA is disabled on this deployment.');
   const key = masterKey(deps);
@@ -279,7 +262,9 @@ export async function enrolMfa(
         const hashInner = hashConsumedCode(key, rawInner);
         const ok = await consumeMfaCodeStep(ex, tenantId, principal.actorId, stepInner, hashInner);
         if (!ok) {
-          throw new ValidationError('That code has already been used. Enter the code your authenticator is showing now.');
+          throw new ValidationError(
+            'That code has already been used. Enter the code your authenticator is showing now.',
+          );
         }
         if (openedInner.keyIndex !== 0) {
           await reencryptMfaSecret(ex, tenantId, principal.actorId, encryptSecret(openedInner.secret, key));
@@ -421,22 +406,8 @@ export async function verifyMfa(deps: MfaDeps, principal: Principal, code: strin
  * for a typo in their authenticator when the real answer is that the code
  * they are looking at has been used.
  */
-function spendCode(lastCodeHash: string | null, key: Buffer, secret: string, code: string, now: Date): void {
-  const candidate = code.trim();
-  if (lastCodeHash && lastCodeHash === hashConsumedCode(key, candidate)) {
-    throw new ValidationError('That code has already been used. Enter the code your authenticator is showing now.');
-  }
-  if (!verifyTotpCode(secret, candidate, now.getTime())) {
-    throw new ValidationError('That code is not valid.');
-  }
-}
-
 /** Remove the enrolment: the secret goes, and the account is not enrolled. */
-export async function removeMfa(
-  deps: MfaDeps,
-  principal: Principal,
-  code?: string,
-): Promise<{ deleted: true }> {
+export async function removeMfa(deps: MfaDeps, principal: Principal, code?: string): Promise<{ deleted: true }> {
   requireHumanUser(principal);
   const tenantId = principal.tenantId;
   return tenantScope(
