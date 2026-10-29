@@ -86,8 +86,13 @@ cleanup() {
     # The removal is therefore done from inside a container, for the same
     # reason the restore was. `--entrypoint sh` bypasses the image's
     # entrypoint so nothing chowns or initialises anything on the way past.
+    #
+    # The directory is handed back to the deploying user afterwards, because
+    # the entrypoint of the restore container chowned it to postgres — and
+    # /tmp is sticky, so a directory the deploying user no longer owns
+    # cannot be removed from it even by them.
     docker run --rm --entrypoint sh -v "$DRILL_DATA:/d" postgres:16-alpine \
-      -c 'rm -rf /d/* /d/.[!.]*' >/dev/null 2>&1 || true
+      -c "rm -rf /d/* /d/.[!.]*; chown $(id -u):$(id -g) /d" >/dev/null 2>&1 || true
     rmdir "$DRILL_DATA" >/dev/null 2>&1 || rm -rf "$DRILL_DATA" >/dev/null 2>&1 || true
   fi
   # The scratch table. The marker is evidence DURING the drill; afterwards it
@@ -286,15 +291,22 @@ docker run -d --name "$DRILL_NAME" \
   -v "$DRILL_DATA:/var/lib/postgresql/data" \
   -v "$BACKUP_ROOT/wal:/wal-archive:ro" \
   -e POSTGRES_HOST_AUTH_METHOD=trust \
-  -e POSTGRES_USER=postgres \
+  -e POSTGRES_USER="$PZ_PG_USER" \
   -e POSTGRES_PASSWORD=drill \
   postgres:16-alpine >/dev/null || fail "the temporary container would not start."
 
 # Wait for the recovery to finish. `pg_is_in_recovery()` is the honest
 # question: it is false only once the server has left recovery and promoted.
+#
+# The restored cluster is connected to as the OWNER role, not as `postgres`.
+# The backup carries the production cluster's roles, and the production
+# cluster's superuser is $PZ_PG_USER — there is no `postgres` role in it
+# at all. The drill connected as `postgres` and every query failed with
+# "role postgres does not exist", which the loop read as "still
+# recovering" and kept waiting for a server that was already up.
 recovered=0
 for _ in $(seq 1 180); do
-  state=$(docker exec "$DRILL_NAME" psql -U postgres -d "$PZ_PG_DB" -tAc \
+  state=$(docker exec "$DRILL_NAME" psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -tAc \
     'SELECT pg_is_in_recovery()' 2>/dev/null | tr -d '[:space:]' || true)
   if [ "$state" = "f" ]; then
     recovered=1
@@ -309,7 +321,7 @@ fi
 log "   recovery finished"
 
 # --- 5. the assertions -----------------------------------------------------
-q() { docker exec "$DRILL_NAME" psql -U postgres -d "$PZ_PG_DB" -tAc "$1" | tr -d '[:space:]'; }
+q() { docker exec "$DRILL_NAME" psql -U "$PZ_PG_USER" -d "$PZ_PG_DB" -tAc "$1" | tr -d '[:space:]'; }
 
 MARKER_COUNT=$(q "SELECT count(*) FROM pz_restore_drill_marker WHERE marker = '$MARKER'")
 [ "$MARKER_COUNT" = "1" ] || fail "the restored database does not contain the marker (found $MARKER_COUNT). It restored to a point BEFORE the marker, so the WAL was not replayed."
