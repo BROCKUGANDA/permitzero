@@ -108,6 +108,14 @@ function payloadKeys(masters: readonly string[]): Buffer[] {
  * turn a migration into an outage, and silently rewriting it would rewrite
  * evidence.
  */
+export function auditVerificationKeys(explicit?: string | null): string[] {
+  return candidateMasters(explicit);
+}
+
+export function decryptAuditPayload(stored: unknown, master: string): Record<string, unknown> {
+  return readAuditPayload(stored, [deriveKey(master, AUDIT_PAYLOAD_PURPOSE)]);
+}
+
 function readAuditPayload(stored: unknown, keys: readonly Buffer[]): Record<string, unknown> {
   const value = readColumn<Record<string, unknown>>(stored, keys);
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {};

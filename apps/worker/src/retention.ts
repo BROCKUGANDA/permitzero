@@ -66,7 +66,9 @@ import { sql } from 'drizzle-orm';
 import { newId } from '@permitzero/domain';
 import {
   AUDIT_HASH_VERSION_HMAC,
+  auditVerificationKeys,
   computeAuditHash,
+  decryptAuditPayload,
   listActiveTenantIds,
   verifyAuditChain,
   withTenantBlindTransaction,
@@ -281,7 +283,43 @@ async function purgeAuditChain(
     // mixes versions is not something this sweep may "fix": it re-hashes each
     // row the way that row was hashed.
     const keyed = row.hash_version === AUDIT_HASH_VERSION_HMAC;
-    const { hash } = computeAuditHash(
+    const hashKeys = keyed ? auditVerificationKeys(hmacKey) : [null];
+    let payload: Record<string, unknown> = {};
+    let rowKey: string | null = null;
+    let hash = '';
+    for (const candidate of hashKeys) {
+      try {
+        payload = keyed
+          ? decryptAuditPayload(row.payload_redacted_json, candidate as string)
+          : asRecord(row.payload_redacted_json);
+        const result = computeAuditHash(
+          {
+            tenantId,
+            eventId: row.event_id,
+            actionId: row.action_id,
+            runId: row.run_id,
+            actorType: row.actor_type,
+            actorId: row.actor_id,
+            eventType: row.event_type,
+            eventTime: new Date(Number(row.event_time_ms)),
+            traceId: row.trace_id,
+            policyRevisionId: row.policy_revision_id,
+            payload,
+            previousHash: row.previous_hash,
+          },
+          candidate,
+        );
+        if (!keyed || result.hash === row.event_hash) {
+          rowKey = candidate;
+          hash = result.hash;
+          break;
+        }
+      } catch {
+        // Try the next key in the rotation ring.
+      }
+    }
+    if (!rowKey && keyed) throw new Error(`could not identify audit key for ${row.event_id}`);
+    const { hash: relinkedHash } = computeAuditHash(
       {
         tenantId,
         eventId: row.event_id,
@@ -293,11 +331,12 @@ async function purgeAuditChain(
         eventTime: new Date(Number(row.event_time_ms)),
         traceId: row.trace_id,
         policyRevisionId: row.policy_revision_id,
-        payload: asRecord(row.payload_redacted_json),
+        payload: payload!,
         previousHash,
       },
-      keyed ? hmacKey : null,
+      rowKey,
     );
+    hash = relinkedHash;
     if (Number(row.sequence) !== sequence || row.previous_hash !== previousHash || row.event_hash !== hash) {
       relink.push({ eventId: row.event_id, sequence, previousHash, eventHash: hash });
     }
