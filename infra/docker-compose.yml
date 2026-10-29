@@ -291,10 +291,26 @@ services:
     profiles: ['tunnel']
 
 volumes:
+  # Explicit provenance keeps the janitor from confusing retained production
+  # data with anonymous CI service-container volumes.
   pgdata:
+    labels:
+      com.permitzero.owner: production
   redisdata:
+    labels:
+      com.permitzero.owner: production
   caddy_data:
+    labels:
+      com.permitzero.owner: production
   caddy_config:
+    labels:
+      com.permitzero.owner: production
   prometheus_data:
+    labels:
+      com.permitzero.owner: production
   alertmanager_data:
+    labels:
+      com.permitzero.owner: production
   observability_secrets:
+    labels:
+      com.permitzero.owner: production

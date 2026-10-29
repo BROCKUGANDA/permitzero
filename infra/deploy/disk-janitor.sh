@@ -144,11 +144,29 @@ STALE_CONTAINER_AGE="${PZ_STALE_CONTAINER_AGE:-3600}"
 # outlives its container by an hour is not going to be used again, and it
 # is holding tens of megabytes of somebody's database.
 STALE_VOLUME_AGE="${PZ_STALE_VOLUME_AGE:-3600}"
+
+# Keep provenance for volumes mounted by the runner's service containers. Docker
+# does not retain the container relationship after the container is removed,
+# so dangling status alone cannot distinguish a CI volume from a production
+# volume retained for a redeploy. If the record cannot be written, volume
+# cleanup is disabled: an unrecorded volume is not disposable.
+CI_VOLUME_RECORD="${PZ_CI_VOLUME_RECORD:-${RUNNER_DIR}/.ci-service-volumes}"
+ci_volume_recordable=0
+if touch "$CI_VOLUME_RECORD" 2>/dev/null; then
+  ci_volume_recordable=1
+fi
+
 now=$(date +%s)
 while IFS='|' read -r name created; do
   [ -n "$name" ] || continue
   # The runner's service containers carry a 32 character hash prefix.
   [[ "$name" =~ ^[0-9a-f]{32}_ ]] || continue
+  if [ "$ci_volume_recordable" -eq 1 ]; then
+    docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}' "$name" 2>/dev/null \
+      | while IFS= read -r volume; do
+          [ -n "$volume" ] && printf '%s\n' "$volume" >> "$CI_VOLUME_RECORD"
+        done
+  fi
   # A creation time that cannot be read does NOT authorise a removal. The
   # age check exists precisely to be the reason a live job's container is
   # spared, so a check that cannot read the age has no opinion -- and the
@@ -186,13 +204,18 @@ done < <(docker ps -a --format '{{.Names}}|{{.CreatedAt}}')
 # volumes holding about twenty gigabytes, and a CI job's `npm ci` failed
 # because of it.
 #
-# `docker volume ls --filter dangling=true` lists exactly the volumes that
-# no container references, so this cannot touch a running service's data.
-# The age check is belt and braces: a volume created moments ago is left
-# alone in case its container is still starting.
-docker volume ls -q --filter dangling=true 2>/dev/null | while read -r VOL; do
-  [ -n "$VOL" ] || continue
-  CREATED=$(docker volume inspect -f '{{.CreatedAt}}' "$VOL" 2>/dev/null || echo "")
+# Dangling status only says that no container references a volume now; it does
+# not say who owned it. Only volumes recorded while mounted by one of the
+# runner's service containers are eligible. The age check is belt and braces:
+# a volume created moments ago is left alone in case its container is still
+# starting. Volumes without recorded provenance are left untouched.
+if [ "$ci_volume_recordable" -eq 1 ]; then
+  docker volume ls -q --filter dangling=true 2>/dev/null | while read -r VOL; do
+    [ -n "$VOL" ] || continue
+    grep -Fxq "$VOL" "$CI_VOLUME_RECORD" || continue
+    OWNER=$(docker volume inspect -f '{{index .Labels "com.permitzero.owner"}}' "$VOL" 2>/dev/null || echo "")
+    [ "$OWNER" = "production" ] && continue
+    CREATED=$(docker volume inspect -f '{{.CreatedAt}}' "$VOL" 2>/dev/null || echo "")
   if [ -z "$CREATED" ]; then
     continue
   fi
@@ -206,7 +229,8 @@ docker volume ls -q --filter dangling=true 2>/dev/null | while read -r VOL; do
   if [ "$AGE" -gt "$STALE_VOLUME_AGE" ]; then
     docker volume rm "$VOL" >/dev/null 2>&1 && log "removed orphaned volume ${VOL:0:12} (${AGE}s old)"
   fi
-done
+  done
+fi
 
 # The build cache and the images.
 #
