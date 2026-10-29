@@ -7,5 +7,6 @@
  */
 export * from './exposition.js';
 export * from './metrics.js';
+export * from './shared-rate-limit.js';
 export * from './slos.js';
 export * from './tracing.js';

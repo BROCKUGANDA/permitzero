@@ -7,13 +7,35 @@
  * publish the same row twice; a crashed publisher's lease expires and the row
  * becomes claimable again. Structurally satisfies the queue `OutboxStore`
  * port (assigned, never imported, to avoid a package cycle).
+ *
+ * The payload is stored ENCRYPTED and read back in the clear. The outbox
+ * carries the decision an action produced — the action id, the amounts, the
+ * reason codes — so it is exactly the kind of content that should not sit in a
+ * backup in the clear. The reader decrypts; every consumer inside and outside
+ * this package therefore sees the same payload it always did.
  */
 import { and, eq, sql } from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm';
 import { newId } from '@permitzero/domain';
 import type { DbExecutor } from '../client.js';
+import { currentKey, deriveKey, encryptColumn, readColumn, verificationKeys } from '../crypto.js';
 import { outboxEvents } from '../schema.js';
 import type { OutboxEventRow } from '../schema.js';
+
+/** The domain-separation label for the outbox payload's encryption key. */
+const OUTBOX_PAYLOAD_PURPOSE = 'outbox-payload';
+
+/**
+ * The keys that may decrypt an outbox payload: the one the caller supplied,
+ * then the environment keyring in order.
+ */
+function payloadKeys(explicit?: string | null): Buffer[] {
+  const masters: string[] = [];
+  for (const master of [explicit, ...verificationKeys()]) {
+    if (typeof master === 'string' && master.length > 0 && !masters.includes(master)) masters.push(master);
+  }
+  return masters.map((master) => deriveKey(master, OUTBOX_PAYLOAD_PURPOSE));
+}
 
 /** Mirrors the queue `OutboxRow`/`OutboxStatus`/`QueueName` shapes (see stores.ts). */
 export type OutboxStatusName = 'PENDING' | 'PUBLISHED' | 'FAILED' | 'DEAD';
@@ -54,8 +76,14 @@ export interface InsertOutboxInput {
   traceId?: string | null;
 }
 
-export async function insertOutboxEvent(ex: DbExecutor, input: InsertOutboxInput): Promise<OutboxEventRow> {
+export async function insertOutboxEvent(
+  ex: DbExecutor,
+  input: InsertOutboxInput,
+  opts?: { hmacKey?: string | null },
+): Promise<OutboxEventRow> {
   const traceId = input.traceId ?? newId('trace');
+  const master = opts?.hmacKey ?? currentKey();
+  const payload = { ...input.payload, trace_id: traceId } as Record<string, unknown>;
   const [row] = await ex
     .insert(outboxEvents)
     .values({
@@ -65,13 +93,24 @@ export async function insertOutboxEvent(ex: DbExecutor, input: InsertOutboxInput
       aggregateId: input.aggregateId,
       eventType: input.eventType,
       queueName: input.queueName,
-      payloadJson: { ...input.payload, trace_id: traceId } as Record<string, unknown>,
+      payloadJson: master ? encryptColumn(payload, deriveKey(master, OUTBOX_PAYLOAD_PURPOSE)) : payload,
       maxAttempts: input.maxAttempts ?? 10,
       nextAttemptAt: input.nextAttemptAt ?? null,
     })
     .returning();
   if (!row) throw new Error('outbox insert returned no row');
-  return row;
+  return withDecryptedPayload(row, payloadKeys(master));
+}
+
+/**
+ * The row as the application sees it: the payload in the clear.
+ *
+ * A payload written before encryption was enabled holds plaintext and is read
+ * as it is, so a deployment can turn encryption on without a migration that
+ * rewrites the delivery backlog.
+ */
+function withDecryptedPayload(row: OutboxEventRow, keys: readonly Buffer[]): OutboxEventRow {
+  return { ...row, payloadJson: readColumn<Record<string, unknown>>(row.payloadJson, keys) };
 }
 
 function toClaimed(row: Record<string, unknown>): ClaimedOutboxRow {
@@ -126,7 +165,12 @@ export async function claimOutboxEvents(ex: DbExecutor, limit: number, now: Date
     FROM c
     WHERE o.outbox_event_id = c.outbox_event_id AND o.tenant_id = c.tenant_id
     RETURNING o.*`)) as unknown as Array<Record<string, unknown>>;
-  return rows.map(toClaimed);
+  // The lease statement returns the raw row, so the payload is still the
+  // ciphertext; it is opened here, once, for every consumer of the claim.
+  const keys = payloadKeys();
+  return rows.map((row) =>
+    toClaimed({ ...row, payload_json: readColumn<Record<string, unknown>>(row['payload_json'], keys) }),
+  );
 }
 
 export async function markOutboxPublished(
@@ -206,7 +250,7 @@ export async function getOutboxEvent(
     .from(outboxEvents)
     .where(and(eq(outboxEvents.outboxEventId, id), tenantScope(tenantId)))
     .limit(1);
-  return row ?? null;
+  return row ? withDecryptedPayload(row, payloadKeys()) : null;
 }
 
 export async function redriveOutboxEvent(
@@ -219,5 +263,5 @@ export async function redriveOutboxEvent(
     .set({ status: 'PENDING', attemptCount: 0, nextAttemptAt: null, lastErrorClass: null, updatedAt: new Date() })
     .where(and(eq(outboxEvents.outboxEventId, id), eq(outboxEvents.status, 'DEAD'), tenantScope(tenantId)))
     .returning();
-  return updated[0] ?? null;
+  return updated[0] ? withDecryptedPayload(updated[0], payloadKeys()) : null;
 }

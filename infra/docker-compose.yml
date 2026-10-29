@@ -29,6 +29,22 @@ x-app-env: &app-env
   env_file:
     - ${PZ_APP_ENV_FILE:-deploy/permitzero.env}
 
+# Where the backups live.
+#
+# It is a bind mount and not a named volume, and that distinction is the
+# whole point: `docker compose down -v` removes the named volumes, so a backup
+# kept in one is a backup that a routine teardown destroys — and the teardown
+# that destroys it is the same command an operator runs when something has
+# gone wrong. A path on the host survives it.
+#
+# The default sits beside the compose file rather than inside it, so a
+# checkout that replaces the tree does not take the archive with it. The
+# deployment script overrides it with a durable location (PZ_STATE_DIR) when
+# the tree is not durable.
+#
+# The two directories are named in `volumes` below rather than merged in from
+# a YAML anchor: an anchor merges MAPPINGS, and `volumes` is a sequence.
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -41,6 +57,28 @@ services:
       POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # The WAL archive and the base backups, on the host, outside the project.
+      - ${PZ_BACKUP_ROOT:-../backups}/wal:/var/lib/postgresql/wal-archive
+      - ${PZ_BACKUP_ROOT:-../backups}/base:/var/lib/postgresql/base-backups
+    # The archive and the base backups are bind mounts from the host, where
+    # the deployment script created them as an UNPRIVILEGED user who cannot
+    # chown them to the container's postgres user. The image's entrypoint runs
+    # as root and drops to postgres afterwards, so this is the one moment the
+    # ownership can be fixed — and it has to be fixed here rather than in the
+    # deployment script, because an unprivileged script cannot give a
+    # directory away.
+    #
+    # `$$@` is compose's escape for a literal `$@`: the script receives the
+    # postgres arguments as its own and hands them to the image's entrypoint
+    # unchanged.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        chown postgres:postgres /var/lib/postgresql/wal-archive /var/lib/postgresql/base-backups
+        exec docker-entrypoint.sh "$$@"
+      - --
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U ${PZ_PG_USER} -d ${PZ_PG_DB}']
       interval: 5s
@@ -54,6 +92,30 @@ services:
       - max_connections=80
       - -c
       - log_min_duration_statement=250
+      # ---- point-in-time recovery ------------------------------------------
+      #
+      # Without these four settings there is no recovery path: `db:reset`
+      # truncates, and a truncation is not a restore. With them, the write
+      # ahead log is archived as it is written, and a base backup plus the
+      # archived segments can be replayed to any moment in between.
+      #
+      # `wal_level=replica` is what makes the WAL contain everything a
+      # standby (and therefore `pg_basebackup -X stream`) needs.
+      #
+      # `archive_timeout` is the setting that makes an IDLE database
+      # recoverable: without it a segment is only archived when it fills up,
+      # so a quiet database accumulates WAL that is never written anywhere and
+      # a restore can only reach the last full segment. With it, a segment is
+      # forced at most every five minutes, so the archive is never more than
+      # five minutes behind the database.
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=cp %p /var/lib/postgresql/wal-archive/%f.tmp && mv -f /var/lib/postgresql/wal-archive/%f.tmp /var/lib/postgresql/wal-archive/%f
+      - -c
+      - archive_timeout=300
 
   redis:
     image: redis:7-alpine

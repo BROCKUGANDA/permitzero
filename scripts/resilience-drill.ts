@@ -23,22 +23,30 @@
  * scenario that could not be set up is recorded as a failure, never a pass.
  */
 import { mkdir, writeFile } from 'node:fs/promises';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   claimOutboxEvents,
   closeDb,
   createDb,
+  createRevision,
   ensureDatabaseExists,
   loadRootEnv,
   migrate,
+  publishRevision,
   resetDb,
   rlsEnforcementState,
   seed,
   type Db,
 } from '@permitzero/db';
+import { canonicalHash, newId } from '@permitzero/domain';
+import { ruleReferencesModel } from '@permitzero/policy';
+import { MetaProviderClient } from '@permitzero/provider-meta';
+import type { MetaProviderConfig } from '@permitzero/provider-meta';
+import type { PolicyDocument } from '@permitzero/schemas';
 import { buildApp } from '../apps/api/src/app.js';
-import { createModelAdapter } from '../apps/api/src/model.js';
+import { breakerStateValue, createModelAdapter } from '../apps/api/src/model.js';
 import { loadConfig } from '../apps/api/src/config.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -265,6 +273,233 @@ async function main(): Promise<void> {
   });
 
   await healthy.app.close();
+
+  // ---------------------------------------------------------------------
+  // 6. The model provider is down.
+  //
+  //    The database outage above is a dependency the decision path CANNOT
+  //    work without: losing it has to stop the decision. The provider is the
+  //    other kind — one the policy MAY read, and which must never be able to
+  //    turn a missing signal into an allow.
+  //
+  //    Two provider outages are exercised, because they fail differently:
+  //
+  //    · a port where nothing listens — the call fails immediately with a
+  //      transport error;
+  //    · a socket that ACCEPTS the connection and then never answers — the
+  //      call has to be cut off by the timeout, and the point of the
+  //      assertion is that the request comes back anyway. A provider that
+  //      hangs is worse than a provider that is down: the first breaks the
+  //      decision, the second holds a request open until something else
+  //      gives.
+  //
+  //    Nothing here touches a shared service. The dead port is a port
+  //    nothing listens on, and the hanging socket is one this script opens
+  //    and closes itself.
+  // ---------------------------------------------------------------------
+
+  // A provider pointed at a port where nothing listens.
+  const DEAD_PORT = 5498;
+  const deadProviderConfig: MetaProviderConfig = {
+    apiKey: 'drill-not-a-real-key',
+    baseUrl: `http://127.0.0.1:${DEAD_PORT}/v1`,
+    modelId: 'drill-model',
+    timeoutMs: 2_000,
+    // One attempt: the retry budget is the provider's business, and a drill
+    // that waits out five backoffs is a drill nobody runs.
+    maxAttempts: 1,
+    maxConcurrency: 1,
+    retryBaseMs: 50,
+    retryCapMs: 100,
+    promptVersion: 'risk-hints-prompt-v1',
+    // Open the breaker on the first failure, so "the breaker opened" is
+    // observable in one request rather than after a threshold nobody can
+    // wait for.
+    breakerThreshold: 1,
+    breakerCooldownMs: 60_000,
+  };
+  const deadProvider = new MetaProviderClient(deadProviderConfig);
+  const deadModel = createModelAdapter('meta', { meta: deadProvider });
+
+  const providerDown = await buildApp({
+    db: admin,
+    dbRuntime: runtime,
+    config: envConfig,
+    model: deadModel,
+  });
+  const providerDownUrl = await providerDown.app.listen({ port: 0, host: '127.0.0.1' });
+
+  // The seeded policy READS the model (an advisory escalation rule), so this
+  // decision needs a signal it cannot get.
+  const downStarted = Date.now();
+  const degraded = await submit(providerDownUrl, agentToken, agentId, 'drill-provider-down');
+  const downElapsed = Date.now() - downStarted;
+  const degradedDecision = (degraded.body as { decision?: string } | null)?.decision ?? null;
+
+  record(
+    'provider unreachable',
+    'a decision whose policy reads the model does not ALLOW without the signal',
+    degraded.status === 201 && degradedDecision !== 'ALLOW',
+    { status: degraded.status, decision: degradedDecision },
+  );
+  record(
+    'provider unreachable',
+    'it escalates to a human instead',
+    degraded.status === 201 && degradedDecision === 'REQUIRE_APPROVAL',
+    { status: degraded.status, decision: degradedDecision },
+  );
+  record(
+    'provider unreachable',
+    'the request does not hang past the provider timeout',
+    downElapsed < deadProviderConfig.timeoutMs + 2_000,
+    { elapsed_ms: downElapsed, timeout_ms: deadProviderConfig.timeoutMs },
+  );
+
+  const breaker = deadModel.status();
+  record('provider unreachable', 'the provider circuit breaker opens', breaker.breaker === 'OPEN', {
+    breaker: breaker.breaker,
+    provider_status: breaker.status,
+  });
+  record(
+    'provider unreachable',
+    'the breaker is observable as the gauge the alert rule reads',
+    breakerStateValue(breaker.breaker) === 2,
+    { gauge: breakerStateValue(breaker.breaker) },
+  );
+
+  // A policy that does not consult the model at all. The deterministic path
+  // must not depend on a provider that is down: a decision that never
+  // needed the signal must still be reached.
+  const tenantId = seeded.tenantIds[0] ?? '';
+  const published = await admin.sql<{ revision_id: string; policy_id: string; policy_json: unknown }[]>`
+    SELECT revision_id, policy_id, policy_json
+      FROM policy_revisions
+     WHERE tenant_id = ${tenantId}
+       AND status = 'PUBLISHED'
+     ORDER BY revision_number DESC
+     LIMIT 1
+  `;
+  const currentHead = published[0];
+  let modelFreeRevisionId: string | null = null;
+  if (currentHead) {
+    const document = currentHead.policy_json as PolicyDocument;
+    const modelFree: PolicyDocument = {
+      ...document,
+      rules: document.rules.filter((rule) => !ruleReferencesModel(rule.when)),
+    };
+    modelFreeRevisionId = await admin.db.transaction(async (tx) => {
+      const revision = await createRevision(tx, {
+        id: newId('policyRevision'),
+        tenantId,
+        policyId: currentHead.policy_id,
+        document: modelFree,
+        policyHash: canonicalHash(modelFree),
+        changeReason: 'drill: a revision whose rules do not consult the model',
+      });
+      await publishRevision(tx, {
+        tenantId,
+        policyId: currentHead.policy_id,
+        revisionId: revision.revisionId,
+        expectedCurrentRevisionId: currentHead.revision_id,
+      });
+      return revision.revisionId;
+    });
+
+    const deterministic = await submit(providerDownUrl, agentToken, agentId, 'drill-provider-deterministic');
+    const deterministicDecision = (deterministic.body as { decision?: string } | null)?.decision ?? null;
+    record(
+      'provider unreachable',
+      'a policy that never reads the model still decides on the deterministic path',
+      deterministic.status === 201 && deterministicDecision === 'ALLOW',
+      { status: deterministic.status, decision: deterministicDecision, revision: modelFreeRevisionId },
+    );
+    record(
+      'provider unreachable',
+      'the breaker is still open — the decision did not need the provider',
+      deadModel.status().breaker === 'OPEN',
+      { breaker: deadModel.status().breaker },
+    );
+  }
+
+  await providerDown.app.close();
+
+  // A provider that ACCEPTS the connection and never answers.
+  //
+  // The sockets are tracked and destroyed explicitly: a server with an open
+  // connection keeps the drill's process alive after the assertions are done,
+  // and a drill that hangs at the end is a drill that gets killed and
+  // reported as a failure.
+  const openSockets = new Set<net.Socket>();
+  const blackhole = net.createServer((socket) => {
+    openSockets.add(socket);
+    socket.on('close', () => openSockets.delete(socket));
+    // Deliberately no response, ever.
+  });
+  await new Promise<void>((resolve) => blackhole.listen(0, '127.0.0.1', () => resolve()));
+  const blackholePort = (blackhole.address() as net.AddressInfo).port;
+
+  const hangingProviderConfig: MetaProviderConfig = {
+    ...deadProviderConfig,
+    baseUrl: `http://127.0.0.1:${blackholePort}/v1`,
+    timeoutMs: 1_500,
+  };
+  const hangingProvider = new MetaProviderClient(hangingProviderConfig);
+  const hangingModel = createModelAdapter('meta', { meta: hangingProvider });
+  const providerHanging = await buildApp({
+    db: admin,
+    dbRuntime: runtime,
+    config: envConfig,
+    model: hangingModel,
+  });
+  const providerHangingUrl = await providerHanging.app.listen({ port: 0, host: '127.0.0.1' });
+
+  const hangStarted = Date.now();
+  const hung = await submit(providerHangingUrl, agentToken, agentId, 'drill-provider-hanging');
+  const hangElapsed = Date.now() - hangStarted;
+  const hungDecision = (hung.body as { decision?: string } | null)?.decision ?? null;
+
+  record(
+    'provider hanging',
+    'the decision comes back instead of waiting for the provider forever',
+    hung.status === 201,
+    { status: hung.status, decision: hungDecision },
+  );
+  record(
+    'provider hanging',
+    'the request is bounded by the provider timeout',
+    hangElapsed < hangingProviderConfig.timeoutMs + 3_000,
+    { elapsed_ms: hangElapsed, timeout_ms: hangingProviderConfig.timeoutMs },
+  );
+  record('provider hanging', 'the breaker opens on a timeout as well', hangingModel.status().breaker === 'OPEN', {
+    breaker: hangingModel.status().breaker,
+  });
+
+  await providerHanging.app.close();
+  for (const socket of openSockets) socket.destroy();
+  await new Promise<void>((resolve) => blackhole.close(() => resolve()));
+
+  // The model-free revision is published above to prove the deterministic
+  // path; the seeded policy is what a real tenant runs, so the drill ends
+  // with the model-requiring revision back in place.
+  if (currentHead && modelFreeRevisionId) {
+    await admin.db.transaction(async (tx) => {
+      const revision = await createRevision(tx, {
+        id: newId('policyRevision'),
+        tenantId,
+        policyId: currentHead.policy_id,
+        document: currentHead.policy_json as PolicyDocument,
+        policyHash: canonicalHash(currentHead.policy_json as PolicyDocument),
+        changeReason: 'drill: back to the model-reading revision',
+      });
+      await publishRevision(tx, {
+        tenantId,
+        policyId: currentHead.policy_id,
+        revisionId: revision.revisionId,
+        expectedCurrentRevisionId: modelFreeRevisionId,
+      });
+    });
+  }
+
   await closeDb(runtime);
   await closeDb(admin);
 

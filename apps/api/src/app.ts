@@ -7,6 +7,7 @@ import Fastify from 'fastify';
 import type {
   FastifyBaseLogger,
   FastifyInstance,
+  FastifyRequest,
   RawReplyDefaultExpression,
   RawRequestDefaultExpression,
   RawServerDefault,
@@ -15,6 +16,8 @@ import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import sensible from '@fastify/sensible';
+import IORedis from 'ioredis';
+import type { RedisOptions } from 'ioredis';
 import { serializerCompiler, validatorCompiler, type ZodTypeProvider } from 'fastify-type-provider-zod';
 import { NotFoundError, RateLimitedError } from '@permitzero/domain';
 import type { Principal } from '@permitzero/domain';
@@ -23,6 +26,7 @@ import { createBroker } from '@permitzero/db';
 import type { Db, DbStores } from '@permitzero/db';
 import { rlsEnforcementState } from '@permitzero/db';
 import { createMetrics, type MetricsBundle } from '@permitzero/observability';
+import { createSharedCounter, credentialFingerprint, SharedRateLimiter } from '@permitzero/observability';
 import {
   AuditChainMonitor,
   installRequestObservability,
@@ -39,9 +43,11 @@ import type { ApprovalDeps } from './approvals.js';
 import type { CollectDeps } from './permits.js';
 import type { ExecuteDeps } from './execute.js';
 import { actionRoutes } from './routes/actions.js';
+import { alertSinkRoutes } from './routes/alerts.js';
 import { auditRoutes } from './routes/audit.js';
 import { evidenceRoutes } from './routes/evidence.js';
 import { healthRoutes } from './routes/health.js';
+import { meRoutes } from './routes/me.js';
 import { statusRoutes } from './routes/status.js';
 
 declare module 'fastify' {
@@ -243,25 +249,104 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
   // budget. `createRateLimit` applies a limiter without setting that flag, so
   // both budgets are charged — which is the point of having two.
   //
-  // Keyed on the client address rather than on the credential. A brute-force
-  // attempt presents a different token every time, so a per-token bucket would
-  // be a fresh bucket per guess and would never trip; the address is what a
-  // guessing attempt has in common.
-  const authBudget = rateLimitPresets(deps.config).auth;
+  // Keyed on the CREDENTIAL rather than on the client address. Behind the
+  // edge proxy every tenant of every customer shares one address, so an
+  // address-keyed budget is a budget one tenant can exhaust on behalf of all
+  // the others — an availability hole wearing the clothes of a security
+  // control — and the address is also the part of a request an attacker most
+  // wants to change. The credential's hash is the key: the same credential is
+  // the same caller from every address, and two credentials never share a
+  // budget.
+  //
+  // Two budgets, and the order matters. The LOCAL one is a floor: it is
+  // per-process, so with N replicas it allows N times the intended rate, and
+  // it is the only budget left when the shared counter cannot be reached. The
+  // SHARED one is the control — the same allowance, counted in Redis, so
+  // every replica spends from the same pot.
+  const presets = rateLimitPresets(deps.config);
+  const authBudget = presets.auth;
+  const sharedBudgets = await createSharedBudgets(deps.config, presets, metrics, app.log);
   let authLimiter: ReturnType<FastifyInstance['createRateLimit']> | null = null;
   app.addHook('onRequest', async (request, reply) => {
-    if (!request.headers.authorization) return;
+    // The alert sink presents the alerting secret rather than a tenant
+    // credential, so it is not a credential-bearing request and must not be
+    // charged against the credential budget. It stays in the global limit.
+    if (request.routeOptions?.config?.exemptFromAuthBudget) return;
+    const header = request.headers.authorization;
+    if (!header) return;
+    const credential = bearerCredential(header);
+    if (!credential) return;
+
     // Created on first use: @fastify/rate-limit decorates the instance when it
     // loads, and plugins load at ready() — after this hook is registered.
+    //
+    // The key is computed per request rather than captured from the first one:
+    // a closure over the first request's credential would put every later
+    // caller in the first caller's bucket, which is the opposite of charging
+    // the credential that was actually presented.
     const limiter = (authLimiter ??= app.createRateLimit({
       max: authBudget.max,
       timeWindow: authBudget.timeWindow,
-      keyGenerator: (req) => req.ip,
+      // The credential, not the address: the same reasoning as the shared
+      // budget below, applied to the local floor so the two count the same
+      // thing.
+      keyGenerator: (req) => {
+        const presented = req.headers.authorization;
+        const value = bearerCredential(typeof presented === 'string' ? presented : '');
+        return credentialFingerprint(value ?? '');
+      },
     }));
-    const result = await limiter(request);
-    if (result.isAllowed || !result.isExceeded) return;
-    reply.header('retry-after', String(result.ttlInSeconds));
-    throw new RateLimitedError(result.ttlInSeconds);
+    const local = await limiter(request);
+    if (local.isAllowed || !local.isExceeded) {
+      // The shared budget: the same allowance, counted across every replica.
+      const auth = await sharedBudgets.auth?.charge(credential);
+      if (auth) {
+        if (auth.unavailable) {
+          // Fail open, and count it. An outage of the limiter must not take the
+          // authorization API down with it — the limiter is a defence against
+          // abuse, not the control that decides whether an action is allowed —
+          // so the local budget above stands as the floor. The counter is how a
+          // limiter that is quietly not enforcing anything becomes visible.
+          metrics.sharedRateLimitFailures.inc();
+          metrics.sharedRateLimitCharges.inc({ scope: 'auth', outcome: 'unavailable' });
+        } else if (!auth.allowed) {
+          metrics.sharedRateLimitCharges.inc({ scope: 'auth', outcome: 'refused' });
+          reply.header('retry-after', String(auth.retryAfterSeconds));
+          throw new RateLimitedError(auth.retryAfterSeconds);
+        } else {
+          metrics.sharedRateLimitCharges.inc({ scope: 'auth', outcome: 'allowed' });
+        }
+      }
+
+      // The mutation budget, for the routes that declare one. The declaration
+      // lives in the route's own rate-limit config, so the route table stays
+      // the single place that says what a mutation is and what it costs.
+      if (routeRateLimitScope(request) === 'mutation') {
+        const mutation = await sharedBudgets.mutation?.charge(credential);
+        if (mutation) {
+          if (mutation.unavailable) {
+            metrics.sharedRateLimitFailures.inc();
+            metrics.sharedRateLimitCharges.inc({ scope: 'mutation', outcome: 'unavailable' });
+          } else if (!mutation.allowed) {
+            metrics.sharedRateLimitCharges.inc({ scope: 'mutation', outcome: 'refused' });
+            reply.header('retry-after', String(mutation.retryAfterSeconds));
+            throw new RateLimitedError(mutation.retryAfterSeconds);
+          } else {
+            metrics.sharedRateLimitCharges.inc({ scope: 'mutation', outcome: 'allowed' });
+          }
+        }
+      }
+      return;
+    }
+    reply.header('retry-after', String(local.ttlInSeconds));
+    throw new RateLimitedError(local.ttlInSeconds);
+  });
+
+  // The limiter's own Redis connection, closed with the app. A process that
+  // exits holding an open socket to Redis is a process that keeps the
+  // connection's slot open after it is gone.
+  app.addHook('onClose', async () => {
+    await sharedBudgets.close();
   });
 
   app.setErrorHandler((err, request, reply) => {
@@ -283,6 +368,15 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
     await v1.register((scope) => auditRoutes(scope, ctx), { prefix: '/v1' });
     await v1.register((scope) => evidenceRoutes(scope, ctx), { prefix: '/v1' });
     await v1.register((scope) => statusRoutes(scope, ctx), { prefix: '/v1' });
+    // The MFA routes. Registered inside the versioned scope because that is
+    // where their paths belong (/v1/me/mfa/*) — they are the account's own
+    // second factor, not a tenant resource.
+    await v1.register((scope) => meRoutes(scope, ctx), { prefix: '/v1' });
+    // The alert sink. Registered inside the versioned scope because that is
+    // where its path belongs (/v1/internal/alerts), and it declares itself
+    // exempt from the credential budget — it presents the alerting secret, not
+    // a tenant credential.
+    await v1.register((scope) => alertSinkRoutes(scope, ctx), { prefix: '/v1' });
   });
   await app.register((scope) => healthRoutes(scope, ctx));
 
@@ -370,6 +464,7 @@ export const LOG_REDACT_PATHS = [
   'req.headers.authorization',
   'req.headers.cookie',
   'req.headers["x-api-key"]',
+  'req.headers["x-alert-token"]',
   '*.authorization',
   '*.password',
   '*.secret',
@@ -399,14 +494,195 @@ export function loggerOptions(config: ApiConfig): {
 /**
  * Per-route rate-limit presets. Fastify applies `config.rateLimit` on top of the
  * global ceiling, so a route that declares a tighter budget gets it.
+ *
+ * The `scope` on each preset is not decoration: it travels with the route's
+ * rate-limit config, and it is how the shared (cross-replica) budget knows
+ * which budget a route spends. Without it the shared budget would have to
+ * guess from the request method, and a POST that is not a mutation — a
+ * read-shaped POST, an approval — would be charged as one.
  */
 export function rateLimitPresets(config: ApiConfig): {
-  mutation: { max: number; timeWindow: number };
-  auth: { max: number; timeWindow: number };
+  mutation: { max: number; timeWindow: number; scope: 'mutation' };
+  auth: { max: number; timeWindow: number; scope: 'auth' };
 } {
   return {
-    mutation: { max: config.rateLimitMutations, timeWindow: 60_000 },
-    auth: { max: config.rateLimitAuth, timeWindow: 60_000 },
+    mutation: { max: config.rateLimitMutations, timeWindow: 60_000, scope: 'mutation' },
+    auth: { max: config.rateLimitAuth, timeWindow: 60_000, scope: 'auth' },
+  };
+}
+
+/**
+ * The credential presented on a request, or null when there is none.
+ *
+ * The scheme is stripped: the budget is charged against the credential, and
+ * `Bearer` is not part of it. A header that is not a bearer token at all is
+ * still a credential as far as the limiter is concerned — an attacker
+ * guessing tokens must not be able to step outside the budget by writing
+ * `Basic` instead.
+ */
+export function bearerCredential(header: string): string | null {
+  const value = header.trim();
+  if (!value) return null;
+  const bearer = /^Bearer\s+(.+)$/i.exec(value);
+  const credential = (bearer?.[1] ?? value).trim();
+  return credential.length > 0 ? credential : null;
+}
+
+/**
+ * The scope a route's own rate-limit config declares, if any.
+ *
+ * Read from the route rather than guessed from the method: the route table is
+ * where this repository says what a mutation is, and a second guess here would
+ * be a second answer to the same question.
+ */
+export function routeRateLimitScope(request: FastifyRequest): string | undefined {
+  const limit = request.routeOptions?.config?.rateLimit;
+  if (!limit || typeof limit !== 'object') return undefined;
+  return (limit as { scope?: string }).scope;
+}
+
+/** How long the limiter waits for a socket to come up. */
+const REDIS_CONNECT_TIMEOUT_MS = 5_000;
+
+/**
+ * How long one counter command may take.
+ *
+ * Shorter than the queue's deadline, because this one is on the request path:
+ * a limiter that waits five seconds for a counter is a limiter that has
+ * stopped protecting anything. A command that misses the deadline is treated
+ * as a counter that could not be read, which fails open onto the local limit.
+ */
+const REDIS_COMMAND_DEADLINE_MS = 1_000;
+
+/**
+ * How long the boot waits for the limiter's Redis connection.
+ *
+ * Long enough for a healthy Redis to answer, short enough that an absent one
+ * does not hold the API's startup hostage.
+ */
+const REDIS_READY_WAIT_MS = 1_000;
+
+/**
+ * The limiter's Redis connection.
+ *
+ * Deliberately NOT the queue's connection: the queue's client is a BullMQ
+ * producer whose retry policy is tuned for a background dispatcher, and a
+ * limiter must not inherit a policy that waits for a reconnecting server.
+ * `enableOfflineQueue: false` and `maxRetriesPerRequest: 1` mean a command
+ * issued while Redis is unreachable fails immediately rather than queueing
+ * behind the reconnection — the budget is then simply not charged, and the
+ * local limit stands.
+ */
+function limiterRedisOptions(): RedisOptions {
+  return {
+    maxRetriesPerRequest: 1,
+    enableOfflineQueue: false,
+    enableReadyCheck: true,
+    connectTimeout: REDIS_CONNECT_TIMEOUT_MS,
+    commandTimeout: REDIS_COMMAND_DEADLINE_MS,
+    // Reconnect, but back off: a Redis that is down should not be hammered
+    // once per request by every replica.
+    retryStrategy: (times: number) => Math.min(times * 200, 2_000),
+  };
+}
+
+/**
+ * The namespace for the shared counter keys.
+ *
+ * Read from the environment rather than from `config.ts`, which does not carry
+ * the field yet — the coordinator owns that file. Two deployments pointed at
+ * one Redis would otherwise spend each other's allowance, and the only defence
+ * against that is a prefix that differs.
+ */
+export function sharedRateLimitPrefix(): string {
+  const prefix = process.env['RATE_LIMIT_REDIS_PREFIX']?.trim();
+  return prefix && prefix.length > 0 ? prefix : 'permitzero:rate-limit';
+}
+
+export interface SharedBudgets {
+  /** The credential budget, shared across replicas. Null when there is no Redis. */
+  auth: SharedRateLimiter | null;
+  /** The mutation budget, shared across replicas. Null when there is no Redis. */
+  mutation: SharedRateLimiter | null;
+  close: () => Promise<void>;
+}
+
+/**
+ * Wait, briefly, for the limiter's Redis connection.
+ *
+ * Until the connection is up the counter cannot be charged, and a request that
+ * arrives in that window is answered under the local limit alone — so the
+ * wait is worth a moment of boot time. It is bounded, because a Redis that is
+ * down must not stop the API from booting: the limiter fails open by design,
+ * and a boot that waits for a limiter is a boot that turns a degraded control
+ * into an outage.
+ */
+async function waitForRedis(client: IORedis, timeoutMs: number): Promise<boolean> {
+  if (client.status === 'ready') return true;
+  return new Promise((resolve) => {
+    const finish = (ready: boolean): void => {
+      clearTimeout(timer);
+      client.off('ready', onReady);
+      resolve(ready);
+    };
+    const onReady = (): void => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    client.once('ready', onReady);
+  });
+}
+
+/**
+ * The shared budgets, backed by one Redis counter per credential and window.
+ *
+ * Without a Redis there is no shared budget and each replica enforces its
+ * own — which is published as a metric rather than left to be discovered,
+ * because a deployment that believes it has a shared budget and does not is
+ * invisible from the outside and allows N times the intended rate.
+ */
+export async function createSharedBudgets(
+  config: ApiConfig,
+  presets: ReturnType<typeof rateLimitPresets>,
+  metrics: MetricsBundle,
+  log: FastifyBaseLogger,
+): Promise<SharedBudgets> {
+  const redisUrl = config.redisUrl;
+  if (!redisUrl) {
+    metrics.sharedRateLimitEnabled.set(0);
+    return { auth: null, mutation: null, close: async () => undefined };
+  }
+  const client = new IORedis(redisUrl, limiterRedisOptions());
+  // ioredis emits 'error' on every failed reconnect, and an unhandled 'error'
+  // event on an EventEmitter is thrown. Without this listener a Redis outage
+  // would take the API process down — turning a fail-open design into the
+  // outage it was designed to avoid.
+  client.on('error', (err) => {
+    log.warn({ err }, 'shared rate limit: redis unavailable, budgets fall back to the local limit');
+  });
+  const ready = await waitForRedis(client, REDIS_READY_WAIT_MS);
+  if (!ready) {
+    log.warn('shared rate limit: redis did not answer at boot, budgets fall back to the local limit');
+  }
+  const store = createSharedCounter(client);
+  const prefix = sharedRateLimitPrefix();
+  metrics.sharedRateLimitEnabled.set(1);
+  return {
+    auth: new SharedRateLimiter({
+      store,
+      prefix,
+      scope: 'auth',
+      max: presets.auth.max,
+      timeWindowMs: presets.auth.timeWindow,
+    }),
+    mutation: new SharedRateLimiter({
+      store,
+      prefix,
+      scope: 'mutation',
+      max: presets.mutation.max,
+      timeWindowMs: presets.mutation.timeWindow,
+    }),
+    close: async () => {
+      client.disconnect();
+    },
   };
 }
 

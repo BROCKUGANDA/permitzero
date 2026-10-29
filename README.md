@@ -103,8 +103,8 @@ flowchart LR
 | Objectives that can fail                | Multi-window, multi-burn-rate SLOs with a histogram bucket at the threshold; the report exits non-zero when breached **or when it measured nothing**                                                                                                                                                                                                                                                       | `packages/observability/src/slos.ts`, `npm run slo:report:strict`              |
 | The alerts can actually fire            | Three series that were declared and never written are now produced; the delivery-lag gauge measures the outbox **row**, not the queue job, so a wedged dispatcher cannot read zero                                                                                                                                                                                                                         | `apps/api/src/observability.ts`, `packages/observability/test/`                |
 | Survives a provider or queue outage     | The drill points a second API instance at an unreachable database and asserts that readiness answers 503, a decision answers 503 rather than 500, the response leaks no driver detail, and the failed request leaves no half-written action; it also asserts an owed outbox event is retained rather than dropped, and that a leased row is not double-claimed or marked published without being published | `npm run drill:resilience`                                                     |
-| Nothing unproven is claimed             | 28 controls mapped to code and tests: 17 implemented, 7 partial, **4 absent** (encryption at rest, backup/PITR, retention and deletion, independent review)                                                                                                                                                                                                                                                | `docs/compliance/EVIDENCE.md`, `npm run compliance:gate`                       |
-| Test surface                            | 551 tests across 41 files, plus typecheck, lint at `--max-warnings=0`, format, gitleaks, the dependency gate, the evidence-map gate and the resilience drill — all wired into `npm run verify` and `.github/workflows/ci.yml`, which additionally runs a live SLO scrape against a running stack                                                                                                           | `npm run verify`, `.github/workflows/ci.yml`                                   |
+| Nothing unproven is claimed             | 31 controls mapped to code and tests: 28 implemented, 1 partial, **2 absent** (an independent third-party review, and multi-region failover)                                                                                                                                                                                                                                                               | `docs/compliance/EVIDENCE.md`, `npm run compliance:gate`                       |
+| Test surface                            | 603 tests across 47 files, plus typecheck, lint at `--max-warnings=0`, format, gitleaks, the dependency gate, the evidence-map gate and the resilience drill — all wired into `npm run verify` and `.github/workflows/ci.yml`, which additionally runs a live SLO scrape against a running stack                                                                                                           | `npm run verify`, `.github/workflows/ci.yml`                                   |
 
 **Read the honest parts too.** The model never issues a permit, publishes policy
 or calls a connector, and that is structural rather than a convention:
@@ -182,7 +182,7 @@ Agent ──POST /v1/actions──► API (Fastify) ──► Intake pipeline
 ### Delivery
 
 ```
-push / PR ──► CI: typecheck, lint, 551 tests, build, format, gitleaks,
+push / PR ──► CI: typecheck, lint, 603 tests, build, format, gitleaks,
                dependency gate, evidence-map gate, resilience drill,
                strict SLO report against a live stack
          │
@@ -348,7 +348,7 @@ permitzero/
 
 - Single-region authoritative writer; no active-active multi-region.
 - Simulated connector only; no live payment rails.
-- No SSO/SCIM/MFA step-up beyond role-based auth in the MVP. MFA step-up _assertions_ are signed and verified, but there is no step-up endpoint that issues one — so a policy requiring MFA fails closed rather than being satisfied by a typed string.
+- No SSO/SCIM. MFA step-up is a real TOTP second factor: enrol, confirm, verify, and a step-up endpoint that issues the signed assertion a policy requires. There is no hardware-key or WebAuthn factor.
 - Replay Lab replays stored actions; full run-trace replay with redaction is P1.
 - Intake throughput is capped by the per-tenant audit hash chain, which serialises
   appends by design: ~46–63 requests/s on one tenant on this rig, flat whether the
@@ -356,9 +356,14 @@ permitzero/
   25 concurrent clients on one tenant, 0.65–0.69% of requests exceeded the client
   timeout, which breaches the 99.9% availability objective — measured, not hidden.
   Per-tenant chain partitioning is the remedy and is not built here.
-- No encryption at rest, no backup/PITR procedure, no retention or deletion path,
-  and no independent review — all four are recorded as `absent` in
-  `docs/compliance/EVIDENCE.md` rather than implied by the word "secure".
+- What is still absent is named rather than implied by the word "secure": an
+  independent third-party review (this build’s own adversarial review is
+  recorded in `docs/security-review.md`, but a review by somebody who did not
+  write the code needs a budget and a second party), and multi-region failover
+  — one Postgres, one Redis, one region, one host. Encryption at rest of
+  what the application stores, backup with point-in-time recovery, and a
+  retention window with a legal hold are implemented, tested and cited in
+  `docs/compliance/EVIDENCE.md`.
 - The CI runner is self-hosted on the deploy host, because this account's hosted
   runners are refused with _"your account is locked due to a billing issue."_ That is
   an account billing state and the one thing here that needs a human; clearing it

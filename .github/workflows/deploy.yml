@@ -347,12 +347,11 @@ jobs:
               ROWS=$(printf '%s' "$ROWS" | tr -d '[:space:]')
               break
             fi
-            echo "  attempt $attempt: the isolation probe could not run; retrying" >&2
-            # No sleep after the LAST attempt: there is nothing left to wait
-            # for, and a permanently unreachable database should not add ten
-            # seconds to every failed deploy.
             if [ "$attempt" -lt 6 ]; then
+              echo "  attempt $attempt: the isolation probe could not run; retrying" >&2
               sleep 10
+            else
+              echo "  attempt $attempt: the isolation probe could not run; no attempts left" >&2
             fi
           done
           if ! printf '%s' "$ROWS" | grep -Eq '^[0-9]+$'; then

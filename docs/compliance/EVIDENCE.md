@@ -22,7 +22,7 @@ Statuses: `implemented` (control exists, is wired, and is tested), `partial`
 status: implemented
 sources: SOC 2 CC6.1, CC6.6; OWASP Agentic (identity/privilege abuse)
 claim: The deployed API connects as the restricted `pz_app` role, not as the schema owner, so row-level security applies to the traffic that actually serves tenants. The deployment script refuses to start without a runtime URL that names `pz_app`, and verifies the property against the live database rather than the configuration: after the rollout, a query as the runtime role with no tenant context set must return zero rows.
-evidence: infra/deploy/deploy-vps.sh:126 expect:DATABASE_URL_RUNTIME=postgres; infra/deploy/deploy-vps.sh:469 expect:verifying tenant isolation in the running deployment
+evidence: infra/deploy/deploy-vps.sh:138 expect:DATABASE_URL_RUNTIME=postgres://pz_app:$RLS_PW@postgres:5432/permitzero; infra/deploy/deploy-vps.sh:535 expect:verifying tenant isolation in the running deployment
 tests: packages/db/test/rls.test.ts; apps/api/test/tenant-isolation.test.ts
 note: The first version of the deployment script wrote `DATABASE_URL` but not `DATABASE_URL_RUNTIME`, and the application falls back to the admin URL when the latter is unset — so the deployed API ran as the schema owner, which row-level security does not bind, and every tenant row was reachable without a tenant context. The deployment now generates a random password for the restricted role, points the runtime URL at it, refuses to start if the two do not agree, and checks the live database after the rollout. Verified on the running deployment: 31 policies, 22/22 tenant tables enforced, and a cross-tenant read as `pz_app` returns zero rows.
 
@@ -76,7 +76,7 @@ note: The migration role is exempt by design (it must own DDL); on managed Postg
 status: implemented
 sources: SOC 2 CC7.2, CC4.1; OWASP Agentic (records of decisions); MAS SAFR (record of decision)
 claim: Each audit event hashes the canonical event plus the previous hash, its sequence is assigned under a per-tenant advisory lock, and the chain is verifiable end-to-end for a tenant.
-evidence: infra/migrations/0002_triggers.sql:146 expect:hashtextextended('pz_audit_chain:; packages/db/src/repos/audit.ts:117 expect:appendAuditEvent; packages/db/src/repos/audit.ts:287 expect:verifyAuditChain
+evidence: infra/migrations/0002_triggers.sql:146 expect:hashtextextended('pz_audit_chain:; packages/db/src/repos/audit.ts:170 expect:appendAuditEvent; packages/db/src/repos/audit.ts:366 expect:verifyAuditChain
 tests: packages/db/test/execution-stores.test.ts; packages/db/test/audit-concurrency.test.ts; apps/api/test/intake.test.ts
 gap: —
 
@@ -85,7 +85,7 @@ gap: —
 status: implemented
 sources: SOC 2 CC7.2, A1.2 (resilience of evidence)
 claim: The chain lock is taken before the head is read, so a concurrent writer blocks instead of aborting its own transaction, and a row that violates a real CHECK is reported as that violation rather than retried into a 25P02.
-evidence: packages/db/src/repos/audit.ts:139 expect:pg_advisory_xact_lock; packages/db/src/repos/audit.ts:106 expect:isAuditChainCollision
+evidence: packages/db/src/repos/audit.ts:198 expect:SELECT pg_advisory_xact_lock; packages/db/src/repos/audit.ts:159 expect:export function isAuditChainCollision
 tests: packages/db/test/audit-concurrency.test.ts | does not lose the second writer when the chain head moves underneath it; packages/db/test/audit-concurrency.test.ts | serves every writer when a burst of them appends at once; packages/db/test/audit-concurrency.test.ts | reports a row that breaks a CHECK
 note: Per-tenant serialisation is the design and also the throughput ceiling; it is measured in docs/benchmarks/SCALING.md rather than assumed.
 
@@ -125,32 +125,32 @@ evidence: apps/api/src/approvals.ts:157 expect:cannot approve an action you requ
 tests: apps/api/test/approvals.test.ts | refuses an approval from the requester of the action; apps/api/test/approvals.test.ts | still reaches a quorum of two when the requester is one of the approvers
 note: Distinct approvers were already enforced; independence FROM THE REQUESTER was not. A user holding an OWNER or APPROVER role could submit a payment and then be its only approver.
 
-### MFA-STEP-UP — a step-up assertion is signed, not typed
+### MFA-STEP-UP — a step-up assertion is signed, and there is an endpoint that issues one
 
-status: partial
+status: implemented
 sources: SOC 2 CC6.1, CC6.2; MAS SAFR (human oversight); OWASP (authentication)
-claim: `require_mfa` is satisfied only by a server-signed assertion bound to the tenant, the approver, the action and an expiry. A client-supplied string, an assertion signed with the wrong key, one issued for a different action or a different approver, and an expired one are all refused.
-evidence: packages/policy/src/mfa.ts:118 expect:verifyMfaAssertion; packages/schemas/src/api.ts:316 expect:mfa_context_ref; apps/api/src/approvals.ts:32 expect:verifyMfaAssertion
-tests: apps/api/test/approvals.test.ts | accepts an approval only with a verifiable step-up assertion; apps/api/test/approvals.test.ts | refuses a step-up assertion issued for a different approver; apps/api/test/approvals.test.ts | refuses every assertion when the server has no key to verify it with; packages/policy/test/policy.test.ts | mfa step-up assertions
-gap: There is no step-up ENDPOINT in this build: the assertion is issued by the policy package, but nothing in the API hands one out after verifying a second factor. A policy with `require_mfa: true` is therefore unsatisfiable and fails closed — the safe direction, but not a working feature. The assertion key is derived from `AUDIT_HMAC_KEY` with domain separation rather than being its own secret.
+claim: `require_mfa` is satisfied only by a server-signed assertion bound to the tenant, the approver, the action and an expiry, and there is now an endpoint that issues one after a real second factor. The second factor is a TOTP (RFC 6238) code verified against the user's own encrypted secret; the secret is stored under AES-256-GCM with a key derived from the server's master secret, and a spent code is fingerprinted so it cannot be presented twice. A client-supplied string, an assertion signed with the wrong key, one issued for a different action or a different approver, an expired one, and one presented by an approver who has since removed their second factor are all refused.
+evidence: packages/policy/src/mfa.ts:129 expect:verifyMfaAssertion; packages/schemas/src/api.ts:316 expect:mfa_context_ref; apps/api/src/approvals.ts:32 expect:verifyMfaAssertion; apps/api/src/routes/me.ts:428 expect:export async function meRoutes; apps/api/src/routes/actions.ts:222 expect:/actions/:id/step-up; infra/migrations/0008_mfa_totp.sql:66 expect:CREATE TABLE IF NOT EXISTS public.mfa_secrets
+tests: apps/api/test/mfa-step-up.test.ts | accepts a code generated for the current time and refuses a wrong one; apps/api/test/mfa-step-up.test.ts | enrolment and confirmation set mfa_enrolled_at; apps/api/test/mfa-step-up.test.ts | issues an assertion after a recent verification, and it verifies for that action; apps/api/test/mfa-step-up.test.ts | binds the assertion to the action it was issued for; apps/api/test/approvals.test.ts | refuses a step-up assertion from an approver with no second factor enrolled; packages/policy/test/policy.test.ts | mfa step-up assertions
+note: The assertion key is derived from `AUDIT_HMAC_KEY` with domain separation rather than being its own secret, and the enrolment is per user rather than per tenant. The check that the approver still has a second factor enrolled happens inside the tenant transaction, because the runtime role's row-level policy hides the user row from a read outside a tenant context.
 
 ### TRANSPORT-AND-HEADER-HARDENING — the HTTP surface is constrained
 
 status: implemented
 sources: SOC 2 CC6.6; OWASP (secure configuration)
 claim: helmet is registered with an explicit CSP, HSTS with preload, `frameguard: deny`, `noSniff`, `no-referrer`, a body-size ceiling, an CORS allowlist rather than a reflected origin, and `trustProxy` limited to the named hops.
-evidence: apps/api/src/app.ts:184 expect:helmet; apps/api/src/app.ts:199 expect:hsts; apps/api/src/app.ts:205 expect:frameguard; apps/api/src/app.ts:182 expect:buildCorsOriginCheck; apps/api/src/app.ts:171 expect:trustProxy
+evidence: apps/api/src/app.ts:196 expect:await app.register(helmet; apps/api/src/app.ts:214 expect:hsts; apps/api/src/app.ts:220 expect:frameguard; apps/api/src/app.ts:194 expect:origin: buildCorsOriginCheck(deps.config.corsOrigins); apps/api/src/app.ts:186 expect:trustProxy
 tests: apps/api/test/security.test.ts
 note: TLS termination is the edge proxy's job (infra/caddy/Caddyfile); the app itself is plain HTTP behind it, which is documented rather than asserted.
 
-### ABUSE-THROTTLING — limits that are actually applied
+### ABUSE-THROTTLING — limits that are actually applied, and shared across replicas
 
-status: partial
-sources: SOC 2 CC7.3 (availability)
-claim: A global ceiling plus per-route mutation and auth budgets are wired into Fastify's rate limiter, keyed on the client address resolved through the trusted proxy list.
-evidence: apps/api/src/app.ts:220 expect:rateLimit; apps/api/src/config.ts:117 expect:loadConfig
-tests: apps/api/test/security.test.ts; apps/api/test/tenant-isolation.test.ts
-gap: The limiter is per-process in this build; with several replicas each has its own budget until a shared store is configured.
+status: implemented
+sources: SOC 2 CC7.3 (availability); OWASP (brute force)
+claim: A global ceiling plus per-route mutation and credential budgets are wired into Fastify's rate limiter, and the credential and mutation budgets are counted in Redis so they are the SAME allowance on every replica rather than one per process. The budget is charged against the presented credential, hashed — not the client address, because a brute-force attempt presents a different token each time and an address-keyed bucket is bypassed by walking around it, and because every tenant behind the edge proxy would otherwise share one bucket. When Redis cannot be reached the local limit still applies, so a limiter outage cannot grant an unlimited budget, and the fallback is counted and published as a metric rather than left to be discovered.
+evidence: apps/api/src/app.ts:268 expect:createSharedBudgets; apps/api/src/app.ts:220 expect:rateLimit; apps/api/src/config.ts:161 expect:export function loadConfig(env: NodeJS.ProcessEnv = process.env); packages/observability/src/shared-rate-limit.ts:182 expect:export class SharedRateLimiter
+tests: apps/api/test/rate-limit.test.ts; apps/api/test/security.test.ts; apps/api/test/tenant-isolation.test.ts
+note: The shared counter fails OPEN onto the local limit rather than closed. A limiter is a defence against abuse; it is not the control that decides whether an action is allowed, and an outage of it must not take the authorization API down with it. The failure is counted and exported so a permanently degraded limiter is visible.
 
 ### NO-LEAK-ERRORS — internal failures do not reach the caller
 
@@ -166,36 +166,45 @@ gap: —
 status: implemented
 sources: SOC 2 CC7.2; ISO 27001 (logging)
 claim: `LOG_LEVEL` is parsed, validated and handed to Fastify's logger; an unknown level fails boot naming the variable, and credential-shaped fields are redacted at the serializer.
-evidence: apps/api/src/config.ts:161 expect:logLevelOf(env); apps/api/src/app.ts:164 expect:loggerOptions(deps.config)
+evidence: apps/api/src/config.ts:205 expect:logLevelOf(env); apps/api/src/app.ts:178 expect:loggerOptions(deps.config)
 tests: apps/api/test/logging.test.ts | is actually enabled, at the configured level
 note: Correlation travels as an explicit `traceId` field on the calls that matter, not on every line: the pinned Fastify (5.2) has no `setLogContext`, and the attempt to use it 500'd every request before a test caught it.
 
-### DEPENDENCY-TRANSPARENCY — the audit gate can fail
+### DEPENDENCY-TRANSPARENCY — the audit gate can fail, and covers the whole tree
 
-status: partial
+status: implemented
 sources: SOC 2 CC7.1, CC8.1; OWASP (supply chain)
-claim: `npm audit` runs in CI against an explicit, dated exception list; a production finding that is not named, reasoned and in-date fails the build, and an exception whose advisory has cleared is reported so the list cannot only ever grow. The gate also refuses to pass when npm cannot produce a report at all, because an unavailable audit is not a clean audit.
-evidence: scripts/audit-gate.mjs:26 expect:dependency-exceptions.json; scripts/audit-gate.mjs:62 expect:readAuditReport
+claim: `npm audit` runs in CI against the WHOLE dependency tree against an explicit, dated exception list; a finding that is not named, reasoned and in-date fails the build, and an exception whose advisory has cleared is reported so the list cannot only ever grow. The gate also refuses to pass when npm cannot produce a report at all, because an unavailable audit is not a clean audit — which is the defect that had retired four real advisories in the first place.
+evidence: scripts/audit-gate.mjs:42 expect:const EXCEPTIONS_FILE = path.join(root; scripts/audit-gate.mjs:75 expect:function readAuditReport(stdout, failure); infra/security/dependency-exceptions.json:1 expect:exceptions
 tests: scripts/audit-gate.mjs
-gap: Scope is `--omit=dev`, so advisories confined to devDependencies are outside the gate. npm currently reports four production advisories — zod, fastify-type-provider-zod, postcss and next — and the exceptions file is empty, so the gate FAILS until each is either fixed or named with a reason and a review date. The previous version of this file claimed the list was empty because npm reported nothing; that claim was produced by a run in which npm had failed with a configuration error and the gate had parsed the error envelope as an empty report. GitHub Dependabot reports a wider set under its own scope, and there is no provenance/SLSA attestation checking.
+note: The scope used to be `--omit=dev`, so a build-time advisory could hide outside the gate; the tree is now audited whole, and every advisory it reports — twenty at the time of writing — is named in the exceptions file with a reason, a compensating control and a review date. There is still no provenance or SLSA attestation checking, and Dependabot reports a wider set under its own scope.
 
-### SECRET-HYGIENE — no credential in the tree
+### SECRET-HYGIENE — no credential in the tree, and rotation is a procedure that works
 
-status: partial
+status: implemented
 sources: SOC 2 CC6.1; OWASP (secrets management)
-claim: Secrets come from the environment and fail fast naming the variable, the RLS role password is substituted from the environment into migration SQL behind a character-class guard, gitleaks runs in CI, and the demo credential file is gitignored with mode 0600.
-evidence: apps/api/src/config.ts:68 expect:required; packages/db/src/client.ts:74 expect:PZ_RLS_ROLE_PASSWORD
-tests: packages/db/test/root-env.test.ts
-gap: No external secret manager or KMS integration; rotation is an operator procedure, and `DATABASE_URL_RUNTIME` carries the role password in the environment like every other setting here.
+claim: Secrets come from the environment and fail fast naming the variable, the RLS role password is substituted from the environment into migration SQL behind a character-class guard, gitleaks runs in CI over the history, and the demo credential file is gitignored with mode 0600. The master key can be ROTATED without losing the ability to verify the audit chain: the environment carries a keyRING, the first entry current and the rest accepted for verification, so a new key is added before it becomes current and the old one is retired afterwards.
+evidence: apps/api/src/config.ts:103 expect:function required(env: NodeJS.ProcessEnv, name: string); packages/db/src/client.ts:74 expect:PZ_RLS_ROLE_PASSWORD; packages/db/src/crypto.ts:117 expect:export function deriveKey
+tests: packages/db/test/root-env.test.ts; packages/db/test/rotation.test.ts
+note: The keyring is an environment variable rather than an external secret manager, so the rotation window is an operator decision and the procedure is a script with a documented order. Rotation is deliberately not automated: how long a retired key stays acceptable is a risk decision, and a cron job cannot make it.
 
 ### RESILIENCE — provider outage degrades instead of halting
 
-status: partial
+status: implemented
 sources: SOC 2 A1.2; OWASP Agentic (tool misuse under failure); MAS SAFR (resilience)
-claim: The model provider is wrapped in bounded attempts, backoff and a circuit breaker, the deterministic path answers when it is unavailable, and the outbox keeps events through a crash with a lease, a DLQ and a redrive.
-evidence: packages/provider-meta/src/client.ts:113 expect:breaker; packages/db/src/repos/outbox.ts:112 expect:claimOutboxEvents; packages/db/src/repos/outbox.ts:212 expect:redriveOutboxEvent
+claim: The model provider is wrapped in bounded attempts, backoff and a circuit breaker, the deterministic path answers when it is unavailable, and the outbox keeps events through a crash with a lease, a DLQ and a redrive. The provider outage is DRILLED: an API instance is pointed at an unreachable provider, and the drill asserts that a decision still succeeds on the deterministic path or escalates to REQUIRE_APPROVAL when the policy requires the model signal — and that it NEVER yields ALLOW on the strength of a missing signal — that the breaker opens and is observable, and that the request does not hang past the timeout.
+evidence: packages/provider-meta/src/client.ts:113 expect:breaker; packages/db/src/repos/outbox.ts:151 expect:claimOutboxEvents; packages/db/src/repos/outbox.ts:256 expect:redriveOutboxEvent; scripts/resilience-drill.ts:45 expect:provider
 tests: apps/api/test/resilience.test.ts; packages/db/test/outbox-concurrency.test.ts | gives two simultaneous claimers disjoint rows, never the same row twice; packages/queue/test/dispatcher-resilience.test.ts; scripts/resilience-drill.ts
-gap: The drill runs against local Postgres/Redis. No multi-region or provider-failover evidence exists. The queue's Redis calls are now bounded and guarded by a circuit breaker, so a Redis outage fails fast into the retry path instead of wedging the dispatcher silently — but there is still one Postgres and one Redis, so an outage of either is an outage of the deployment.
+note: The drill runs against local Postgres and Redis. The queue's Redis calls are bounded and guarded by a circuit breaker, so a Redis outage fails fast into the retry path instead of wedging the dispatcher silently — but there is still one Postgres and one Redis, so an outage of either is an outage of the deployment. That is a separate control, below: MULTI-REGION-FAILOVER.
+
+### MULTI-REGION-FAILOVER — one region, one Postgres, one Redis
+
+status: absent
+sources: SOC 2 A1.2 (recovery); MAS SAFR (continuity)
+claim: The deployment survives the loss of a region, a database node or a broker without a manual restore.
+evidence: README.md:251 expect:Not certified
+tests:
+gap: There is one Postgres and one Redis, in one region, on one host. The drill proves the failure modes DEGRADE rather than halt — an unreachable database answers 503 and leaves no half-written action, an unreachable provider escalates rather than allowing — but a lost region is an outage of the deployment. Active-active would need a second region with its own data, which is an architecture and a budget decision rather than a configuration one.
 
 ### SHUTDOWN-BOUNDED — deployment does not truncate in-flight work
 
@@ -215,56 +224,74 @@ evidence: apps/api/src/routes/health.ts:92 expect:not_ready
 tests: apps/api/test/health.test.ts
 note: Tenant-isolation posture is reported as a warning rather than a readiness gate, deliberately: a control that does not touch the request path should not pull a serving instance out of rotation.
 
-### OBSERVABILITY-SLOS — objectives that can fail
+### OBSERVABILITY-SLOS — objectives that can fail, and alerts that arrive somewhere
 
-status: partial
+status: implemented
 sources: SOC 2 CC7.2; MAS SAFR (monitoring)
-claim: Decision latency, availability and outbox lag are exposed with a bucket at the SLO boundary, evaluated with multi-window multi-burn-rate logic, and shipped as Prometheus rules plus a dashboard; the report exits non-zero when an objective is breached OR when it measured nothing.
-evidence: packages/observability/src/slos.ts:234 expect:SLOS; packages/observability/src/slos.ts:120 expect:burnRateForBudgetSpend; packages/observability/src/metrics.ts:32 expect:DECISION_BUCKETS_SECONDS; apps/api/src/observability.ts:215 expect:verifyAuditChains; apps/api/src/model.ts:85 expect:breakerStateValue
-tests: packages/observability/test/observability.test.ts; packages/observability/test/alert-rules.test.ts; apps/api/test/observability.test.ts
-gap: The alert rules evaluate and route through an Alertmanager, which is started by the deployment along with Prometheus, and the scrape target is confirmed up (`lastError` empty) with all nine rules loaded. The RECEIVER is a webhook whose URL is deployment configuration — no PagerDuty or Slack integration is wired, and the webhook is unset by default, in which case alerts are evaluated and then dropped. The `permit-single-use` objective is enforced by a conditional UPDATE and a unique constraint rather than by a scrapeable series, so it is reported as NOT_SCRAPEABLE instead of being turned into a permanently red gate.
+claim: Decision latency, availability and outbox lag are exposed with a bucket at the SLO boundary, evaluated with multi-window multi-burn-rate logic, and shipped as Prometheus rules plus a dashboard; the report exits non-zero when an objective is breached OR when it measured nothing. The rules are loaded by a Prometheus that the deployment starts and confirms is scraping, and the notifications reach an ALERT SINK in the API itself: a webhook endpoint that authenticates the sender, records what arrived and counts it. An alert is therefore never evaluated and then silently dropped.
+evidence: packages/observability/src/slos.ts:234 expect:SLOS; packages/observability/src/slos.ts:120 expect:burnRateForBudgetSpend; packages/observability/src/metrics.ts:32 expect:DECISION_BUCKETS_SECONDS; apps/api/src/observability.ts:215 expect:verifyAuditChains; apps/api/src/model.ts:85 expect:breakerStateValue; apps/api/src/routes/alerts.ts:156 expect:export async function
+tests: packages/observability/test/observability.test.ts; packages/observability/test/alert-rules.test.ts; apps/api/test/observability.test.ts; apps/api/test/alerts.test.ts
+note: The receiver is a webhook the operator can point elsewhere, and the API's own sink is the default so that the path is exercised whether or not a paging integration is configured. The `permit-single-use` objective is enforced by a conditional UPDATE and a unique constraint rather than by a scrapeable series, so it is reported as NOT_SCRAPEABLE instead of being turned into a permanently red gate.
 
 ### CHANGE-CONTROL — the gate is CI, not a promise
 
-status: partial
+status: implemented
 sources: SOC 2 CC8.1
 claim: CI is configured to run typecheck, lint, the full suite, build, format, the strict SLO report against a live stack, gitleaks, the dependency gate, the compliance evidence gate and the resilience drill on every push, and `main` is protected so a change cannot reach it without those checks passing.
 evidence: .github/workflows/ci.yml:255 expect:verify -- --strict; infra/migrations/0001_init.sql:26 expect:CREATE TABLE IF NOT EXISTS tenants; .github/workflows/auto-promote.yml:1 expect:Auto-promote; .github/workflows/deploy.yml:1 expect:Deploy; .github/workflows/main-gate.yml:1 expect:Main gate
-gap: The gates run on a SELF-HOSTED runner, because this account's hosted runners are refused with "your account is locked due to a billing issue" — a hosted-runner run would not start at all, so a hosted-only workflow would report green forever without running a step. That is an account billing state, not a repository setting, and it is the one thing here that only a person with payment access can clear. The runner is on the deploy host, which also runs the production stack and four other projects. Auto-promotion is limited to Dependabot's own dependency bumps: a human-authored change is merged by a human, because auto-merging one would let a push to a branch bypass review. Two properties of the promotion are worth stating because they are not obvious. First, a merge made with the workflow's own GITHUB_TOKEN does not trigger a push workflow, so the merged commit would reach main with nothing verifying it; the promotion therefore dispatches CI on the merge commit explicitly, and a scheduled reconciliation workflow (.github/workflows/main-gate.yml) covers a merge that lands after the promotion has finished waiting. Second, the required status checks are configured with `strict: false`: main now advances continuously through auto-merges, so requiring a pull request to be up to date with main would make every human pull request permanently stale and unmergeable. The gate that actually matters is the Deploy workflow's own check, which requires the three checks to have succeeded on the exact commit being shipped.
 tests: scripts/verify.mjs
+note: Auto-promotion is limited to Dependabot's own dependency bumps: a human-authored change is merged by a human, because auto-merging one would let a push to a branch bypass review. Two properties of the promotion are worth stating because they are not obvious. First, a merge made with the workflow's own GITHUB_TOKEN does not trigger a push workflow, so the merged commit would reach main with nothing verifying it; the promotion therefore dispatches CI on the merge commit explicitly, and a scheduled reconciliation workflow (.github/workflows/main-gate.yml) covers a merge that lands after the promotion has finished waiting. Second, the required status checks are configured with `strict: false`: main now advances continuously through auto-merges, so requiring a pull request to be up to date with main would make every human pull request permanently stale and unmergeable. The gate that actually matters is the Deploy workflow's own check, which requires the three checks to have succeeded on the exact commit being shipped. Where the CI runner itself is concerned — an account state and a shared host — see CI-RUNNER-ISOLATION below, which is a different concern with a different owner.
 
-### ENCRYPTION-AT-REST — not built here
+### CI-RUNNER-ISOLATION — the runner that executes the code is not isolated from production
 
-status: absent
+status: partial
+sources: SOC 2 CC6.1, CC6.8; OWASP (supply chain)
+claim: The runner that executes repository code is isolated from the production deployment it serves, so that code running in CI cannot reach production's data or its credentials.
+evidence: .github/workflows/ci.yml:20 expect:fork; .github/workflows/ci.yml:67 expect:github.event.pull_request.head.repo.fork
+tests:
+gap: A pull request from a FORK never reaches the self-hosted runner — it is directed to a hosted runner — so a stranger cannot get code execution on the machine that holds the deployment credentials and Docker access. That is the part that mattered most, and it is closed. What is not closed is the runner's own placement: it is on the deploy host, which also runs the production stack and four other projects, and it shares their disk. The reason is an account state, not a repository setting — this account's hosted runners are refused with "your account is locked due to a billing issue", so a hosted-runner workflow would report green forever without running a step. That is the one thing here only a person with payment access can clear, and the fix is a separate CI host.
+
+### ENCRYPTION-AT-REST — the application's own stored data is encrypted before it is written
+
+status: implemented
 sources: SOC 2 CC6.7; ISO 27001 (cryptography)
-claim: Nothing in this repository encrypts data at rest.
-evidence: infra/docker-compose.yml:44 expect:healthcheck:
-tests:
-gap: Left to the database platform (managed Postgres volume encryption / TDE). No implementation, no configuration, no evidence. Stated rather than implied by "secure by default".
+claim: Every payload this application writes that can contain personal data or secret material — the audit event payload, the outbox payload, the execution payload and the stored secret material — is encrypted with AES-256-GCM before it reaches the database, under a key derived from the server's master secret with a distinct domain-separation label per purpose. The stored bytes are ciphertext: a test reads the column directly and asserts the plaintext is not there. The audit chain is unaffected: the hash is computed over the CANONICAL PLAINTEXT and the ciphertext is written afterwards, so the chain still detects tampering — and a tampered ciphertext now fails twice over, the GCM authentication tag and the hash.
+evidence: packages/db/src/crypto.ts:139 expect:export function encrypt; packages/db/src/crypto.ts:117 expect:export function deriveKey; packages/db/src/repos/audit.ts:117 expect:decryptedAuditRow; infra/migrations/0009_encryption_at_rest.sql:20 expect:encrypted
+tests: packages/db/test/encryption.test.ts | stores the audit payload as ciphertext, not as the payload; packages/db/test/encryption.test.ts | fails verification when the stored ciphertext is altered; packages/db/test/encryption.test.ts | reads a payload written before encryption was enabled
+note: This is APPLICATION-level encryption: what the application stores is encrypted, and the database cannot read it. The VOLUME is not encrypted — that is the host platform's responsibility, and this host's disk is not encrypted. The two are different controls and only the first is claimed here.
 
-### BACKUP-AND-POINT-IN-TIME-RECOVERY — not built here
+### BACKUP-AND-POINT-IN-TIME-RECOVERY — a base backup, WAL archiving, and a drill that restores
 
-status: absent
+status: implemented
 sources: SOC 2 A1.2 (recovery)
-claim: There is no backup job, no restore procedure and no RPO/RTO measurement in this build.
-evidence: infra/migrations/0001_init.sql:26 expect:CREATE TABLE IF NOT EXISTS tenants
-tests:
-gap: `db:reset` truncates for development; it is not a recovery path. Real deployment needs PITR evidence before any availability claim is made.
+claim: The database is configured to archive its write-ahead log outside the data volume and to take periodic base backups, and a DRILL proves recovery works: it takes a base backup, writes a marker, restores into a SEPARATE temporary container with WAL replay, and asserts that the restored database contains the marker and that its schema and row counts are sane. The drill never touches the production container.
+evidence: infra/deploy/backup.sh:8 expect:pg_basebackup; infra/deploy/restore-drill.sh:3 expect:restore; infra/docker-compose.yml:114 expect:archive_mode
+tests: infra/deploy/restore-drill.sh | drill: restore the backup into a temporary container
+note: The backups and the WAL archive live outside the compose project, so `compose down -v` cannot destroy them, and the drill runs on a schedule rather than on every deploy — a restore takes time and disk. The drill is what makes this a control rather than a configuration: a backup that has never been restored is not a backup.
 
-### DATA-RETENTION-AND-DELETION — not built here
+### DATA-RETENTION-AND-DELETION — a window that is enforced, and a hold that stops it
 
-status: absent
+status: implemented
 sources: SOC 2 CC6.7, CC9.1; MAS SAFR (record retention)
-claim: Nothing enforces a retention period or a tenant data-deletion path; rows live until deleted by hand.
-evidence: infra/migrations/0001_init.sql:26 expect:CREATE TABLE IF NOT EXISTS tenants
-tests:
-gap: An append-only audit chain is in tension with erasure requests and the reconciliation (legal hold vs right to be forgotten) is unbuilt and unowned here.
+claim: A retention window is enforced by a sweep that ages the audit and outbox rows out, and a LEGAL HOLD stops it: a tenant under a hold is left exactly as it is, and the sweep says so rather than failing silently. Every pass records what it did — how many rows were purged, how many were relinked, whether a hold stopped it, and the chain hashes at the boundary — because a deletion that leaves no record is a deletion nobody can be asked about. The audit chain stays VERIFIABLE across a purge: the survivors are re-sequenced and re-linked, so the trail does not report itself as tampered because the retention sweep did its job.
+evidence: apps/worker/src/retention.ts:582 expect:export async function runRetentionSweep; infra/migrations/0010_retention_and_legal_hold.sql:152 expect:CREATE TABLE IF NOT EXISTS public.legal_holds
+tests: apps/worker/test/retention.test.ts | leaves the audit chain verifiable after a purge; apps/worker/test/retention.test.ts | removes nothing for a tenant under a legal hold, and says so; apps/worker/test/retention.test.ts | records what it purged
+note: A purge cannot remove the chain's last event without re-anchoring the chain, so the retention window and the chain's integrity are reconciled by relinking rather than by leaving a hole. The window itself is a deployment configuration, and the hold is per tenant with a named operator and a release reason.
 
-### PENETRATION-TEST-AND-INDEPENDENT-REVIEW — not done
+### ADVERSARIAL-SECURITY-REVIEW — a review was performed, and what it found is recorded
+
+status: implemented
+sources: SOC 2 CC4.1, CC7.2; OWASP (design review)
+claim: An adversarial review of the whole build was performed during the hardening work, every finding was reproduced before it was fixed, and the register of findings — with severities, resolutions and the commits that closed them — is committed alongside the code. Twenty-seven findings, including four that disabled a control the repository claimed: the deployment ran as the role that row-level security does not bind, the blind escape hatch was a write grant on two tables, the quorum did not exclude the requester, and a merge made with the workflow's own token reached `main` with nothing verifying it.
+evidence: docs/security-review.md:1 expect:Security review; docs/security-review.md:52 expect:Twenty-seven findings; docs/security-review.md:98 expect:Residual and accepted risks
+tests: docs/security-review.md
+note: The review was performed by an automated code reviewer running inside this repository, and the triage was done by the author. It is worth something and it is not the same thing as an independent review — see the next control, which is separate precisely so that the two are not conflated.
+
+### INDEPENDENT-THIRD-PARTY-REVIEW — not done
 
 status: absent
 sources: SOC 2 CC4.1, CC9.2
 claim: No third-party assessment, penetration test or attestation has been performed on this code.
-evidence: README.md:251 expect:Not certified
+evidence: README.md:259 expect:Not certified
 tests:
-gap: Everything in this file is self-asserted against self-written tests. That is the honest boundary of a hackathon build, and the README says so.
+gap: An internal review by the author of the code cannot stand in for an external one, and this repository does not pretend otherwise. What an external reviewer would need to cover is listed in docs/security-review.md section 4: the authorization path itself, the key-derivation and encryption scheme, the deployment as an operator sees it, and whether the audit chain has a second way to reconstruct one that verifies. That work needs a party who did not write this code and a budget to pay them; until then it is absent rather than implied.

@@ -3,7 +3,7 @@
  * scripts/audit-gate.mjs — dependency vulnerabilities, gated by exception rather
  * than by threshold.
  *
- * `npm audit --audit-level=low` on a tree that already has four highs is a red CI
+ * `npm audit --audit-level=low` on a tree that already has highs is a red CI
  * on the day it is added, which means it gets removed or loosened. Setting the
  * level to "critical" instead is worse, because it silently accepts everything
  * short of critical forever.
@@ -13,6 +13,20 @@
  * fails a listed exception whose review date has passed. A new advisory therefore
  * cannot be absorbed without someone writing down why, and an accepted one cannot
  * quietly become permanent.
+ *
+ * The scope is the WHOLE dependency tree, devDependencies included. The gate
+ * used to run `npm audit --omit=dev`, which meant an advisory that only
+ * existed in a build-time dependency was invisible to it — and a build-time
+ * dependency is still code that runs on a developer's machine and in CI, on a
+ * pull request, with the repository's secrets in reach. A gate that only
+ * watches half the tree is a gate that reports on half the risk.
+ *
+ * Every advisory the audit reports must be named, not merely every package: a
+ * package that carries three advisories is three separate findings, and a new
+ * advisory on a package that is already excepted has to fail the build like
+ * any other. Each named advisory carries a reason, a compensating control, the
+ * reviewer who decided, the date they decided, and the date it must be looked
+ * at again.
  *
  * Exit codes: 0 nothing unexpected; 1 unlisted or expired exception found —
  * and 1 also when the audit itself could not be produced, because an audit
@@ -27,7 +41,6 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EXCEPTIONS_FILE = path.join(root, 'infra', 'security', 'dependency-exceptions.json');
 const asJson = process.argv.includes('--json');
-const includeDev = process.argv.includes('--dev');
 
 /**
  * The audit could not be produced.
@@ -104,8 +117,11 @@ function readAuditReport(stdout, failure) {
 }
 
 function loadAudit() {
-  const args = ['audit', '--json', '--omit=dev'];
-  if (includeDev) args.splice(1, 0, '--include=dev');
+  // The whole tree, devDependencies included. `--omit=dev` was what left
+  // build-time advisories outside the gate, and the `--dev` flag that used to
+  // widen the scope is now the default: it is still accepted so an existing
+  // invocation does not break, and it changes nothing.
+  const args = ['audit', '--json'];
   try {
     const out = execFileSync('npm', args, {
       cwd: root,
@@ -135,82 +151,171 @@ function loadAudit() {
   }
 }
 
-/**
- * The set of findings an exception has to cover.
- *
- * Deliberately the same set `npm audit` summarises: any package that is either a
- * direct dependency or carries an advisory of its own. Filtering to
- * direct-dependency-with-inline-advisory-only looked tidy and silently dropped
- * transitive highs (`postcss` reached through `next`) — which is the exact class
- * of finding a reviewer expects the gate to have seen.
- *
- * Severity is not a filter here. Threshold-based acceptance is what this script
- * replaces: the exceptions list is the allowlist, so a moderate must be named too,
- * or "moderate" becomes the place things hide.
- */
-function vulnerablePackages(audit) {
-  const out = [];
-  for (const [name, entry] of Object.entries(audit.vulnerabilities ?? {})) {
-    const advisories = (entry.via ?? []).filter((v) => typeof v === 'object');
-    if (!entry.isDirect && advisories.length === 0) continue;
-    if (!entry.severity) continue;
-    for (const advisory of advisories.length ? advisories : [{}]) {
-      out.push({
-        package: name,
-        severity: advisory.severity ?? entry.severity,
-        title: advisory.title ?? '',
-        range: advisory.vulnerable_versions ?? entry.range,
-        github: advisory.github_advisory_id ?? '',
-        cve: advisory.cve ?? '',
-        direct: Boolean(entry.isDirect),
-      });
-    }
-    if (advisories.length === 0 && !out.some((f) => f.package === name && f.title === '')) {
-      out.push({
-        package: name,
-        severity: entry.severity,
-        title: '',
-        range: entry.range,
-        github: '',
-        cve: '',
-        direct: true,
-      });
-    }
-  }
-  return out;
+/** Severity order, for "the severity rose" checks. */
+const SEVERITY_RANK = { info: 0, low: 1, moderate: 2, high: 3, critical: 4 };
+
+function severityRank(severity) {
+  return SEVERITY_RANK[String(severity ?? '').toLowerCase()] ?? -1;
 }
 
-function main() {
-  const exceptions = JSON.parse(readFileSync(EXCEPTIONS_FILE, 'utf8'));
-  const listed = new Map((exceptions.exceptions ?? []).map((e) => [e.package, e]));
-  const today = new Date();
-  // One finding per package: a package carrying three advisories is still one
-  // dependency decision, and listing it three times would make the exception file
-  // look like it covers three separate things.
-  const seen = new Set();
-  const findings = vulnerablePackages(loadAudit()).filter((f) => {
-    if (seen.has(f.package)) return false;
-    seen.add(f.package);
-    return true;
-  });
+/**
+ * The identifier of an advisory.
+ *
+ * npm's own report does not carry `github_advisory_id`; it carries a numeric
+ * `source` and a URL, and the URL is where the GHSA id lives. The id is what
+ * an exception names, so it has to be the one a reader can look up — and the
+ * numeric source id changes when the advisory is republished.
+ */
+function advisoryId(advisory) {
+  if (advisory.github_advisory_id) return String(advisory.github_advisory_id);
+  const url = typeof advisory.url === 'string' ? advisory.url : '';
+  const match = /GHSA-[0-9a-z-]+/i.exec(url);
+  if (match) return match[0];
+  if (advisory.source) return `npm-${advisory.source}`;
+  return '';
+}
 
+/**
+ * Every advisory the audit reports, one finding each.
+ *
+ * Not one finding per package: a package carrying three advisories is three
+ * separate findings, and the exception that accepts one of them says nothing
+ * about the other two. An advisory that npm reports through another package
+ * (`via: ['postcss']`) has no identifier of its own — it is the same advisory,
+ * counted against the package that pulls it in — and is reported as a finding
+ * with no id, carrying the package it inherits from.
+ *
+ * Severity is not a filter here. Threshold-based acceptance is what this script
+ * replaces: the exceptions list is the allowlist, so a moderate must be named
+ * too, or "moderate" becomes the place things hide.
+ */
+function auditFindings(audit) {
+  const findings = [];
+  for (const [name, entry] of Object.entries(audit.vulnerabilities ?? {})) {
+    const advisories = (entry.via ?? []).filter((v) => typeof v === 'object');
+    const inheritedFrom = (entry.via ?? []).filter((v) => typeof v === 'string');
+    if (!entry.isDirect && advisories.length === 0 && inheritedFrom.length === 0) continue;
+    if (!entry.severity) continue;
+    if (advisories.length > 0) {
+      for (const advisory of advisories) {
+        findings.push({
+          package: name,
+          id: advisoryId(advisory),
+          title: advisory.title ?? '',
+          severity: advisory.severity ?? entry.severity,
+          packageSeverity: entry.severity,
+          range: advisory.vulnerable_versions ?? advisory.range ?? entry.range,
+          github: advisoryId(advisory),
+          cve: advisory.cve ?? '',
+          direct: Boolean(entry.isDirect),
+          inheritsFrom: inheritedFrom.join(','),
+        });
+      }
+      continue;
+    }
+    // The package carries no advisory of its own: it inherits one.
+    findings.push({
+      package: name,
+      id: '',
+      title: '',
+      severity: entry.severity,
+      packageSeverity: entry.severity,
+      range: entry.range,
+      github: '',
+      cve: '',
+      direct: Boolean(entry.isDirect),
+      inheritsFrom: inheritedFrom.join(','),
+    });
+  }
+  return findings;
+}
+
+function describeFinding(finding) {
+  const what = finding.title ? `${finding.title}` : `inherits the advisory of ${finding.inheritsFrom}`;
+  return `${finding.id ? `${finding.id} ` : ''}${what}`;
+}
+
+/**
+ * The decision: what is accepted, what is a problem, and what is stale.
+ *
+ * Separated from `main()` so the self-test can feed it a report that was
+ * never going to come out of npm — including a report with an advisory that
+ * nobody has named, which is the failure this gate exists to catch.
+ */
+function evaluate(audit, exceptions, today) {
+  const listed = new Map((exceptions.exceptions ?? []).map((e) => [e.package, e]));
+  const findings = auditFindings(audit);
   const problems = [];
   const accepted = [];
+  const named = new Set();
+
   for (const finding of findings) {
     const exception = listed.get(finding.package);
     if (!exception) {
       problems.push(
-        `${finding.package} (${finding.severity}): ${finding.title} — not listed in ${path.relative(root, EXCEPTIONS_FILE)}`,
+        `${finding.package} (${finding.severity}): ${describeFinding(finding)} — not listed in ${path.relative(root, EXCEPTIONS_FILE)}`,
       );
       continue;
     }
-    if (
-      ['high', 'critical'].includes(String(exception.severity ?? '').toLowerCase()) === false &&
-      ['high', 'critical'].includes(finding.severity)
-    ) {
+
+    // The advisory itself has to be named, not just the package it lives in.
+    // This is what makes a NEW advisory fail the build even on a package that
+    // is already excepted.
+    const advisories = Array.isArray(exception.advisories) ? exception.advisories : [];
+    if (finding.id) {
+      const namedAdvisory = advisories.find((a) => a && a.id === finding.id);
+      if (!namedAdvisory) {
+        problems.push(
+          `${finding.package}: advisory ${finding.id} (${finding.title}) is not named in the exception for ${finding.package}`,
+        );
+        continue;
+      }
+      const recorded = namedAdvisory.severity ?? exception.severity;
+      if (severityRank(finding.severity) > severityRank(recorded)) {
+        problems.push(
+          `${finding.package}: advisory ${finding.id} rose to ${finding.severity} but the exception records ${recorded}`,
+        );
+        continue;
+      }
+    }
+
+    // An exception that says which advisory it inherits has to still inherit
+    // it: a dependency that has been replaced stops being an exception for
+    // something and becomes an exception for nothing.
+    if (exception.inheritsFrom && !finding.inheritsFrom.split(',').includes(exception.inheritsFrom)) {
       problems.push(
-        `${finding.package}: severity rose to ${finding.severity} but the recorded exception was ${exception.severity}`,
+        `${finding.package}: the exception says it inherits the advisory of ${exception.inheritsFrom}, but the audit no longer reports that`,
       );
+      continue;
+    }
+
+    // The package-level severity: a package whose worst advisory got worse
+    // must be looked at again.
+    if (severityRank(finding.packageSeverity) > severityRank(exception.severity)) {
+      problems.push(
+        `${finding.package}: severity rose to ${finding.packageSeverity} but the recorded exception was ${exception.severity}`,
+      );
+      continue;
+    }
+
+    // The paperwork. A reason, what mitigates it here, who decided, when they
+    // decided, and when it has to be looked at again: an exception without
+    // those is a decision nobody made.
+    if (!Array.isArray(exception.acceptedBecause) || exception.acceptedBecause.length === 0) {
+      problems.push(`${finding.package}: exception records no acceptedBecause reason`);
+      continue;
+    }
+    if (!exception.compensatingControl) {
+      problems.push(`${finding.package}: exception records no compensatingControl`);
+      continue;
+    }
+    if (!exception.decidedBy) {
+      problems.push(`${finding.package}: exception records no decidedBy reviewer`);
+      continue;
+    }
+    const decidedOn = exception.decidedOn ? new Date(exception.decidedOn) : null;
+    if (!decidedOn || Number.isNaN(decidedOn.getTime())) {
+      problems.push(`${finding.package}: exception records no usable decidedOn date`);
       continue;
     }
     const reviewBy = exception.reviewBy ? new Date(exception.reviewBy) : null;
@@ -224,15 +329,10 @@ function main() {
       );
       continue;
     }
-    if (!Array.isArray(exception.acceptedBecause) || exception.acceptedBecause.length === 0) {
-      problems.push(`${finding.package}: exception records no acceptedBecause reason`);
-      continue;
-    }
-    if (!exception.compensatingControl) {
-      problems.push(`${finding.package}: exception records no compensatingControl`);
-      continue;
-    }
-    accepted.push(`${finding.package} (${finding.severity}) accepted until ${exception.reviewBy}`);
+    named.add(finding.package);
+    accepted.push(
+      `${finding.package} (${finding.severity}${finding.id ? ` ${finding.id}` : ''}) accepted until ${exception.reviewBy}`,
+    );
   }
 
   // An exception for something no longer vulnerable is noise that hides real
@@ -240,11 +340,18 @@ function main() {
   const stillVulnerable = new Set(findings.map((f) => f.package));
   const stale = [...listed.keys()].filter((name) => !stillVulnerable.has(name));
 
+  return { findings, problems, accepted, stale };
+}
+
+function main() {
+  const exceptions = JSON.parse(readFileSync(EXCEPTIONS_FILE, 'utf8'));
+  const { findings, problems, accepted, stale } = evaluate(loadAudit(), exceptions, new Date());
+
   const verdict = problems.length === 0 ? 'PASS' : 'FAIL';
   if (asJson) {
     console.log(JSON.stringify({ verdict, findings, problems, accepted, staleExceptions: stale }, null, 2));
   } else {
-    console.log(`\ndependency audit gate — ${verdict}  (${findings.length} direct advisory finding(s))`);
+    console.log(`\ndependency audit gate — ${verdict}  (${findings.length} advisory finding(s), whole tree)`);
     for (const line of accepted) console.log(`  accepted  ${line}`);
     for (const line of problems) console.log(`  PROBLEM   ${line}`);
     for (const name of stale) console.log(`  stale     ${name}: no longer vulnerable, remove the exception`);
@@ -254,7 +361,8 @@ function main() {
 }
 
 /**
- * The gate's own parser, checked against the shapes npm actually produces.
+ * The gate's own parser and rules, checked against the shapes npm actually
+ * produces.
  *
  * `--self-test` exists because the failure this file had is the kind that
  * nothing around it catches: npm's error envelope parsed as an empty report,
@@ -311,7 +419,157 @@ function selfTest() {
     }
   }
 
-  console.log(`audit gate self-test — ${problems.length === 0 ? 'PASS' : 'FAIL'}: ${cases.length} case(s)`);
+  // The rule, checked against a report that could not have come out of npm:
+  // an advisory nobody has named is a problem, and so is an exception whose
+  // review date has passed. Both are what the gate exists for, and both are
+  // the kind of thing that stops being true without anybody noticing.
+  const today = new Date('2026-10-29T00:00:00Z');
+  const ruleCases = [
+    {
+      name: 'an advisory nobody named is a problem',
+      audit: {
+        vulnerabilities: {
+          leftpad: {
+            severity: 'high',
+            isDirect: true,
+            range: '<1.0.0',
+            via: [
+              {
+                severity: 'high',
+                title: 'Left-pad is not a security control',
+                github_advisory_id: 'GHSA-self-test-0001',
+                vulnerable_versions: '<1.0.0',
+              },
+            ],
+          },
+        },
+      },
+      exceptions: { exceptions: [] },
+      expectProblem: /not listed/,
+    },
+    {
+      name: 'an advisory on an excepted package that is not named is a problem',
+      audit: {
+        vulnerabilities: {
+          leftpad: {
+            severity: 'high',
+            isDirect: true,
+            range: '<1.0.0',
+            via: [
+              {
+                severity: 'high',
+                title: 'Left-pad is not a security control',
+                github_advisory_id: 'GHSA-self-test-0002',
+                vulnerable_versions: '<1.0.0',
+              },
+            ],
+          },
+        },
+      },
+      exceptions: {
+        exceptions: [
+          {
+            package: 'leftpad',
+            severity: 'high',
+            advisories: [{ id: 'GHSA-self-test-0001', severity: 'high' }],
+            acceptedBecause: ['because'],
+            compensatingControl: 'a control',
+            decidedBy: 'the self-test',
+            decidedOn: '2026-01-01',
+            reviewBy: '2027-01-01',
+          },
+        ],
+      },
+      expectProblem: /is not named in the exception/,
+    },
+    {
+      name: 'an expired exception is a problem',
+      audit: {
+        vulnerabilities: {
+          leftpad: {
+            severity: 'high',
+            isDirect: true,
+            range: '<1.0.0',
+            via: [
+              {
+                severity: 'high',
+                title: 'Left-pad is not a security control',
+                github_advisory_id: 'GHSA-self-test-0001',
+                vulnerable_versions: '<1.0.0',
+              },
+            ],
+          },
+        },
+      },
+      exceptions: {
+        exceptions: [
+          {
+            package: 'leftpad',
+            severity: 'high',
+            advisories: [{ id: 'GHSA-self-test-0001', severity: 'high' }],
+            acceptedBecause: ['because'],
+            compensatingControl: 'a control',
+            decidedBy: 'the self-test',
+            decidedOn: '2026-01-01',
+            reviewBy: '2026-02-01',
+          },
+        ],
+      },
+      expectProblem: /expired/,
+    },
+    {
+      name: 'a fully named and in-date exception is accepted',
+      audit: {
+        vulnerabilities: {
+          leftpad: {
+            severity: 'high',
+            isDirect: true,
+            range: '<1.0.0',
+            via: [
+              {
+                severity: 'high',
+                title: 'Left-pad is not a security control',
+                github_advisory_id: 'GHSA-self-test-0001',
+                vulnerable_versions: '<1.0.0',
+              },
+            ],
+          },
+        },
+      },
+      exceptions: {
+        exceptions: [
+          {
+            package: 'leftpad',
+            severity: 'high',
+            advisories: [{ id: 'GHSA-self-test-0001', severity: 'high' }],
+            acceptedBecause: ['because'],
+            compensatingControl: 'a control',
+            decidedBy: 'the self-test',
+            decidedOn: '2026-01-01',
+            reviewBy: '2027-01-01',
+          },
+        ],
+      },
+      expectProblem: null,
+    },
+  ];
+
+  for (const c of ruleCases) {
+    const result = evaluate(c.audit, c.exceptions, today);
+    if (c.expectProblem) {
+      if (!result.problems.some((p) => c.expectProblem.test(p))) {
+        problems.push(
+          `${c.name}: expected a problem matching ${c.expectProblem}, got ${JSON.stringify(result.problems)}`,
+        );
+      }
+    } else if (result.problems.length > 0) {
+      problems.push(`${c.name}: expected no problems, got ${JSON.stringify(result.problems)}`);
+    }
+  }
+
+  console.log(
+    `audit gate self-test — ${problems.length === 0 ? 'PASS' : 'FAIL'}: ${cases.length + ruleCases.length} case(s)`,
+  );
   for (const problem of problems) console.error(`  ✗ ${problem}`);
   if (problems.length > 0) process.exitCode = 1;
 }

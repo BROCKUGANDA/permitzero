@@ -33,7 +33,40 @@ export interface WorkerConfig {
   reconcileGraceMs: number;
   /** Bounded drain on SIGTERM; keep below the orchestrator's kill timeout. */
   shutdownGraceMs: number;
+  /**
+   * Retention: whether the sweep runs at all.
+   *
+   * Optional on the interface only because the worker test harness builds a
+   * `WorkerConfig` literal of its own; `loadWorkerConfig` always sets all four
+   * retention fields, so a running worker never sees an undefined value.
+   */
+  retentionEnabled?: boolean;
+  /** Milliseconds between retention passes. */
+  retentionSweepIntervalMs?: number;
+  /** Days an audit event is kept before the sweep may remove it. */
+  auditRetentionDays?: number;
+  /** Days a delivery record is kept before the sweep may remove it. */
+  outboxRetentionDays?: number;
 }
+
+/**
+ * The retention defaults.
+ *
+ * Exported so `loadWorkerConfig` and the call site that starts the sweep read
+ * the same numbers: a default that is written down twice is a default that
+ * will be changed in one place.
+ *
+ * The audit window is a year because an audit trail that disappears on a
+ * shorter horizon stops being evidence for most of the disputes it exists
+ * for. The outbox window is a month because an outbox row is a delivery
+ * record, not a record of what was decided.
+ */
+export const RETENTION_DEFAULTS = {
+  enabled: true,
+  sweepIntervalMs: 3_600_000,
+  auditRetentionDays: 365,
+  outboxRetentionDays: 30,
+} as const;
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name];
@@ -51,6 +84,23 @@ function intIn(env: NodeJS.ProcessEnv, name: string, def: number, min: number, m
     throw new Error(`${name} must be an integer within ${min}..${max}.`);
   }
   return parsed;
+}
+
+/**
+ * A boolean from the environment, validated rather than coerced.
+ *
+ * `Boolean('false')` is true, so a configuration written as `RETENTION_ENABLED=false`
+ * that reached a naive parser would ENABLE the thing the operator was trying
+ * to turn off — and the thing it turns off is the deletion of their own audit
+ * trail. A control that can only be enabled, never disabled, is not a control.
+ */
+function boolIn(env: NodeJS.ProcessEnv, name: string, def: boolean): boolean {
+  const raw = env[name];
+  if (raw === undefined || raw === '') return def;
+  const lowered = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(lowered)) return true;
+  if (['0', 'false', 'no', 'off'].includes(lowered)) return false;
+  throw new Error(`${name} must be a boolean (true/false), got "${raw}".`);
 }
 
 export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
@@ -85,5 +135,18 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     jobAttempts: intIn(env, 'JOB_ATTEMPTS', 5, 1, 25),
     workerConcurrency: intIn(env, 'WORKER_CONCURRENCY', 5, 1, 100),
     reconcileGraceMs: intIn(env, 'RECONCILE_GRACE_MS', 30_000, 0, 3_600_000),
+    // The retention window is bounded below by a day (a window shorter than
+    // that is a mistake, not a policy) and above by ten years (past that the
+    // "audit trail" is a storage decision rather than a retention one).
+    retentionEnabled: boolIn(env, 'RETENTION_ENABLED', RETENTION_DEFAULTS.enabled),
+    retentionSweepIntervalMs: intIn(
+      env,
+      'RETENTION_SWEEP_INTERVAL_MS',
+      RETENTION_DEFAULTS.sweepIntervalMs,
+      60_000,
+      86_400_000,
+    ),
+    auditRetentionDays: intIn(env, 'AUDIT_RETENTION_DAYS', RETENTION_DEFAULTS.auditRetentionDays, 1, 3650),
+    outboxRetentionDays: intIn(env, 'OUTBOX_RETENTION_DAYS', RETENTION_DEFAULTS.outboxRetentionDays, 1, 3650),
   };
 }

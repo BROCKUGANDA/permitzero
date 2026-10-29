@@ -45,12 +45,25 @@ const MIN_CONTROLS = 20;
  * relabelled as though it had been built, the gate fails. They are the honest
  * boundary of this build, not a to-do list to be quietly trimmed.
  */
-const REQUIRED_ABSENT = [
-  'ENCRYPTION-AT-REST',
-  'BACKUP-AND-POINT-IN-TIME-RECOVERY',
-  'DATA-RETENTION-AND-DELETION',
-  'PENETRATION-TEST-AND-INDEPENDENT-REVIEW',
-];
+const REQUIRED_ABSENT = ['INDEPENDENT-THIRD-PARTY-REVIEW'];
+
+/**
+ * Controls that were absent and have since been BUILT.
+ *
+ * They are named here so that the gate holds the line in the other
+ * direction: a control that was once a documented gap cannot quietly go
+ * back to being a gap just because someone deleted the implementation and
+ * relabelled the row. Each of these must be `implemented`.
+ *
+ * The three that moved here were absent when this file was written and were
+ * closed by real work — the encryption-at-rest implementation, the backup
+ * and point-in-time-recovery drill, and the retention sweep with its legal
+ * hold. `PENETRATION-TEST-AND-INDEPENDENT-REVIEW` was split rather than
+ * closed: the internal adversarial review was performed and is recorded, and
+ * the external one is a different control with a different owner, so it
+ * remains absent under its own name.
+ */
+const CLOSED_CONTROLS = ['ENCRYPTION-AT-REST', 'BACKUP-AND-POINT-IN-TIME-RECOVERY', 'DATA-RETENTION-AND-DELETION'];
 
 /**
  * The alert runbooks.
@@ -299,6 +312,17 @@ function main() {
     if (!control) fail('map', `${id} is missing from the map — the documented absence was deleted rather than fixed`);
     else if ((control.fields.status ?? '').trim() !== 'absent') {
       fail('map', `${id} is no longer marked absent while nothing has been built for it`);
+    }
+  }
+  for (const id of CLOSED_CONTROLS) {
+    const control = controls.find((c) => c.id === id);
+    if (!control) {
+      fail('map', `${id} is missing from the map — a control that was built was deleted`);
+    } else if ((control.fields.status ?? '').trim() !== 'implemented') {
+      fail(
+        'map',
+        `${id} was closed by real work and must stay marked implemented — a deleted implementation is not a closed control`,
+      );
     }
   }
   const withGap = controls.filter((c) => {
