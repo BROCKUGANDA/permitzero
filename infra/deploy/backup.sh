@@ -125,14 +125,22 @@ echo "== pruning WAL archive (keeping ${WAL_KEEP_DAYS}d beyond retained backups)
 oldest_kept=$($COMPOSE exec -T --user root postgres sh -c \
   "ls -1dt /var/lib/postgresql/base-backups/*/ 2>/dev/null | tail -n 1" | tr -d '[:space:]')
 if [ -n "$oldest_kept" ]; then
-  # pg_archivecleanup knows which segments are required for PITR to that
-  # backup — it is the right tool, and a file-age fallback would delete
-  # segments the backup still needs.
-  $COMPOSE exec -T --user postgres postgres sh -c \
-    "if command -v pg_archivecleanup >/dev/null 2>&1; then pg_archivecleanup -d /var/lib/postgresql/wal-archive \"\$(basename \"$oldest_kept\")\" 2>/dev/null | sed 's/^/   WAL archive:/'; else echo '   pg_archivecleanup not available; falling back to mtime pruning' >&2; find /var/lib/postgresql/wal-archive -type f -name '*.gz' -o -name '[0-9A-F]*' 2>/dev/null | xargs -r ls -l 2>/dev/null | head -3; fi"
+  # pg_archivecleanup needs the WAL segment name of the oldest retained backup,
+  # not its directory name. The segment is recorded in the backup_label file
+  # inside base.tar.gz (START WAL LOCATION: ... (file ...)).
+  start_wal=$($COMPOSE exec -T --user root postgres sh -c \
+    "tar -xOf '${oldest_kept}base.tar.gz' backup_label 2>/dev/null | sed -n 's/^START WAL LOCATION: .* (file \([^)]*\))$/\\1/p' | head -n 1" | tr -d '[:space:]')
+  if [ -n "$start_wal" ]; then
+    echo "   oldest retained backup needs WAL segment $start_wal"
+    $COMPOSE exec -T --user postgres postgres sh -c \
+      "if command -v pg_archivecleanup >/dev/null 2>&1; then pg_archivecleanup -d /var/lib/postgresql/wal-archive '$start_wal' 2>/dev/null || echo '   pg_archivecleanup reported an error (continuing)'; else echo '   pg_archivecleanup not available; falling back to mtime pruning'; fi"
+  else
+    echo "   could not determine the start WAL of the oldest retained backup; skipping pg_archivecleanup"
+  fi
   # Also remove archive segments older than the wall-clock window that are
   # beyond what pg_archivecleanup would keep — a stalled base-backup schedule
-  # must not pin the archive forever.
+  # must not pin the archive forever. This is a fallback, not a substitute:
+  # pg_archivecleanup above is the precise control.
   $COMPOSE exec -T --user root postgres sh -c \
     "find /var/lib/postgresql/wal-archive -type f -mtime +${WAL_KEEP_DAYS} -delete 2>/dev/null; echo \"   WAL mtime prune: removed segments older than ${WAL_KEEP_DAYS} days (if any)\""
 else
