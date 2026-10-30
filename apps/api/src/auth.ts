@@ -157,6 +157,20 @@ export function requireApprover(principal: Principal): void {
   }
 }
 
+/**
+ * Humans only.
+ *
+ * An agent credential and a service credential have no person behind them, so
+ * there is nobody to enrol a second factor for. A step-up assertion issued
+ * to one of them would be a second factor that is not one: the code would
+ * come from whatever the agent was told to type.
+ */
+export function requireHumanUser(principal: Principal): void {
+  if (principal.actorType !== 'USER') {
+    throw new ForbiddenError('This action requires a human account.');
+  }
+}
+
 /** Who may spend a permit: the owning agent, an operator-grade human, or a service. */
 export function canExecuteFor(principal: Principal, action: ActionRecord): boolean {
   if (principal.actorType === 'WORKER') return true;

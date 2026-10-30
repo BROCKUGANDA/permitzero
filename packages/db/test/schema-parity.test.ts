@@ -146,6 +146,13 @@ describe('schema parity', () => {
       purchase_orders: ['chk_purchase_orders_amount_nonneg', 'chk_purchase_orders_currency_shape'],
       connector_ledger: ['chk_connector_ledger_amount_nonneg', 'chk_connector_ledger_currency_shape'],
       connector_dispatches: ['chk_dispatches_completed'],
+      mfa_secrets: ['chk_mfa_secrets_encrypted_shape'],
+      legal_holds: [
+        'chk_legal_holds_reason_nonempty',
+        'chk_legal_holds_operator_nonempty',
+        'chk_legal_holds_release_after_placement',
+      ],
+      retention_runs: ['chk_retention_runs_outcome', 'chk_retention_runs_counts_nonneg'],
     };
     for (const table of ALL_TABLES) {
       const name = getTableName(table);
@@ -205,6 +212,9 @@ describe('schema parity', () => {
       '0005_credential_names_outbox_freeze.sql',
       '0006_row_level_security.sql',
       '0007_rls_write_scope.sql',
+      '0008_mfa_totp.sql',
+      '0009_encryption_at_rest.sql',
+      '0010_retention_and_legal_hold.sql',
     ]);
   });
 });

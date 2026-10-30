@@ -3,13 +3,45 @@
  * is a single conditional UPDATE (`consumed_at IS NULL AND revoked_at IS
  * NULL`); exactly one concurrent consumer wins and revocation always wins the
  * race against consumption.
+ *
+ * The execution receipt is stored ENCRYPTED and read back in the clear. A
+ * receipt carries the external reference, the amount and the beneficiary
+ * reference of a payment that actually happened — the most concrete personal
+ * and financial data this schema holds — so it is not left in the clear in a
+ * backup. The mapper that turns a receipt row into a domain receipt is
+ * unchanged: the repository decrypts at the boundary, so every consumer sees
+ * what it always saw.
  */
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { ExecutionResultUpdate, PersistedExecution, PersistedPermit } from '@permitzero/broker';
 import type { DbExecutor } from '../client.js';
+import { currentKey, deriveKey, encryptNullableColumn, readColumn, verificationKeys } from '../crypto.js';
 import { toPersistedPermit } from '../mappers.js';
 import { executions, permits } from '../schema.js';
 import type { ExecutionRow, PermitRow } from '../schema.js';
+
+/** The domain-separation label for the execution receipt's encryption key. */
+const EXECUTION_PAYLOAD_PURPOSE = 'execution-payload';
+
+/** The keys that may decrypt an execution receipt. */
+function payloadKeys(explicit?: string | null): Buffer[] {
+  const masters: string[] = [];
+  for (const master of [explicit, ...verificationKeys()]) {
+    if (typeof master === 'string' && master.length > 0 && !masters.includes(master)) masters.push(master);
+  }
+  return masters.map((master) => deriveKey(master, EXECUTION_PAYLOAD_PURPOSE));
+}
+
+/**
+ * The row as the application sees it: the receipt in the clear.
+ *
+ * A receipt written before encryption was enabled holds plaintext and is read
+ * as it is, so encryption can be switched on without rewriting the execution
+ * history.
+ */
+function withDecryptedReceipt(row: ExecutionRow, keys: readonly Buffer[]): ExecutionRow {
+  return { ...row, receiptJson: readColumn<Record<string, unknown> | null>(row.receiptJson, keys) };
+}
 
 async function first<T>(rows: Promise<T[]>): Promise<T | null> {
   const [row] = await rows;
@@ -161,7 +193,13 @@ export async function revokePermitsByAction(
   return updated.length;
 }
 
-export async function insertExecution(ex: DbExecutor, execution: PersistedExecution): Promise<ExecutionRow> {
+export async function insertExecution(
+  ex: DbExecutor,
+  execution: PersistedExecution,
+  opts?: { hmacKey?: string | null },
+): Promise<ExecutionRow> {
+  const master = opts?.hmacKey ?? currentKey();
+  const receipt = serializeReceipt(execution.receipt);
   const [row] = await ex
     .insert(executions)
     .values({
@@ -176,7 +214,7 @@ export async function insertExecution(ex: DbExecutor, execution: PersistedExecut
       resultReceivedAt: execution.resultReceivedAt,
       externalReference: execution.externalReference,
       receiptHash: execution.receiptHash,
-      receiptJson: serializeReceipt(execution.receipt),
+      receiptJson: master ? encryptNullableColumn(receipt, deriveKey(master, EXECUTION_PAYLOAD_PURPOSE)) : receipt,
       errorClass: execution.errorClass,
       retryAfterAt: execution.retryAfterAt,
       permitId: execution.permitId,
@@ -188,7 +226,7 @@ export async function insertExecution(ex: DbExecutor, execution: PersistedExecut
     })
     .returning();
   if (!row) throw new Error('execution insert returned no row');
-  return row;
+  return withDecryptedReceipt(row, payloadKeys(master));
 }
 
 export async function markExecutionDispatched(
@@ -208,17 +246,25 @@ export async function markExecutionDispatched(
       ),
     )
     .returning();
-  if (updated[0]) return updated[0];
-  return first(
+  const keys = payloadKeys();
+  if (updated[0]) return withDecryptedReceipt(updated[0], keys);
+  const row = await first(
     ex
       .select()
       .from(executions)
       .where(and(eq(executions.executionId, executionId), eq(executions.tenantId, tenantId)))
       .limit(1),
   );
+  return row ? withDecryptedReceipt(row, keys) : null;
 }
 
-export async function markExecutionResult(ex: DbExecutor, update: ExecutionResultUpdate): Promise<ExecutionRow | null> {
+export async function markExecutionResult(
+  ex: DbExecutor,
+  update: ExecutionResultUpdate,
+  opts?: { hmacKey?: string | null },
+): Promise<ExecutionRow | null> {
+  const master = opts?.hmacKey ?? currentKey();
+  const receipt = update.receipt !== undefined ? serializeReceipt(update.receipt) : undefined;
   const updated = await ex
     .update(executions)
     .set({
@@ -226,14 +272,20 @@ export async function markExecutionResult(ex: DbExecutor, update: ExecutionResul
       resultReceivedAt: update.resultReceivedAt,
       ...(update.externalReference !== undefined ? { externalReference: update.externalReference } : {}),
       ...(update.receiptHash !== undefined ? { receiptHash: update.receiptHash } : {}),
-      ...(update.receipt !== undefined ? { receiptJson: serializeReceipt(update.receipt) } : {}),
+      ...(receipt !== undefined
+        ? {
+            receiptJson: master
+              ? encryptNullableColumn(receipt, deriveKey(master, EXECUTION_PAYLOAD_PURPOSE))
+              : receipt,
+          }
+        : {}),
       ...(update.errorClass !== undefined ? { errorClass: update.errorClass } : {}),
       ...(update.retryAfterAt !== undefined ? { retryAfterAt: update.retryAfterAt } : {}),
       updatedAt: update.resultReceivedAt,
     })
     .where(and(eq(executions.executionId, update.executionId), eq(executions.tenantId, update.tenantId)))
     .returning();
-  return updated[0] ?? null;
+  return updated[0] ? withDecryptedReceipt(updated[0], payloadKeys(master)) : null;
 }
 
 export async function findLatestExecutionByAction(
@@ -241,7 +293,7 @@ export async function findLatestExecutionByAction(
   actionId: string,
   tenantId: string,
 ): Promise<ExecutionRow | null> {
-  return first(
+  const row = await first(
     ex
       .select()
       .from(executions)
@@ -249,6 +301,7 @@ export async function findLatestExecutionByAction(
       .orderBy(desc(executions.attemptNumber))
       .limit(1),
   );
+  return row ? withDecryptedReceipt(row, payloadKeys()) : null;
 }
 
 export async function findExecutionByConnectorKey(
@@ -256,7 +309,7 @@ export async function findExecutionByConnectorKey(
   connectorIdempotencyKey: string,
   tenantId: string,
 ): Promise<ExecutionRow | null> {
-  return first(
+  const row = await first(
     ex
       .select()
       .from(executions)
@@ -264,6 +317,7 @@ export async function findExecutionByConnectorKey(
       .orderBy(desc(executions.attemptNumber))
       .limit(1),
   );
+  return row ? withDecryptedReceipt(row, payloadKeys()) : null;
 }
 
 export async function listUnknownOutcomeExecutions(
@@ -275,10 +329,12 @@ export async function listUnknownOutcomeExecutions(
     tenantId === null
       ? [eq(executions.state, 'UNKNOWN_OUTCOME')]
       : [eq(executions.state, 'UNKNOWN_OUTCOME'), eq(executions.tenantId, tenantId)];
-  return ex
+  const rows = await ex
     .select()
     .from(executions)
     .where(and(...conditions))
     .orderBy(desc(executions.createdAt))
     .limit(limit);
+  const keys = payloadKeys();
+  return rows.map((row) => withDecryptedReceipt(row, keys));
 }

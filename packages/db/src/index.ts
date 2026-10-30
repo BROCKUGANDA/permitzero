@@ -13,6 +13,7 @@ export type {
   ExecutionRow,
   IdempotencyRecordRow,
   InvoiceRow,
+  MfaSecretRow,
   OutboxEventRow,
   PermitRow,
   PolicyRevisionRow,
@@ -28,12 +29,14 @@ export * from './root-env.js';
 export * from './tenant.js';
 export * from './mappers.js';
 export * from './repos/identity.js';
+export * from './repos/users.js';
 export * from './repos/policies.js';
 export * from './repos/actions.js';
 export * from './repos/execution.js';
 export * from './repos/audit.js';
 export * from './repos/outbox.js';
 export * from './repos/catalog.js';
+export * from './crypto.js';
 export * from './stores.js';
 export * from './seed.js';
 export * from './seed-policy.js';

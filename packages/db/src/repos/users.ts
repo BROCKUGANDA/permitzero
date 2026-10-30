@@ -1,0 +1,236 @@
+/**
+ * MFA secret storage: the encrypted TOTP shared secret of an account, the
+ * moment it last completed a step-up verification, and the account-level
+ * marker that says the enrolment was confirmed.
+ *
+ * Two markers, on purpose. `mfa_secrets` exists from the moment an enrolment
+ * STARTS, and `users.mfa_enrolled_at` is set only when it is CONFIRMED — a
+ * person who has been handed a secret but has not yet proved they can produce
+ * a code from it has not enrolled. The first says "a secret is stored"; the
+ * second says "the person proved it".
+ *
+ * The secret row's `tenant_id` records where the enrolment happened, but
+ * the secret itself is per-person (one authenticator): a lookup by user must
+ * be visible in every workspace the person belongs to, or a step-up in a
+ * second workspace looks up no secret and approves without asking.
+ */
+import { and, eq, sql } from 'drizzle-orm';
+import type { DbExecutor } from '../client.js';
+import { mfaSecrets, users } from '../schema.js';
+import type { MfaSecretRow } from '../schema.js';
+
+async function first<T>(rows: Promise<T[]>): Promise<T | null> {
+  const [row] = await rows;
+  return row ?? null;
+}
+
+/** The secret row of this user, if there is one — per-person, not per-tenant. */
+export async function getMfaSecretByUserId(
+  ex: DbExecutor,
+  _tenantId: string,
+  userId: string,
+): Promise<MfaSecretRow | null> {
+  return first(ex.select().from(mfaSecrets).where(eq(mfaSecrets.userId, userId)).limit(1));
+}
+
+/**
+ * Store a secret for this user, replacing any previous one.
+ *
+ * An upsert rather than an insert, because re-enrolling is a legitimate act:
+ * a person who lost their phone enrols again and the old secret must stop
+ * working at once, not when they remember to remove it. The replacement
+ * clears the verification timestamp too — the new secret has proved nothing
+ * yet, and a step-up window carried over from the old secret would be a
+ * verification of a secret nobody holds.
+ */
+export async function upsertMfaSecret(
+  ex: DbExecutor,
+  input: { id: string; tenantId: string; userId: string; secretEncrypted: string; now: Date },
+): Promise<MfaSecretRow> {
+  const [row] = await ex
+    .insert(mfaSecrets)
+    .values({
+      id: input.id,
+      tenantId: input.tenantId,
+      userId: input.userId,
+      secretEncrypted: input.secretEncrypted,
+      createdAt: input.now,
+    })
+    .onConflictDoUpdate({
+      target: mfaSecrets.userId,
+      set: {
+        secretEncrypted: input.secretEncrypted,
+        createdAt: input.now,
+        lastVerifiedAt: null,
+        lastCodeHash: null,
+      },
+    })
+    .returning();
+  if (!row) throw new Error('mfa secret upsert returned no row');
+  return row;
+}
+
+/** Remove the secret row of this user. */
+export async function deleteMfaSecret(ex: DbExecutor, _tenantId: string, userId: string): Promise<void> {
+  await ex.delete(mfaSecrets).where(eq(mfaSecrets.userId, userId));
+}
+
+/**
+ * Record that this account just completed a step-up verification.
+ *
+ * The code fingerprint goes in with it: the code has been spent, and the next
+ * presentation of the same code has to be refused. Returns false when there
+ * is no secret row to record against, which means the account is not
+ * enrolled and the caller must not go on to treat it as if it were.
+ */
+export async function recordMfaVerification(
+  ex: DbExecutor,
+  _tenantId: string,
+  userId: string,
+  input: { now: Date; codeHash: string },
+): Promise<boolean> {
+  const rows = await ex
+    .update(mfaSecrets)
+    .set({ lastVerifiedAt: input.now, lastCodeHash: input.codeHash })
+    .where(eq(mfaSecrets.userId, userId))
+    .returning({ lastVerifiedAt: mfaSecrets.lastVerifiedAt });
+  return rows.length > 0;
+}
+
+/**
+ * Record that a TOTP code was spent, without recording a verification.
+ *
+ * Confirming an enrolment spends a code too, and it has to be spent
+ * exactly once — but confirming is not a step-up verification, so it must not
+ * write `last_verified_at`: that column answers "when did this person last
+ * prove they are there", and a person who has just enrolled has not.
+ */
+export async function recordConsumedMfaCode(
+  ex: DbExecutor,
+  _tenantId: string,
+  userId: string,
+  codeHash: string,
+): Promise<boolean> {
+  const rows = await ex
+    .update(mfaSecrets)
+    .set({ lastCodeHash: codeHash })
+    .where(eq(mfaSecrets.userId, userId))
+    .returning({ lastCodeHash: mfaSecrets.lastCodeHash });
+  return rows.length > 0;
+}
+
+/**
+ * Atomically consume a TOTP code: accept it only when its step exceeds the
+ * stored one.
+ *
+ * A TOTP code is valid for a whole thirty-second step, and the window is
+ * ±1 — so a code from step T is still "valid" when T+1 was accepted. With
+ * only `lastCodeHash` this earlier code could be replayed after a later one,
+ * because a different code means a different hash. The step counter is the
+ * monotonic replay boundary: a code whose step is not ahead of the stored
+ * one is a replay, even if its hash is different.
+ *
+ * Uses a single conditional UPDATE — zero rows updated means a replay,
+ * including a concurrent same-step replay, because the check and the write
+ * are the same statement. The caller therefore never needs a separate lock.
+ */
+export async function consumeMfaCodeStep(
+  ex: DbExecutor,
+  _tenantId: string,
+  userId: string,
+  step: number,
+  codeHash: string,
+): Promise<boolean> {
+  const rows = await ex
+    .update(mfaSecrets)
+    .set({ lastUsedStep: step, lastCodeHash: codeHash })
+    .where(
+      and(
+        eq(mfaSecrets.userId, userId),
+        sql`(${mfaSecrets.lastUsedStep} IS NULL OR ${mfaSecrets.lastUsedStep} < ${step})`,
+      ),
+    )
+    .returning({ lastUsedStep: mfaSecrets.lastUsedStep });
+  return rows.length > 0;
+}
+
+/** Re-encrypt the stored secret under the current key after a successful
+ * read with a retained one. Without this, a rotated key would leave every
+ * existing enrolment unreadable once the old key is retired. */
+export async function reencryptMfaSecret(
+  ex: DbExecutor,
+  _tenantId: string,
+  userId: string,
+  newEncrypted: string,
+): Promise<void> {
+  await ex.update(mfaSecrets).set({ secretEncrypted: newEncrypted }).where(eq(mfaSecrets.userId, userId));
+}
+
+/**
+ * Lock the MFA row for this user. Use it when the caller must read a value
+ * that it will then act on in the same transaction (spendCode's check-then-
+ * write) and cannot use `consumeMfaCodeStep` yet — concurrent callers would
+ * otherwise read the same `lastCodeHash` and both accept the same code.
+ */
+export async function lockMfaSecretForUpdate(
+  ex: DbExecutor,
+  _tenantId: string,
+  userId: string,
+): Promise<MfaSecretRow | null> {
+  const rows = await ex.execute(sql`
+    SELECT * FROM public.mfa_secrets
+     WHERE user_id = ${userId}
+     FOR UPDATE
+  `);
+  const r = (rows as unknown as MfaSecretRow[])[0] ?? null;
+  return r;
+}
+
+/** Record that this account completed a step-up verification at `now`. */
+export async function touchMfaVerifiedAt(
+  ex: DbExecutor,
+  _tenantId: string,
+  userId: string,
+  now: Date,
+): Promise<boolean> {
+  const rows = await ex
+    .update(mfaSecrets)
+    .set({ lastVerifiedAt: now })
+    .where(eq(mfaSecrets.userId, userId))
+    .returning({ lastVerifiedAt: mfaSecrets.lastVerifiedAt });
+  return rows.length > 0;
+}
+
+/**
+ * When this account completed its MFA enrolment, if it has.
+ *
+ * The marker lives on the global user row rather than on the tenant-scoped
+ * secret row, so it answers "is this person enrolled?" without depending on
+ * which tenant the enrolment happened under.
+ */
+export async function getUserMfaEnrolledAt(ex: DbExecutor, userId: string): Promise<Date | null> {
+  const row = await first(
+    ex.select({ mfaEnrolledAt: users.mfaEnrolledAt }).from(users).where(eq(users.id, userId)).limit(1),
+  );
+  return row?.mfaEnrolledAt ?? null;
+}
+
+/**
+ * Set or clear the enrolment marker.
+ *
+ * `users` is a global table: it has no tenant column, and the runtime role
+ * may READ it for the members of the current tenant but may not WRITE it —
+ * migration 0007 closed that path for a reason. What 0008 re-opens is exactly
+ * one column, `mfa_enrolled_at`, and only for a transaction scoped to a
+ * tenant the account belongs to; a trigger in the same migration refuses
+ * every other column. `null` clears the marker, which is what a fresh
+ * enrolment does: the new secret has proved nothing yet.
+ */
+export async function setUserMfaEnrolledAt(ex: DbExecutor, userId: string, at: Date | null): Promise<boolean> {
+  const rows = await ex
+    .update(users)
+    .set({ mfaEnrolledAt: at })
+    .where(eq(users.id, userId))
+    .returning({ id: users.id });
+  return rows.length > 0;
+}

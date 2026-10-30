@@ -84,6 +84,35 @@ export interface MetricsBundle {
    * other.
    */
   outboxOldestJobAgeSeconds: Gauge;
+  /**
+   * 1 when the cross-replica (Redis-backed) rate-limit budget is wired.
+   *
+   * A gauge rather than a constant because the failure it exists to catch is
+   * a deployment that believes it has a shared budget and does not: the
+   * in-process limiter looks exactly the same from the outside, and the only
+   * way to tell the two apart from a scrape is this number.
+   */
+  sharedRateLimitEnabled: Gauge;
+  /**
+   * Requests the shared budget could not charge, because the counter was
+   * unreachable.
+   *
+   * Each one is a request that was answered under the local limit only, so a
+   * rising count is a limiter that has stopped being a limit — silently, if
+   * nothing else watches this series.
+   */
+  sharedRateLimitFailures: Counter;
+  /** Shared-budget charges, by budget and by what came of them. */
+  sharedRateLimitCharges: Counter<'scope' | 'outcome'>;
+  /**
+   * Alerts delivered to the internal alert sink, by outcome and severity.
+   *
+   * The sink exists because a firing rule that reaches nobody is an alerting
+   * posture that is a file nobody reads. This counter is how a sink that has
+   * stopped receiving — or one that is receiving and being refused — becomes
+   * visible without reading a single log line.
+   */
+  alertsReceived: Counter<'outcome' | 'severity'>;
   /** 1 when the serving role is bound by row-level security and fully covered. */
   tenantIsolationEnforced: Gauge<'role'>;
   /** Audit chain verification result for the tenant last checked. 0 = valid. */
@@ -226,6 +255,32 @@ export function createMetrics(opts: CreateMetricsOptions = {}): MetricsBundle {
     registers: [registry],
   });
 
+  const sharedRateLimitEnabled = new Gauge({
+    name: 'pz_shared_rate_limit_enabled',
+    help: '1 when the rate-limit budget is backed by a counter every replica shares. 0 means each replica enforces its own budget, and the effective limit is N times the configured one.',
+    registers: [registry],
+  });
+
+  const sharedRateLimitFailures = new Counter({
+    name: 'pz_shared_rate_limit_failures_total',
+    help: 'Requests the shared rate-limit budget could not charge, because the counter was unreachable. Each one was answered under the local limit only.',
+    registers: [registry],
+  });
+
+  const sharedRateLimitCharges = new Counter({
+    name: 'pz_shared_rate_limit_charges_total',
+    help: 'Shared rate-limit budget charges, by budget and by outcome (allowed, refused, unavailable).',
+    labelNames: ['scope', 'outcome'],
+    registers: [registry],
+  });
+
+  const alertsReceived = new Counter({
+    name: 'pz_alerts_received_total',
+    help: 'Alerts delivered to the internal alert sink, by outcome (accepted, rejected) and severity.',
+    labelNames: ['outcome', 'severity'],
+    registers: [registry],
+  });
+
   const auditChainBreaks = new Gauge({
     name: 'pz_audit_chain_breaks',
     help: 'Breaks found by the most recent audit chain verification. Any non-zero value is an integrity incident.',
@@ -256,6 +311,10 @@ export function createMetrics(opts: CreateMetricsOptions = {}): MetricsBundle {
     outboxOldestAgeSeconds,
     outboxOldestJobAgeSeconds,
     tenantIsolationEnforced,
+    sharedRateLimitEnabled,
+    sharedRateLimitFailures,
+    sharedRateLimitCharges,
+    alertsReceived,
     auditChainBreaks,
     breakerState,
     scrape: () => registry.metrics(),

@@ -27,8 +27,16 @@ import { decideApproval } from '../approvals.js';
 import { collectPermit } from '../permits.js';
 import { executeApprovedAction } from '../execute.js';
 import { toActionDto } from '../dto.js';
+import { issueStepUpAssertion, mfaDeps } from './me.js';
 
 const actionParamsSchema = z.object({ id: actionIdSchema }).strict();
+
+const stepUpResponseSchema = z
+  .object({
+    mfa_context_ref: z.string(),
+    expires_at: z.date(),
+  })
+  .strict();
 
 const actionQuerySchema = paginationQuerySchema.extend({
   state: z.string().max(32).optional(),
@@ -198,6 +206,38 @@ export async function actionRoutes(app: ZodFastifyInstance, ctx: AppContext): Pr
       config: { rateLimit: auth },
     },
     async (request) => decideApproval(ctx.approvals, request.principal, request.params.id, request.body),
+  );
+
+  /**
+   * The step-up: exchange a recent MFA verification for a server-signed
+   * assertion bound to THIS action.
+   *
+   * The assertion is the only thing an approval may present as proof of a
+   * second factor, and it can only be obtained here — from the server, after
+   * the server checked that the account holds a secret, has enrolled, and
+   * verified recently enough. A client that wants to satisfy `require_mfa`
+   * has to come through this route.
+   */
+  app.post(
+    '/actions/:id/step-up',
+    {
+      schema: {
+        params: actionParamsSchema,
+        body: z.object({}).strict(),
+        response: { 200: stepUpResponseSchema },
+      },
+      config: { rateLimit: auth },
+    },
+    async (request) => {
+      const tenantId = request.principal.tenantId;
+      // The action has to exist in this tenant. A step-up for an action
+      // elsewhere would be an assertion nobody could use, and answering 404
+      // keeps a cross-tenant probe indistinguishable from a missing action.
+      const scope = tenantScope(ctx.runtime, tenantId);
+      const action = await scope(async (ex) => getAction(ex, tenantId, request.params.id));
+      if (!action) throw new NotFoundError();
+      return issueStepUpAssertion(mfaDeps(ctx), request.principal, request.params.id);
+    },
   );
 
   app.post(

@@ -11,6 +11,7 @@ import {
   insertInvoice,
   insertPurchaseOrder,
   publishRevision,
+  setUserMfaEnrolledAt,
   withTenantTransaction,
 } from '@permitzero/db';
 import { newId } from '@permitzero/domain';
@@ -414,13 +415,31 @@ describe('mfa step-up', () => {
     return issueMfaAssertion({ tenantId: t.tenantId, actorId, actionId, issuedAt, expiresAt: issuedAt + ttlMs }, key);
   }
 
+  /**
+   * Give a user a second factor.
+   *
+   * The approval path refuses a step-up assertion from an approver who has
+   * no second factor ENROLLED, not merely one whose assertion does not
+   * verify. A signature says the server issued the assertion; it does not
+   * say the actor had a second factor at the time, and an approver who
+   * removed theirs must not be able to spend an assertion minted while they
+   * still had one.
+   *
+   * The enrolment itself is proved by `mfa-step-up.test.ts`, which runs the
+   * whole enrolment → confirmation → step-up flow through the API. Here the
+   * marker is set directly, because these tests are about the APPROVAL
+   * path's use of the assertion and not about how it was obtained.
+   */
+  async function enrolApprover(userId: string): Promise<void> {
+    await setUserMfaEnrolledAt(t.db.db, userId, new Date());
+  }
+
   it('accepts an approval only with a verifiable step-up assertion', async () => {
     await appWithAuditKey(AUDIT_KEY);
     await publishMfaPolicy();
     const action = await approvalAction();
     expect(action.decision).toBe('REQUIRE_APPROVAL');
     const approverId = t.seeded.userIds['approver1'] ?? '';
-
     // No assertion at all.
     const none = await postJson(t, `/v1/actions/${action.action_id}/approve`, t.approver1Token, approveBody(action));
     expect(none.status).toBe(422);
@@ -467,6 +486,7 @@ describe('mfa step-up', () => {
     expect(expired.status).toBe(422);
 
     // The real thing: signed by the server for this approver and this action.
+    await enrolApprover(approverId);
     const valid = await postJson(
       t,
       `/v1/actions/${action.action_id}/approve`,
@@ -494,6 +514,33 @@ describe('mfa step-up', () => {
       }),
     );
     expect(res.status).toBe(422);
+    await closeApp(t);
+  });
+
+  it('refuses a step-up assertion from an approver with no second factor enrolled', async () => {
+    // A valid signature is not the whole of a step-up. The assertion says the
+    // server issued it; only the enrolment says the actor had a second
+    // factor. An approver who removed theirs must not be able to spend an
+    // assertion minted while they still had one.
+    await appWithAuditKey(AUDIT_KEY);
+    await publishMfaPolicy();
+    const action = await approvalAction();
+    const approverId = t.seeded.userIds['approver1'] ?? '';
+
+    // Enrolled, verified, and then the second factor is removed.
+    await enrolApprover(approverId);
+    await setUserMfaEnrolledAt(t.db.db, approverId, null);
+
+    const res = await postJson(
+      t,
+      `/v1/actions/${action.action_id}/approve`,
+      t.approver1Token,
+      approveBody(action, {
+        mfa_context_ref: assertion(action.action_id, approverId, deriveMfaAssertionKey(AUDIT_KEY)),
+      }),
+    );
+    expect(res.status).toBe(422);
+    expect(res.json).toMatchObject({ error: { code: 'VALIDATION_FAILED' } });
     await closeApp(t);
   });
 

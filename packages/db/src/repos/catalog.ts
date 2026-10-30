@@ -8,6 +8,14 @@ import { newId } from '@permitzero/domain';
 import type { ActorType, EnforcementMode, Environment, VendorStatus } from '@permitzero/domain';
 import type { DbExecutor } from '../client.js';
 import {
+  currentKey,
+  deriveKey,
+  encryptColumn,
+  encryptNullableColumn,
+  readColumn,
+  verificationKeys,
+} from '../crypto.js';
+import {
   connectorDispatches,
   connectorLedger,
   connectors,
@@ -277,6 +285,17 @@ export async function insertPurchaseOrder(
   return row;
 }
 
+const LEDGER_RECEIPT_PURPOSE = 'ledger-receipt';
+
+function ledgerReceiptKeys(master: string | null): Buffer[] {
+  const explicit = master ? [master, ...verificationKeys()] : verificationKeys();
+  return explicit.map((k) => deriveKey(k, LEDGER_RECEIPT_PURPOSE));
+}
+
+function withDecryptedReceipt<T extends { receiptJson: unknown }>(row: T, master: string | null): T {
+  return { ...row, receiptJson: readColumn<Record<string, unknown>>(row.receiptJson, ledgerReceiptKeys(master)) };
+}
+
 // -- Ledger -------------------------------------------------------------------
 
 export async function getLedgerEntry(
@@ -284,7 +303,7 @@ export async function getLedgerEntry(
   tenantId: string,
   connectorIdempotencyKey: string,
 ): Promise<ConnectorLedgerRow | null> {
-  return first(
+  const row = await first(
     ex
       .select()
       .from(connectorLedger)
@@ -296,6 +315,7 @@ export async function getLedgerEntry(
       )
       .limit(1),
   );
+  return row ? withDecryptedReceipt(row, currentKey()) : null;
 }
 
 /** The exactly-once guard: concurrent identical inserts collapse to the first. */
@@ -317,6 +337,8 @@ export async function putLedgerEntryIfAbsent(
     recordedAt: Date;
   },
 ): Promise<{ inserted: boolean; entry: ConnectorLedgerRow }> {
+  const master = currentKey();
+  const receiptJson = master ? encryptColumn(input.receipt, deriveKey(master, LEDGER_RECEIPT_PURPOSE)) : input.receipt;
   const inserted = await ex
     .insert(connectorLedger)
     .values({
@@ -327,7 +349,7 @@ export async function putLedgerEntryIfAbsent(
       operation: input.operation,
       externalReference: input.externalReference,
       receiptHash: typeof input.receipt['receiptHash'] === 'string' ? (input.receipt['receiptHash'] as string) : '',
-      receiptJson: input.receipt,
+      receiptJson,
       amountMinor: input.amountMinor ?? null,
       currency: input.currency ?? null,
       beneficiaryRef: input.beneficiaryRef ?? null,
@@ -339,18 +361,20 @@ export async function putLedgerEntryIfAbsent(
     })
     .onConflictDoNothing({ target: [connectorLedger.tenantId, connectorLedger.connectorIdempotencyKey] })
     .returning();
-  if (inserted[0]) return { inserted: true, entry: inserted[0] };
+  if (inserted[0]) return { inserted: true, entry: withDecryptedReceipt(inserted[0], master) };
   const existing = await getLedgerEntry(ex, input.tenantId, input.connectorIdempotencyKey);
   if (!existing) throw new Error('ledger entry vanished after conflict');
   return { inserted: false, entry: existing };
 }
 
 export async function listLedger(ex: DbExecutor, tenantId: string): Promise<ConnectorLedgerRow[]> {
-  return ex
+  const rows = await ex
     .select()
     .from(connectorLedger)
     .where(eq(connectorLedger.tenantId, tenantId))
     .orderBy(asc(connectorLedger.createdAt));
+  const master = currentKey();
+  return rows.map((r) => withDecryptedReceipt(r, master));
 }
 
 // -- Dispatch markers ---------------------------------------------------------
@@ -475,6 +499,18 @@ export async function setEnforcementMode(
 
 // -- Model evaluations --------------------------------------------------------
 
+/** The domain-separation label for the model-evaluation output's encryption key. */
+const MODEL_EVALUATION_PAYLOAD_PURPOSE = 'model-evaluation-payload';
+
+/** The keys that may decrypt a model-evaluation output. */
+function modelEvaluationKeys(explicit?: string | null): Buffer[] {
+  const masters: string[] = [];
+  for (const master of [explicit, ...verificationKeys()]) {
+    if (typeof master === 'string' && master.length > 0 && !masters.includes(master)) masters.push(master);
+  }
+  return masters.map((master) => deriveKey(master, MODEL_EVALUATION_PAYLOAD_PURPOSE));
+}
+
 export async function insertModelEvaluation(
   ex: DbExecutor,
   input: {
@@ -492,7 +528,10 @@ export async function insertModelEvaluation(
     tokenUsage?: Record<string, number> | null;
     errorClass?: string | null;
   },
+  opts?: { hmacKey?: string | null },
 ): Promise<ModelEvaluationRow> {
+  const master = opts?.hmacKey ?? currentKey();
+  const output = input.outputValidated ?? null;
   const [row] = await ex
     .insert(modelEvaluations)
     .values({
@@ -504,7 +543,13 @@ export async function insertModelEvaluation(
       promptVersion: input.promptVersion,
       schemaVersion: input.schemaVersion,
       inputHash: input.inputHash,
-      outputJsonValidated: input.outputValidated ?? null,
+      // The validated model output is decision content: the risk hints a model
+      // produced about an action. It is stored encrypted and read back in the
+      // clear, so the reader above the repository sees the same shape it
+      // always did.
+      outputJsonValidated: master
+        ? encryptNullableColumn(output, deriveKey(master, MODEL_EVALUATION_PAYLOAD_PURPOSE))
+        : output,
       status: input.status,
       latencyMs: input.latencyMs ?? null,
       tokenUsageJson: input.tokenUsage ?? null,
@@ -512,9 +557,21 @@ export async function insertModelEvaluation(
     })
     .returning();
   if (!row) throw new Error('model evaluation insert returned no row');
-  return row;
+  return withDecryptedOutput(row, modelEvaluationKeys(master));
+}
+
+/**
+ * The row as the application sees it: the model output in the clear.
+ *
+ * An output written before encryption was enabled holds plaintext and is read
+ * as it is.
+ */
+function withDecryptedOutput(row: ModelEvaluationRow, keys: readonly Buffer[]): ModelEvaluationRow {
+  return { ...row, outputJsonValidated: readColumn<Record<string, unknown> | null>(row.outputJsonValidated, keys) };
 }
 
 export async function listRecentModelEvaluations(ex: DbExecutor, limit: number): Promise<ModelEvaluationRow[]> {
-  return ex.select().from(modelEvaluations).orderBy(desc(modelEvaluations.createdAt)).limit(limit);
+  const rows = await ex.select().from(modelEvaluations).orderBy(desc(modelEvaluations.createdAt)).limit(limit);
+  const keys = modelEvaluationKeys();
+  return rows.map((row) => withDecryptedOutput(row, keys));
 }
