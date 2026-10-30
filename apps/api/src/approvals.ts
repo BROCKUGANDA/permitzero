@@ -35,6 +35,7 @@ import {
   createDbStores,
   getAction,
   getRevision,
+  getUserMfaEnrolledAt,
   insertOutboxEvent,
   listApprovalsByAction,
   tenantScope,
@@ -138,6 +139,13 @@ export async function decideApproval(
     action.requiredApprovals,
   );
 
+  // Whether a step-up assertion was presented at all.
+  //
+  // Captured here, at the method's scope, because the union narrowing that
+  // tells an approve from a reject does not survive into the transaction
+  // callback below, where the enrolment check needs it.
+  const presentedStepUp = 'mfa_context_ref' in body && body.mfa_context_ref !== undefined;
+
   if (isApprove(body)) {
     // Four eyes. The requester of an action may not be the approver of it.
     //
@@ -172,6 +180,12 @@ export async function decideApproval(
     // reference is refused whether or not the policy asked for one, because a
     // caller who presents a step-up proof that does not hold has presented
     // nothing.
+    //
+    // The signature alone is not enough, though. A signed assertion says the
+    // SERVER issued it; it does not say the actor had a second factor
+    // enrolled when it was issued. So the actor's enrolment is checked as
+    // well: a user who has since removed their second factor must not be
+    // able to spend an assertion minted while they still had one.
     if (body.mfa_context_ref !== undefined) {
       const verdict = mfaKey
         ? verifyMfaAssertion(body.mfa_context_ref, mfaKey, {
@@ -193,6 +207,28 @@ export async function decideApproval(
 
   try {
     await withTenantTransaction(deps.db, tenantId, async (tx: DbTransaction) => {
+      // The approver must still have a second factor enrolled.
+      //
+      // A valid signature says the SERVER issued the assertion; only the
+      // enrolment says the actor had a second factor at the time. An approver
+      // who has since removed theirs must not be able to spend an assertion
+      // minted while they still had one.
+      //
+      // This read is INSIDE the tenant transaction on purpose. The connection
+      // this module uses is the restricted runtime role, so a read of the
+      // `users` table outside a tenant context matches no row at all — the
+      // row-level policy hides it — and the check would refuse every
+      // assertion rather than the intended ones.
+      if (presentedStepUp) {
+        const enrolledAt = await getUserMfaEnrolledAt(tx, principal.actorId);
+        if (!enrolledAt) {
+          throw new ValidationError(
+            'This approver has no second factor enrolled, so a step-up assertion cannot be accepted.',
+            { reason: 'MFA_NOT_ENROLLED' },
+          );
+        }
+      }
+
       const stores = createDbStores(tx, { auditHmacKey: deps.auditHmacKey });
       await createApproval(tx, {
         approvalId: newId('approval'),

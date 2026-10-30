@@ -132,6 +132,59 @@ export const tenantMemberships = pgTable(
 // ---------------------------------------------------------------------------
 
 /**
+ * SECURITY: the TOTP shared secret of an account, ENCRYPTED.
+ *
+ * A TOTP secret is not a password hash: the server has to recompute a code
+ * from it, so it cannot be one-way. It is therefore stored encrypted under a
+ * key derived from the server secret, and the plaintext exists in exactly two
+ * places — the enrolment response that hands it to the authenticator app, and
+ * the authenticator app itself.
+ *
+ * One row per user, not per (user, tenant): the secret belongs to the person,
+ * and an account that belongs to several tenants still has ONE authenticator
+ * entry. The tenant column says which tenant the row was enrolled under, and
+ * is the boundary row-level security enforces.
+ */
+export const mfaSecrets = pgTable(
+  'mfa_secrets',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    tenantId: text('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    /** `v1.<iv>.<tag>.<ciphertext>`, base64url. Never the plaintext. */
+    secretEncrypted: text('secret_encrypted').notNull(),
+    createdAt: tsNow('created_at'),
+    /** When this account last completed a step-up verification. */
+    lastVerifiedAt: ts('last_verified_at'),
+    /**
+     * Keyed fingerprint of the last TOTP code this account spent. A code is
+     * good for a whole thirty-second step, so without this a captured code
+     * could be presented twice; with it, the second presentation is refused.
+     * Kept for backwards compatibility after the step counter was added — new
+     * code consumes the step, but the hash remains the check for a concurrent
+     * same-step replay against the old path.
+     */
+    lastCodeHash: text('last_code_hash'),
+    /** The TOTP step counter of the last accepted code. A code from an
+     * earlier or equal step is a replay, even if it is a different code
+     * from that step — the window is ±1, so without this a code from step
+     * T could be replayed after T+1 was accepted. */
+    lastUsedStep: bigint('last_used_step', { mode: 'number' }),
+  },
+  (t) => [
+    uniqueIndex('uq_mfa_secrets_user').on(t.userId),
+    check(
+      'chk_mfa_secrets_encrypted_shape',
+      sql`${t.secretEncrypted} ~ '^v1\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$'`,
+    ),
+  ],
+);
+
+/**
  * SECURITY: stores a secret-manager REFERENCE plus at most a one-way hash and a
  * short prefix. The plaintext credential never reaches this table.
  */
@@ -548,6 +601,11 @@ export const auditEvents = pgTable(
     eventHash: text('event_hash').notNull(),
     hashVersion: text('hash_version').notNull().default('pz-audit-v1'),
     sequence: bigint('sequence', { mode: 'bigint' }).notNull(),
+    /** When this event becomes eligible for the retention sweep. */
+    expiresAt: ts('expires_at'),
+    /** When it was actually purged. A purged event keeps its row so the hash
+     * chain stays gapless and verifiable across the purge. */
+    purgedAt: ts('purged_at'),
     createdAt: tsNow('created_at'),
   },
   (t) => [
@@ -589,6 +647,8 @@ export const outboxEvents = pgTable(
     nextAttemptAt: ts('next_attempt_at'),
     publishedAt: ts('published_at'),
     lastErrorClass: text('last_error_class'),
+    /** When this row becomes eligible for the retention sweep. */
+    expiresAt: ts('expires_at'),
     createdAt: tsNow('created_at'),
     updatedAt: tsNow('updated_at'),
   },
@@ -943,6 +1003,7 @@ export const connectorDispatches = pgTable(
 
 export type TenantRow = typeof tenants.$inferSelect;
 export type UserRow = typeof users.$inferSelect;
+export type MfaSecretRow = typeof mfaSecrets.$inferSelect;
 export type TenantMembershipRow = typeof tenantMemberships.$inferSelect;
 export type ServiceCredentialRow = typeof serviceCredentials.$inferSelect;
 export type AgentRow = typeof agents.$inferSelect;
@@ -966,11 +1027,93 @@ export type PurchaseOrderRow = typeof purchaseOrders.$inferSelect;
 export type ConnectorLedgerRow = typeof connectorLedger.$inferSelect;
 export type ConnectorDispatchRow = typeof connectorDispatches.$inferSelect;
 
+/**
+ * A legal hold: this tenant's data must not be deleted, whatever the
+ * retention window says.
+ *
+ * The hold is a row rather than a flag on the tenant because holds are
+ * scoped and reasoned — which matter, are released by a named operator, and
+ * leave a record. A deletion that leaves no trace is a deletion nobody can
+ * be asked about later.
+ */
+export const legalHolds = pgTable(
+  'legal_holds',
+  {
+    legalHoldId: text('legal_hold_id').primaryKey(),
+    tenantId: text('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    reason: text('reason').notNull(),
+    operatorId: text('operator_id').notNull(),
+    placedAt: tsNow('placed_at'),
+    releasedAt: ts('released_at'),
+    releaseReason: text('release_reason'),
+    releaseOperatorId: text('release_operator_id'),
+    createdAt: tsNow('created_at'),
+  },
+  (t) => [
+    index('idx_legal_holds_tenant').on(t.tenantId),
+    check('chk_legal_holds_reason_nonempty', sql`length(btrim(${t.reason})) > 0`),
+    check('chk_legal_holds_operator_nonempty', sql`length(btrim(${t.operatorId})) > 0`),
+    check('chk_legal_holds_release_after_placement', sql`${t.releasedAt} IS NULL OR ${t.releasedAt} >= ${t.placedAt}`),
+  ],
+);
+
+/**
+ * What a retention sweep did, per tenant, per pass.
+ *
+ * A deletion that leaves no record is a deletion nobody can be asked about.
+ * This table is that record: how many rows were purged, how many were
+ * relinked, whether a legal hold stopped it, and the chain hashes at the
+ * boundary so the record is tied to the chain it describes.
+ */
+export const retentionRuns = pgTable(
+  'retention_runs',
+  {
+    retentionRunId: text('retention_run_id').primaryKey(),
+    tenantId: text('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    startedAt: ts('started_at').notNull(),
+    finishedAt: ts('finished_at').notNull(),
+    outcome: text('outcome').notNull().$type<'purged' | 'held' | 'skipped' | 'error'>(),
+    auditRetentionDays: integer('audit_retention_days').notNull(),
+    outboxRetentionDays: integer('outbox_retention_days').notNull(),
+    auditCutoff: ts('audit_cutoff').notNull(),
+    outboxCutoff: ts('outbox_cutoff').notNull(),
+    auditRowsPurged: integer('audit_rows_purged').notNull().default(0),
+    outboxRowsPurged: integer('outbox_rows_purged').notNull().default(0),
+    auditRowsRelinked: integer('audit_rows_relinked').notNull().default(0),
+    legalHold: boolean('legal_hold').notNull().default(false),
+    chainHeadBefore: text('chain_head_before'),
+    chainHeadAfter: text('chain_head_after'),
+    chainBoundaryHash: text('chain_boundary_hash'),
+    operatorId: text('operator_id').notNull(),
+    detail: jsonb('detail')
+      .notNull()
+      .default(sql`'{}'::jsonb`)
+      .$type<Record<string, unknown>>(),
+    createdAt: tsNow('created_at'),
+  },
+  (t) => [
+    index('idx_retention_runs_tenant_started').on(t.tenantId, t.startedAt),
+    check('chk_retention_runs_outcome', sql`${t.outcome} IN ('purged','held','skipped','error')`),
+    check(
+      'chk_retention_runs_counts_nonneg',
+      sql`${t.auditRowsPurged} >= 0 AND ${t.outboxRowsPurged} >= 0 AND ${t.auditRowsRelinked} >= 0`,
+    ),
+  ],
+);
+
+export type LegalHoldRow = typeof legalHolds.$inferSelect;
+export type RetentionRunRow = typeof retentionRuns.$inferSelect;
+
 /** Every table this package owns, in dependency-safe insert order. */
 export const ALL_TABLES = [
   tenants,
   users,
   tenantMemberships,
+  mfaSecrets,
   serviceCredentials,
   agents,
   policies,
@@ -992,4 +1135,6 @@ export const ALL_TABLES = [
   purchaseOrders,
   connectorLedger,
   connectorDispatches,
+  legalHolds,
+  retentionRuns,
 ] as const;

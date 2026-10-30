@@ -5,8 +5,13 @@
  */
 import { closeDb, createDb, loadRootEnv, migrate, rlsEnforcementState } from '@permitzero/db';
 import { createBullmqHandles, createBullmqWorkerFactory } from '@permitzero/queue';
-import { loadWorkerConfig } from './config.js';
+import { loadWorkerConfig, RETENTION_DEFAULTS } from './config.js';
 import { buildWorker } from './worker.js';
+import { startRetentionSweep } from './retention.js';
+
+const workerLog = {
+  info: (...args: unknown[]) => console.log(...args),
+};
 
 async function main(): Promise<void> {
   loadRootEnv();
@@ -50,8 +55,45 @@ async function main(): Promise<void> {
   );
   console.log(`[worker] sweeps every ${config.sweepIntervalMs}ms (reconcile grace ${config.reconcileGraceMs}ms)`);
 
+  // The retention sweep.
+  //
+  // It runs on the MANAGEMENT pool (`db`), not the restricted runtime pool,
+  // and that is the point rather than an accident: `pz_app` must never be
+  // able to remove or rewrite an audit row, so the append-only trigger stays
+  // shut for it and the sweep has to be a platform operation. See
+  // apps/worker/src/retention.ts for what that costs and why the chain is
+  // re-anchored rather than broken.
+  //
+  // It is started here rather than inside buildWorker because it is not a
+  // database sweep in the same sense as the other two: it is a destructive,
+  // audited, platform-level operation with its own configuration, and mixing
+  // it into the sweep report would hide it behind the expiry numbers.
+  const retentionEnabled = config.retentionEnabled ?? RETENTION_DEFAULTS.enabled;
+  const retention = retentionEnabled
+    ? startRetentionSweep(
+        {
+          db,
+          config: {
+            auditRetentionDays: config.auditRetentionDays ?? RETENTION_DEFAULTS.auditRetentionDays,
+            outboxRetentionDays: config.outboxRetentionDays ?? RETENTION_DEFAULTS.outboxRetentionDays,
+            auditHmacKey: config.auditHmacKey,
+            operatorId: 'system:worker',
+          },
+        },
+        { intervalMs: config.retentionSweepIntervalMs ?? RETENTION_DEFAULTS.sweepIntervalMs },
+      )
+    : null;
+  retention?.start();
+  workerLog.info(
+    retentionEnabled
+      ? `[worker] retention every ${config.retentionSweepIntervalMs ?? RETENTION_DEFAULTS.sweepIntervalMs}ms ` +
+          `(audit ${config.auditRetentionDays ?? RETENTION_DEFAULTS.auditRetentionDays}d, ` +
+          `outbox ${config.outboxRetentionDays ?? RETENTION_DEFAULTS.outboxRetentionDays}d)`
+      : '[worker] retention sweep disabled (RETENTION_ENABLED)',
+  );
+
   const shutdown = async (signal: string): Promise<void> => {
-    console.log(`[worker] ${signal}; shutting down`);
+    workerLog.info(`[worker] ${signal}; shutting down`);
     // Bounded like the API's drain: a consumer that will not settle must not
     // become the reason the pools never close and the outbox lease is held open.
     const stopped = built.stop().catch(() => undefined);
@@ -62,6 +104,7 @@ async function main(): Promise<void> {
     );
     await workers?.close().catch(() => undefined);
     await bullmq?.close().catch(() => undefined);
+    retention?.stop();
     await closeDb(runtime).catch(() => undefined);
     await closeDb(db).catch(() => undefined);
     process.exit(0);

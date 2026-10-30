@@ -5,6 +5,8 @@
 #   ./infra/deploy/deploy-vps.sh              build + migrate + start + smoke
 #   ./infra/deploy/deploy-vps.sh --seed       also (re)seed synthetic demo data
 #   ./infra/deploy/deploy-vps.sh --no-build   restart from existing images
+#   ./infra/deploy/deploy-vps.sh --backup-drill
+#                                              run the RESTORE DRILL only
 #
 # Runs as the unprivileged `ubuntu` user. It writes no secrets into the repo:
 # infra/deploy/permitzero.env is generated once, mode 0600, and gitignored.
@@ -15,6 +17,14 @@
 # isolation switched OFF while every dashboard still says the feature is on. The
 # generated env therefore always sets DATABASE_URL_RUNTIME, and the script
 # refuses to start if it is missing or equal to the admin URL.
+#
+# The restore drill is deliberately NOT part of a deploy. A restore takes a
+# base backup, a copy of the whole data directory and a WAL replay: minutes
+# and gigabytes. A deploy that also restores is a deploy that is slow, and an
+# operator who learns that deploying is slow learns to deploy less often. So
+# the drill runs on its own schedule (`--backup-drill`, which is what the cron
+# entry calls) and, if a deploy is asked to run it too, only when
+# PZ_BACKUP_DRILL=1 says so.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -22,10 +32,12 @@ ROOT="$PWD"
 
 SEED=0
 BUILD=1
+DRILL_ONLY=0
 for arg in "$@"; do
   case "$arg" in
     --seed) SEED=1 ;;
     --no-build) BUILD=0 ;;
+    --backup-drill) DRILL_ONLY=1 ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
@@ -156,6 +168,15 @@ MODEL_MAX_ATTEMPTS=5
 MODEL_MAX_CONCURRENCY=4
 MODEL_PROMPT_VERSION=risk-hints-prompt-v1
 MODEL_SCHEMA_VERSION=risk-hints.v1
+
+# Retention. The audit trail is kept for a year and the delivery records for
+# a month, and the sweep runs hourly. These are the values the worker reads;
+# changing them here is how an operator changes the window, and the sweep
+# re-stamps the affected rows on its next pass.
+RETENTION_ENABLED=true
+RETENTION_SWEEP_INTERVAL_MS=3600000
+AUDIT_RETENTION_DAYS=365
+OUTBOX_RETENTION_DAYS=30
 EOF
   chmod 600 "$ENV_FILE"
   echo "   written ($(wc -c < "$ENV_FILE") bytes, mode $(stat -c %a "$ENV_FILE"))"
@@ -189,6 +210,14 @@ if [ -f "$ENV_FILE" ] && ! grep -q '^DATABASE_URL_RUNTIME=' "$ENV_FILE"; then
     echo "PZ_RLS_ROLE_PASSWORD=$RLS_PW"
     echo "RUNTIME_POOL_MAX=10"
     echo "METRICS_TOKEN=$(openssl rand -hex 24)"
+    # The retention window. An existing env file has no retention settings at
+    # all, which means the sweep runs on the defaults — and the defaults are
+    # the ones the generated file carries, so an upgraded host ends up with
+    # the same window as a fresh one.
+    echo "RETENTION_ENABLED=true"
+    echo "RETENTION_SWEEP_INTERVAL_MS=3600000"
+    echo "AUDIT_RETENTION_DAYS=365"
+    echo "OUTBOX_RETENTION_DAYS=30"
   } >> "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   echo "   upgraded"
@@ -247,6 +276,43 @@ echo "   ok: runtime role, RLS password and metrics token are all configured"
 
 preflight
 
+# --- 1d. the backup root ---------------------------------------------------
+#
+# The WAL archive and the base backups live on the host, outside the compose
+# project, so `docker compose down -v` cannot destroy them.
+#
+# When the tree is not durable — which is the case for the deployment
+# workflow, where the checkout is wiped and replaced on every run — the
+# backups have to live in the durable state directory instead, or every
+# deploy would silently start the retention history again from nothing.
+BACKUP_ROOT="${PZ_BACKUP_ROOT:-}"
+if [ -z "$BACKUP_ROOT" ]; then
+  if [ -n "$STATE_DIR" ]; then
+    BACKUP_ROOT="$STATE_DIR/backups"
+  else
+    BACKUP_ROOT="$ROOT/backups"
+  fi
+fi
+export PZ_BACKUP_ROOT="$BACKUP_ROOT"
+mkdir -p "$BACKUP_ROOT/wal" "$BACKUP_ROOT/base"
+echo "== backups live in $BACKUP_ROOT"
+
+# --- 1e. the restore drill, on its own ---------------------------------------
+#
+# The cron entry point. It touches nothing: no build, no migration, no
+# restart. It takes a base backup of the running database, restores it into a
+# temporary container and proves the restore works.
+#
+# It is on its own schedule rather than part of every deploy because a
+# restore costs minutes and gigabytes, and a deploy that is slow is a deploy
+# that gets skipped.
+if [ "$DRILL_ONLY" = "1" ]; then
+  echo "== restore drill (the deployment is left alone)"
+  "$ROOT/infra/deploy/restore-drill.sh"
+  echo "== restore drill finished"
+  exit 0
+fi
+
 # --- 1c. render the observability configuration -----------------------------
 # The Prometheus scrape target needs the metrics token as a FILE, because the
 # scrape config is committed and the token is not. The Alertmanager config
@@ -268,6 +334,14 @@ printf '%s' "${METRICS_TOKEN:-}" > run/pz_metrics_token
 # permissions into a container that runs as `nobody`.
 chmod 600 run/pz_metrics_token
 echo "== rendered run/pz_metrics_token ($(wc -c < run/pz_metrics_token) bytes)"
+# The alert path's token: prefer the dedicated ALERT_INGEST_TOKEN, falling
+# back to METRICS_TOKEN — matching the API's expectedAlertToken preference.
+# Without this, setting ALERT_INGEST_TOKEN makes the API expect a token the
+# Alertmanager never sends, and every alert 401s after it has been evaluated.
+ALERT_SOURCE="${ALERT_INGEST_TOKEN:-${METRICS_TOKEN:-}}"
+printf '%s' "$ALERT_SOURCE" > run/pz_alert_token
+chmod 600 run/pz_alert_token
+echo "== rendered run/pz_alert_token ($(wc -c < run/pz_alert_token) bytes)"
 
 if [ -n "${PZ_ALERT_WEBHOOK_URL:-}" ]; then
   # The URL is substituted into a sed REPLACEMENT, where `&` means "the text
@@ -565,4 +639,19 @@ fi
 echo
 echo "== api log tail"
 $COMPOSE logs --tail=15 api | sed 's/^/   /'
+
+# --- 7. the restore drill, when it is asked for -----------------------------
+#
+# The drill is opt-in (PZ_BACKUP_DRILL=1) because it is expensive and because
+# it belongs on a schedule rather than in the path of every deploy. When it
+# IS asked for, a failure fails the deploy: a backup that cannot be restored
+# is a deployment that has no recovery path, and saying so out loud is the
+# only thing worse than saying nothing.
+if [ "${PZ_BACKUP_DRILL:-0}" = "1" ]; then
+  echo "== restore drill (PZ_BACKUP_DRILL=1)"
+  "$ROOT/infra/deploy/restore-drill.sh"
+else
+  echo "== restore drill skipped (set PZ_BACKUP_DRILL=1, or run --backup-drill)"
+fi
+
 echo "done."

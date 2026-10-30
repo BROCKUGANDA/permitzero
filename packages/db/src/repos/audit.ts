@@ -11,17 +11,27 @@
  * statement fails with 25P02 instead of colliding again. Event times are
  * truncated to milliseconds (JavaScript Date precision) so a PostgreSQL
  * round-trip never changes the hashed bytes.
+ *
+ * The payload is stored ENCRYPTED and hashed in the clear. The order matters:
+ * the hash is computed over the canonical PLAINTEXT, so the chain still proves
+ * what the decision was, and the bytes on disk are ciphertext. Hashing the
+ * ciphertext instead would have been simpler and would have proved only that
+ * a ciphertext was not altered — not what was decided.
  */
 import { createHash, createHmac } from 'node:crypto';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { canonicalize, newId } from '@permitzero/domain';
 import type { ActorType, AuditEventRecord } from '@permitzero/domain';
 import { isDbError, type DbExecutor } from '../client.js';
+import { currentKey, DecryptionError, deriveKey, encryptColumn, readColumn, verificationKeys } from '../crypto.js';
 import { toAuditEventRecord } from '../mappers.js';
 import { auditEvents } from '../schema.js';
 
 export const AUDIT_HASH_VERSION_PLAIN = 'pz-audit-v1';
 export const AUDIT_HASH_VERSION_HMAC = 'pz-audit-hmac-v1';
+
+/** The domain-separation label for the audit payload's encryption key. */
+const AUDIT_PAYLOAD_PURPOSE = 'audit-payload';
 
 export interface AuditHashInput {
   tenantId: string;
@@ -63,6 +73,174 @@ export function computeAuditHash(input: AuditHashInput, hmacKey?: string | null)
 
 function truncateToMs(date: Date): Date {
   return new Date(Math.floor(date.getTime()));
+}
+
+/**
+ * The master keys that may verify or decrypt this tenant's audit rows.
+ *
+ * The explicitly supplied key comes first, then the environment keyring in
+ * order — current first, then the keys that were current before it. A row
+ * written under an older key therefore stays verifiable for as long as that
+ * key is in the ring, which is what makes a rotation survivable: the new key
+ * is added to the ring BEFORE it becomes current, so no row is ever written
+ * with a key the verifier cannot reach.
+ */
+function candidateMasters(explicit?: string | null): string[] {
+  const out: string[] = [];
+  for (const master of [explicit, ...verificationKeys()]) {
+    if (typeof master === 'string' && master.length > 0 && !out.includes(master)) out.push(master);
+  }
+  return out;
+}
+
+/** The derived keys that may decrypt an audit payload. */
+function payloadKeys(masters: readonly string[]): Buffer[] {
+  return masters.map((master) => deriveKey(master, AUDIT_PAYLOAD_PURPOSE));
+}
+
+/**
+ * The payload as it was written, whether it is stored in the clear or as an
+ * envelope.
+ *
+ * THE LEGACY RULE: a row written before encryption was enabled holds a
+ * plaintext payload, and it is used as it is. `audit_events` is append-only,
+ * so such a row can never be rewritten in place; refusing to read it would
+ * turn a migration into an outage, and silently rewriting it would rewrite
+ * evidence.
+ */
+function readAuditPayload(stored: unknown, keys: readonly Buffer[]): Record<string, unknown> {
+  const value = readColumn<Record<string, unknown>>(stored, keys);
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {};
+}
+
+/** The row as the application sees it: the payload in the clear. */
+function decryptedAuditRow<T extends { payloadRedactedJson: unknown }>(row: T, keys: readonly Buffer[]): T {
+  return { ...row, payloadRedactedJson: readAuditPayload(row.payloadRedactedJson, keys) };
+}
+
+/**
+ * Seal an audit row: its hash, its hash version, and the payload as it
+ * must be STORED.
+ *
+ * The hash is computed over the canonical PLAINTEXT and the stored payload
+ * is the ciphertext, exactly as `appendAuditEvent` writes it — so a row
+ * sealed here is indistinguishable from one the repository appended, and
+ * a reader that can verify the hash can also read the row.
+ *
+ * The key that writes is the key that is current: the one the caller
+ * supplied, otherwise the head of the environment keyring. A caller with
+ * no key writes a plain, unencrypted row, which is the pre-encryption
+ * behaviour — degraded and visible, rather than a silent substitute key.
+ */
+export function sealAuditEvent(
+  input: AuditHashInput,
+  opts?: { hmacKey?: string | null },
+): { hash: string; version: string; storedPayload: Record<string, unknown> } {
+  const master = opts?.hmacKey ?? currentKey();
+  const { hash, version } = computeAuditHash(input, master);
+  return {
+    hash,
+    version,
+    storedPayload: master ? encryptColumn(input.payload, deriveKey(master, AUDIT_PAYLOAD_PURPOSE)) : input.payload,
+  };
+}
+
+/**
+ * Re-anchor a stored audit row onto a new predecessor.
+ *
+ * The retention sweep removes rows from the middle of a chain, which
+ * breaks every row after the gap: the successor names a predecessor that
+ * no longer exists, and its own hash was computed over that value. The
+ * rows that survive are therefore RE-LINKED — re-sequenced and
+ * re-hashed — so the chain stays contiguous and verifies again.
+ *
+ * The hash of a re-linked row must be computed exactly the way the
+ * ORIGINAL hash was computed, or the chain stops verifying and the
+ * platform reports its own housekeeping as tampering. Two things make
+ * that easy to get wrong, and both of them are wrong here:
+ *
+ *   · THE PAYLOAD. The hash is computed over the canonical PLAINTEXT.
+ *     The stored column holds the CIPHERTEXT when the deployment has a
+ *     key. Hashing the stored bytes produces a digest that no verifier
+ *     can reproduce, because the verifier hashes the plaintext.
+ *
+ *   · THE KEY. The row's `hash_version` says whether it was keyed, but
+ *     not WHICH key. During a rotation the ring holds several, and the
+ *     right one for a given row is the one that reproduces its existing
+ *     hash. A sweep that re-hashes with the current key would rewrite
+ *     rows that were written under a retired one, and the row would stop
+ *     verifying under the key that actually wrote it.
+ *
+ * So the key is DISCOVERED, not assumed: the row's own existing hash is
+ * reproduced against every candidate key, and the one that matches is the
+ * one used to re-hash it. The result is the same digest the row would
+ * have had if it had been written that way — which is the whole point of
+ * a re-anchor.
+ *
+ * Returns null when no candidate key reproduces the row's existing hash.
+ * That means the row is not what it claims to be, and re-linking it
+ * would launder a tampered row into a clean-looking chain. The caller
+ * must refuse rather than guess.
+ */
+export function reanchorAuditHash(
+  row: {
+    tenantId: string;
+    eventId: string;
+    actionId: string | null;
+    runId: string | null;
+    actorType: string;
+    actorId: string;
+    eventType: string;
+    eventTime: Date;
+    traceId: string;
+    policyRevisionId: string | null;
+    /** The stored payload column: plaintext, or an encryption envelope. */
+    storedPayload: unknown;
+    /** The predecessor the row currently names, and so the one its existing
+     * hash was computed over. */
+    previousHash: string | null;
+    /** The hash the row currently carries. */
+    eventHash: string;
+  },
+  newPreviousHash: string | null,
+  opts?: { hmacKey?: string | null },
+): { hash: string; version: string } | null {
+  const masters = candidateMasters(opts?.hmacKey);
+  const keys = payloadKeys(masters);
+  // The payload as the hash saw it: the plaintext, decrypted if the
+  // deployment has a key. Hashing the stored envelope instead would
+  // produce a digest the verifier cannot reproduce.
+  let payload: Record<string, unknown>;
+  try {
+    payload = readAuditPayload(row.storedPayload, keys);
+  } catch {
+    return null;
+  }
+  const base = {
+    tenantId: row.tenantId,
+    eventId: row.eventId,
+    actionId: row.actionId,
+    runId: row.runId,
+    actorType: row.actorType,
+    actorId: row.actorId,
+    eventType: row.eventType,
+    eventTime: truncateToMs(row.eventTime),
+    traceId: row.traceId,
+    policyRevisionId: row.policyRevisionId,
+    payload,
+  };
+  // Find the key that wrote this row: the one under which its EXISTING
+  // hash reproduces over its EXISTING predecessor. A row written plain has
+  // no key at all, and the plain hash is checked first for exactly that
+  // reason.
+  const candidates: (string | null)[] = [null, ...masters];
+  for (const master of candidates) {
+    const current = computeAuditHash({ ...base, previousHash: row.previousHash }, master);
+    if (current.hash !== row.eventHash) continue;
+    // Same key, new predecessor.
+    return computeAuditHash({ ...base, previousHash: newPreviousHash }, master);
+  }
+  return null;
 }
 
 export interface AppendAuditInput {
@@ -121,6 +299,12 @@ export async function appendAuditEvent(
 ): Promise<AuditEventRecord> {
   const eventId = input.eventId ?? newId('auditEvent');
   const eventTime = truncateToMs(input.eventTime ?? new Date());
+  // The key that WRITES is the key that is current: the one the caller
+  // supplied, otherwise the head of the environment keyring. The payload is
+  // encrypted with a key derived from it, so a deployment without a key stores
+  // plaintext — which is the pre-existing unkeyed behaviour, degraded and
+  // visible, rather than a silent substitute key.
+  const master = opts?.hmacKey ?? currentKey();
   let lastError: unknown = null;
   // Take the chain lock before reading the head, not at insert time.
   //
@@ -160,7 +344,10 @@ export async function appendAuditEvent(
         payload: input.payload,
         previousHash,
       },
-      opts?.hmacKey,
+      // The hash uses the same key the payload is encrypted with, so a row is
+      // never "keyed but unencrypted" or "encrypted but unkeyed": the two would
+      // disagree about what a reader needs in order to check the row.
+      master,
     );
     try {
       const [row] = await ex
@@ -176,7 +363,13 @@ export async function appendAuditEvent(
           actorType: input.actorType,
           actorId: input.actorId,
           policyRevisionId: input.policyRevisionId ?? null,
-          payloadRedactedJson: input.payload,
+          // The hash above was computed over the canonical PLAINTEXT; what
+          // lands in the column is the ciphertext. The two are deliberately
+          // different things: the hash is the record of the decision, the
+          // column is how the decision is stored.
+          payloadRedactedJson: master
+            ? encryptColumn(input.payload, deriveKey(master, AUDIT_PAYLOAD_PURPOSE))
+            : input.payload,
           eventHash: hash,
           previousHash,
           hashVersion: version,
@@ -185,7 +378,7 @@ export async function appendAuditEvent(
         })
         .returning();
       if (!row) throw new Error('audit insert returned no row');
-      return toAuditEventRecord(row);
+      return toAuditEventRecord(decryptedAuditRow(row, payloadKeys(candidateMasters(master))));
     } catch (err) {
       // Contention: another writer moved the head, so re-read it and try again.
       // Anything else — including a plain CHECK violation on the row — is a bug in
@@ -240,7 +433,7 @@ export async function listAuditEvents(
   ex: DbExecutor,
   tenantId: string,
   filters: ListAuditFilters,
-  opts: { limit: number; cursor?: string | null },
+  opts: { limit: number; cursor?: string | null; hmacKey?: string | null },
 ): Promise<{ rows: AuditEventRecord[]; nextCursor: string | null }> {
   const conditions = [eq(auditEvents.tenantId, tenantId)];
   if (filters.actionId) conditions.push(eq(auditEvents.actionId, filters.actionId));
@@ -262,8 +455,14 @@ export async function listAuditEvents(
     .limit(opts.limit + 1);
   const page = rows.slice(0, opts.limit);
   const last = page[page.length - 1];
+  // The rows on disk are ciphertext; the records the API returns are the
+  // payloads as they were written. A row that cannot be decrypted fails the
+  // read loudly rather than being returned with an empty payload: an audit
+  // page that silently omits what it cannot decrypt is worse than one that
+  // says the keyring is wrong.
+  const keys = payloadKeys(candidateMasters(opts.hmacKey));
   return {
-    rows: page.map(toAuditEventRecord),
+    rows: page.map((row) => toAuditEventRecord(decryptedAuditRow(row, keys))),
     nextCursor: rows.length > opts.limit && last ? encodeCursor(last.eventTime, last.eventId) : null,
   };
 }
@@ -283,6 +482,11 @@ export interface ChainVerification {
 /**
  * Recompute every hash and linkage for a tenant. Keyed rows need the HMAC key;
  * without it they are reported, not guessed.
+ *
+ * The payload is decrypted before the hash is recomputed, because the hash
+ * covers the canonical PLAINTEXT. Every key in the ring is tried: the current
+ * one first, then the ones that were current before it, so a chain written
+ * under a retired-but-still-verifying key still verifies.
  */
 export async function verifyAuditChain(
   ex: DbExecutor,
@@ -295,6 +499,8 @@ export async function verifyAuditChain(
     .where(eq(auditEvents.tenantId, tenantId))
     .orderBy(asc(auditEvents.sequence));
   const breaks: ChainBreak[] = [];
+  const masters = candidateMasters(opts?.hmacKey);
+  const keys = payloadKeys(masters);
   let previous: string | null = null;
   let expectedSequence = 1;
   for (const row of rows) {
@@ -306,33 +512,51 @@ export async function verifyAuditChain(
       breaks.push({ sequence, eventId: row.eventId, reason: 'previous-hash link broken' });
     }
     const keyed = row.hashVersion === AUDIT_HASH_VERSION_HMAC;
-    if (keyed && !opts?.hmacKey) {
+    if (keyed && masters.length === 0) {
       breaks.push({ sequence, eventId: row.eventId, reason: 'keyed hash but no key provided for verification' });
     } else {
-      const payload =
-        typeof row.payloadRedactedJson === 'object' &&
-        row.payloadRedactedJson !== null &&
-        !Array.isArray(row.payloadRedactedJson)
-          ? (row.payloadRedactedJson as Record<string, unknown>)
-          : {};
-      const { hash } = computeAuditHash(
-        {
-          tenantId: row.tenantId,
+      let payload: Record<string, unknown>;
+      try {
+        payload = readAuditPayload(row.payloadRedactedJson, keys);
+      } catch (err) {
+        // The payload could not be opened. GCM cannot tell "the bytes were
+        // altered" from "this key is not the one that wrote the row", and the
+        // message says both rather than guessing: an operator reading it has
+        // to check the keyring and the row, and both are worth checking.
+        breaks.push({
+          sequence,
           eventId: row.eventId,
-          actionId: row.actionId,
-          runId: row.runId,
-          actorType: row.actorType,
-          actorId: row.actorId,
-          eventType: row.eventType,
-          eventTime: truncateToMs(row.eventTime),
-          traceId: row.traceId,
-          policyRevisionId: row.policyRevisionId,
-          payload,
-          previousHash: row.previousHash,
-        },
-        keyed ? opts?.hmacKey : null,
-      );
-      if (hash !== row.eventHash) {
+          reason:
+            err instanceof DecryptionError && err.reason === 'MALFORMED'
+              ? 'payload envelope is malformed'
+              : 'payload failed authentication: the ciphertext was altered, or no key provided for verification could open it',
+        });
+        previous = row.eventHash;
+        expectedSequence = sequence + 1;
+        continue;
+      }
+      const hashInput = {
+        tenantId: row.tenantId,
+        eventId: row.eventId,
+        actionId: row.actionId,
+        runId: row.runId,
+        actorType: row.actorType,
+        actorId: row.actorId,
+        eventType: row.eventType,
+        eventTime: truncateToMs(row.eventTime),
+        traceId: row.traceId,
+        policyRevisionId: row.policyRevisionId,
+        payload,
+        previousHash: row.previousHash,
+      };
+      // Any key in the ring may be the one this row was written with, so the
+      // row verifies when ANY of them reproduces its hash. Trying them in
+      // order costs one HMAC per key and turns "which key wrote this row?"
+      // into a question the verifier can answer on its own.
+      const matched = keyed
+        ? masters.some((master) => computeAuditHash(hashInput, master).hash === row.eventHash)
+        : computeAuditHash(hashInput, null).hash === row.eventHash;
+      if (!matched) {
         breaks.push({ sequence, eventId: row.eventId, reason: 'event hash mismatch: bytes changed after append' });
       }
     }
