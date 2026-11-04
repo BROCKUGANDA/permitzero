@@ -65,7 +65,7 @@ afterAll(async () => {
  */
 async function appWithAuditKey(key: string | null): Promise<void> {
   await closeApp(t);
-  const config = { ...testConfig(), modelProvider: 'disabled' as const, auditHmacKey: key };
+  const config = { ...testConfig(), modelProvider: 'disabled' as const, auditHmacKey: key, logLevel: 'debug' as const };
   const { app } = await buildApp({
     db: t.db,
     dbRuntime: t.runtime,
@@ -119,6 +119,12 @@ interface EnrolResponse {
 
 async function enrol(token = t.approver1Token): Promise<EnrolResponse> {
   const res = await postJson(t, '/v1/me/mfa/enrol', token, {});
+  if (res.status !== 200) {
+    const fs = await import('node:fs');
+    fs.writeFileSync('enrol-error.json', JSON.stringify(res.json, null, 2));
+    console.error('ENROL ERROR STATUS:', res.status);
+    console.error('ENROL ERROR BODY written to enrol-error.json');
+  }
   expect(res.status).toBe(200);
   return res.json as EnrolResponse;
 }

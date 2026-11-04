@@ -215,6 +215,7 @@ describe('schema parity', () => {
       '0008_mfa_totp.sql',
       '0009_encryption_at_rest.sql',
       '0010_retention_and_legal_hold.sql',
+      '0011_mfa_last_used_step.sql',
     ]);
   });
 });
