@@ -23,6 +23,7 @@ const res = spawnSync('npm', ['run', 'demo:scenario'], {
   encoding: 'utf8',
   env: { ...process.env, API_URL },
   stdio: 'inherit',
+  shell: process.platform === 'win32',
 });
 
 if (res.status !== 0) {

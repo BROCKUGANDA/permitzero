@@ -133,8 +133,12 @@ Before migrate/seed the setup script confirms:
 
 - `npm run db:migrate` is safe to rerun (migrations are tracked; the runner takes a
   per-database advisory lock so concurrent boots do not double-apply).
-- `npm run db:seed` is synthetic-data only and idempotent (upserts by fixture id;
-  rerunning does not duplicate vendors, invoices, or purchase orders).
+- `npm run db:seed` is synthetic-data only. It is **not** idempotent on a
+  populated database: a second run without a reset fails with a unique-constraint
+  violation on the `demo` tenant slug (by design — `packages/db/test/seed.test.ts`
+  asserts `seed` rejects a second invocation). To reseed, run
+  `npm run db:reset && npm run db:seed`. Within a single seed run, fixture rows
+  are upserted by fixture id, so a partial failure can be retried after reset.
 - `npm run db:reset` drops and reseeds (destructive; demo data only).
 
 ## Synthetic data only
@@ -179,15 +183,24 @@ PRD FR-072), and `MODEL_ENABLED=true`; this is opt-in and not part of the defaul
 | --- | --- |
 | `npm ci` | Dependencies already installed (node_modules present); `npm ci` against `package-lock.json` is the judge's clean-install step |
 | `cp .env.example .env` | Verifiable (file present) |
-| `npm run db:migrate` | Could not run — PostgreSQL unavailable in sandbox (INSP-05) |
-| `npm run db:seed` | Could not run — PostgreSQL unavailable |
-| `npm run dev` | Could not run fully — API needs PostgreSQL |
-| `npm run demo:scenario` | Could not run — no running stack |
-| `npm run verify -- --strict` | Partially: typecheck PASS, lint PASS; test suite incomplete without Postgres |
+| `npm run db:migrate` | PASS (PostgreSQL 18 via WSL; all 11 migrations applied) |
+| `npm run db:seed` | PASS (synthetic tenant + tokens written) |
+| `npm run dev` | PASS (API :8080 ready, RLS enforced, 25/25 tables) |
+| `npm run demo:scenario` | PASS (allow / approval / dual-control, all steps) |
+| `npm run verify -- --strict` | PASS (typecheck, lint, 606 tests, build) |
 | `npm run typecheck` | PASS (all 12 workspaces) |
 | `npm run lint` | PASS (`--max-warnings=0`) |
-| DB-independent tests | 136/136 PASS (domain, policy, provider-meta, schemas) |
+| `npm run secret:scan` | PASS (no leaks) |
+| DB tests | 606/606 PASS (incl. RLS, audit concurrency, tenant isolation) |
+| `npm run judge:setup` | PASS (after Windows shell fix) |
+| `npm run judge:demo` | PASS |
+| `npm run judge:verify` | PASS (full gate green) |
 
-**Verdict:** Partially reproducible. The code gates (typecheck, lint, non-DB tests) are
-verified. The live database-dependent workflow is verified only to the point the sandbox
-allows; a judge needs a stable PostgreSQL 17 to complete steps 4–10.
+**Workaround used:** the native Windows PostgreSQL 17 build is unstable in this
+sandbox (`0xC0000142`); PostgreSQL 18 was installed in WSL2 (Ubuntu) and reached
+over `127.0.0.1:5432` via localhost forwarding. Redis runs in the same WSL
+instance. See `TROUBLESHOOTING.md` §2/§10.
+
+**Verdict:** Reproducible. All steps 1–10 of the judge workflow now run and pass
+in this environment, including migrations, seed, stack startup, the end-to-end
+demo scenario, the full strict verification gate, and audit-chain inspection.
