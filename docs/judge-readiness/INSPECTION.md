@@ -57,7 +57,10 @@ Method: grep for TODO/FIXME/XXX/HACK/placeholder/mock; read migrations, seeds, r
 **Evidence:** BASELINE.md §4; direct `pg_ctl`/`psql` attempts.  
 **Remediation:** Run the judge workflow on a machine with a stable PostgreSQL 17 and Redis (Docker Compose or native). The repository's own `infra/docker-compose.yml` provides the stack.  
 **Test:** `npm test` (DB-dependent files skip/fail without Postgres); `npm run typecheck` and `npm run lint` pass without Postgres.  
-**Status:** Open — documented in LIMITATIONS.md; reproducibility verdict is "Partially reproducible" pending a stable Postgres.
+**Status:** Resolved via WSL2 workaround (see `TROUBLESHOOTING.md` §10). All
+DB-dependent tests, migrations, seed, stack, and demo now pass; reproducibility
+verdict upgraded to "Reproducible". Native Windows PostgreSQL 17 remains unstable
+in this sandbox and is not required.
 
 ## Finding INSP-06 — CI runner isolation is partial (shared host)
 

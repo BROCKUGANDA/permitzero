@@ -17,6 +17,7 @@ console.log('PermitZero judge verification (strict)\n');
 const res = spawnSync('npm', ['run', 'verify', '--', '--strict'], {
   encoding: 'utf8',
   stdio: 'inherit',
+  shell: process.platform === 'win32',
 });
 
 if (res.status !== 0) {

@@ -117,3 +117,12 @@ The original submission commit `91e4a6d`, its branch `feat/close-the-absent-cont
 ---
 
 *Baseline recorded Mon Nov 09 2026. Environment: Windows 11, Node v26.7.0, npm 11.19.0, PostgreSQL 17 (unstable in sandbox), Redis running.*
+
+## Post-verification update
+
+The native Windows PostgreSQL 17 build remained unstable, but the full judge
+workflow was completed using PostgreSQL 18 + Redis installed in WSL2 (Ubuntu) and
+reached over localhost (see `TROUBLESHOOTING.md` §10). Outcome: migrations applied,
+seed written, API ready with RLS enforced on 25/25 tables, demo scenario passed
+(allow / approval / dual-control), and `npm run verify -- --strict` passed with
+606/606 tests and a successful build. Reproducibility verdict: Reproducible.
