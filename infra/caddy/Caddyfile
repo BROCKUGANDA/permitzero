@@ -54,16 +54,18 @@
 	}
 }
 
-# Two names, one site block, one certificate with two SANs:
+# Names served by this edge.
 #
-#   · the hostname the product is asked to serve, and
-#   · a hostname that sits behind Cloudflare's proxy, which is the only way on
-#     this zone set to get a request that has actually passed WAF and the
-#     rate-limit rules.
+#   · {$PZ_HOSTNAMES} — Let's Encrypt HTTP-01. These names resolve straight to
+#     this host, so the challenge answers directly.
+#   · permitzero.aiazimara.com — behind the Cloudflare proxy (Full/strict).
+#     Its zone returns 403 for /.well-known/acme-challenge/*, so HTTP-01 can
+#     never validate; it presents a Cloudflare Origin CA certificate instead
+#     (mounted read-only at /etc/caddy/certs/).
 #
-# The list comes from the environment so adding a name is a config change, not
-# an edit to security-relevant file.
-{$PZ_HOSTNAMES} {
+# PZ_HOSTNAMES comes from the environment so adding a name is a config
+# change, not an edit to a security-relevant file.
+(pz_site) {
 	import pz_security_headers
 	import pz_body_limit
 	encode zstd gzip
@@ -113,6 +115,15 @@
 			health_timeout 3s
 		}
 	}
+}
+
+{$PZ_HOSTNAMES} {
+	import pz_site
+}
+
+permitzero.aiazimara.com {
+	tls /etc/caddy/certs/origin.crt /etc/caddy/certs/origin.key
+	import pz_site
 }
 
 # ---------------------------------------------------------------------------

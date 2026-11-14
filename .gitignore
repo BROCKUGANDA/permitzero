@@ -65,3 +65,6 @@ infra/data/
 
 # The agent skill lockfile: written by the local tooling, not by the project.
 skills-lock.json
+
+# Cloudflare Origin CA key material (mounted into the edge at deploy time)
+infra/caddy/certs/
