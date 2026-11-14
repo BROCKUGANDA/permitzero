@@ -330,6 +330,9 @@ services:
     restart: unless-stopped
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Cloudflare Origin CA cert+key for names fronted by the CF proxy
+      # (e.g. permitzero.aiazimara.com). Origin-only, never committed.
+      - ./caddy/certs:/etc/caddy/certs:ro
       - caddy_data:/data
       - caddy_config:/config
     ports:
