@@ -237,14 +237,19 @@ jobs:
           mkdir -p "$DEPLOY_DIR"
           # --delete keeps the target a faithful copy of the verified commit,
           # so a file removed from the repository is removed from the host
-          # too. The excludes are the two things that belong to the host
-          # rather than to the repository: the env file and the runtime
-          # state the seed writes.
+          # too. Every exclude below is state that belongs to the HOST, not to
+          # the checkout. Without them a deploy deletes the database's WAL and
+          # base backups (owned by postgres, so rsync cannot even unlink them,
+          # which fails the whole step), the edge's origin CA certificates, and
+          # the generated observability config with its scrape token.
           rsync -a --delete \
             --exclude '.git' \
             --exclude 'infra/deploy/permitzero.env' \
             --exclude 'storage/' \
             --exclude 'node_modules/' \
+            --exclude 'backups/' \
+            --exclude 'infra/caddy/certs/' \
+            --exclude 'run/' \
             "${GITHUB_WORKSPACE}/" "$DEPLOY_DIR/"
           # The scripts have to be executable on the host. rsync preserves the
           # mode it is given, and a checkout does not always carry the execute
