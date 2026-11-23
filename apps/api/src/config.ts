@@ -114,6 +114,12 @@ export interface ApiConfig {
   wiseWebhookPublicKey: string | null;
   /** Allowlisted destination hosts for outbound notification sinks. Empty = no delivery (fail closed). */
   notificationAllowedHosts: readonly string[];
+  /**
+   * Code execution spawns an interpreter as the API's OS user. It is off unless
+   * a deployment opts in explicitly; the route is not even registered when
+   * this is false, so there is no endpoint to probe or guess at.
+   */
+  codeExecutionEnabled?: boolean;
 }
 
 /** The step-up window used when the configuration does not name one. */
@@ -234,5 +240,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     marketSnapshotMaxAgeMs: intIn(env, 'MARKET_SNAPSHOT_MAX_AGE_MS', 300_000, 5_000, 86_400_000),
     wiseWebhookPublicKey: env['WISE_WEBHOOK_PUBLIC_KEY']?.trim() ? env['WISE_WEBHOOK_PUBLIC_KEY'].trim() : null,
     notificationAllowedHosts: csvList(env['NOTIFICATION_ALLOWED_HOSTS']),
+    codeExecutionEnabled: booleanOf(env, 'CODE_EXECUTION_ENABLED', false),
   };
 }

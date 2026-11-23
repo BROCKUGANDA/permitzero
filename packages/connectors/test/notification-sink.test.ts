@@ -117,6 +117,21 @@ describe('HttpNotificationSink destination safety', () => {
     expect((await sink.deliver({ ...BASE, destination: 'https://hooks.eu.example.com/a' })).status).toBe('DELIVERED');
     expect(calls).toHaveLength(1);
   });
+
+  it('refuses a redirect instead of following it off the allowlist', async () => {
+    let options: RequestInit | undefined;
+    const impl = (async (_url: string | URL | Request, init?: RequestInit) => {
+      options = init;
+      return new Response(null, { status: 307, headers: { Location: 'https://internal.example.net/secret' } });
+    }) as typeof fetch;
+    const sink = new HttpNotificationSink({ allowedHosts: ['example.com'], fetchImpl: impl });
+
+    expect(await sink.deliver(BASE)).toMatchObject({
+      status: 'FAILED_TERMINAL',
+      errorClass: 'REDIRECT_REFUSED',
+    });
+    expect(options?.redirect).toBe('manual');
+  });
 });
 
 describe('MemoryNotificationSink', () => {

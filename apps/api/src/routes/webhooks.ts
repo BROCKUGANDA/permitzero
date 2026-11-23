@@ -21,6 +21,7 @@
  * retries. Unknown references are acked 200 and recorded as
  * `ignored_unknown_ref` — retrying them would never succeed.
  */
+import { createHash } from 'node:crypto';
 import {
   decodeWiseWebhookPublicKey,
   WiseWebhookError,
@@ -96,15 +97,21 @@ export async function webhookRoutes(app: ZodFastifyInstance, ctx: AppContext): P
       throw new ForbiddenError('The webhook body could not be parsed.');
     }
 
-    // Dedupe by delivery id: insert wins → we process; a duplicate whose
-    // previous attempt never finished (outcome 'received') is re-processed;
-    // anything else is acknowledged without rework.
+    // Dedupe on the VERIFIED bytes, not on X-Delivery-Id. The header is
+    // caller-controlled: anyone holding one genuine signed delivery can replay
+    // it under fresh ids and create new reconciliation events for the same
+    // transfer. A hash of the signed body cannot be changed without breaking
+    // the signature that was just checked.
+    const dedupeKey = createHash('sha256').update(rawBody).digest('hex');
+    // insert wins → we process; a duplicate whose previous attempt never
+    // finished (outcome 'received') is re-processed; anything else is
+    // acknowledged without rework.
     const dedupe = await withTransaction(ctx.runtime, (tx) =>
-      recordWebhookDelivery(tx, { provider: PROVIDER, deliveryId, providerRef: parsed.providerRef }),
+      recordWebhookDelivery(tx, { provider: PROVIDER, deliveryId: dedupeKey, providerRef: parsed.providerRef }),
     );
     let traceId: string | null = dedupe.kind === 'inserted' ? dedupe.traceId : null;
     if (dedupe.kind === 'duplicate') {
-      const existing = await withTransaction(ctx.runtime, (tx) => getWebhookDelivery(tx, PROVIDER, deliveryId));
+      const existing = await withTransaction(ctx.runtime, (tx) => getWebhookDelivery(tx, PROVIDER, dedupeKey));
       if (existing && existing.outcome !== 'received') {
         return reply.code(200).send({ status: 'duplicate', outcome: existing.outcome });
       }
@@ -115,7 +122,7 @@ export async function webhookRoutes(app: ZodFastifyInstance, ctx: AppContext): P
     const dispatch = await findDispatchByProviderRef(ctx.runtime, parsed.providerRef);
     if (!dispatch) {
       await withTransaction(ctx.runtime, (tx) =>
-        finalizeWebhookDelivery(tx, PROVIDER, deliveryId, {
+        finalizeWebhookDelivery(tx, PROVIDER, dedupeKey, {
           outcome: 'ignored_unknown_ref',
           providerRef: parsed.providerRef,
         }),
@@ -146,7 +153,7 @@ export async function webhookRoutes(app: ZodFastifyInstance, ctx: AppContext): P
     });
 
     await withTransaction(ctx.runtime, (tx) =>
-      finalizeWebhookDelivery(tx, PROVIDER, deliveryId, {
+      finalizeWebhookDelivery(tx, PROVIDER, dedupeKey, {
         outcome: enqueuedActionId ? 'enqueued' : 'ignored_inactive_action',
         resolvedTenantId: dispatch.tenantId,
         resolvedActionId: enqueuedActionId,

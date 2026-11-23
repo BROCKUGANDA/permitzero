@@ -8,7 +8,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { CodeExecutionFinanceConnector } from '@permitzero/connectors';
-import { UnauthenticatedError, BadRequestError } from '@permitzero/domain';
+import { UnauthenticatedError, BadRequestError, ForbiddenError, Role } from '@permitzero/domain';
 import type { AppContext, ZodFastifyInstance } from '../app.js';
 import { authenticateToken } from '../auth.js';
 import { deriveCodeExecutionKey, suppliedIdempotencyKey } from '../code-execution-key.js';
@@ -27,6 +27,17 @@ export async function codeExecutionRoutes(app: ZodFastifyInstance, ctx: AppConte
   app.post('/code-execution/run', async (request) => {
     const principal = await authenticateToken(ctx.runtime, request.headers.authorization, new Date());
     if (!principal) throw new UnauthenticatedError();
+    // This controller bypasses the broker's permit/policy path and hands the
+    // body to a real interpreter, so authentication alone is not enough. Only
+    // a tenant's administrative principals may reach it; an agent, approver,
+    // auditor or service credential must not be able to turn a bearer token
+    // into code running as the API's OS user.
+    if (
+      principal.actorType !== 'USER' ||
+      (!principal.roles.includes(Role.OWNER) && !principal.roles.includes(Role.POLICY_ADMIN))
+    ) {
+      throw new ForbiddenError('This credential may not submit code for execution.');
+    }
     const body = request.body as { code?: unknown; language?: unknown; args?: unknown };
     if (typeof body?.code !== 'string' || body.code.trim().length === 0) {
       throw new BadRequestError('code is required.');
@@ -60,12 +71,14 @@ export async function codeExecutionRoutes(app: ZodFastifyInstance, ctx: AppConte
       executionId: `exe_code_${idempotencyKey.slice(-12)}`,
       traceId: `trc_${randomUUID()}`,
     });
-    ctx.stores.audit
+    // Await the audit write: a response that says "executed" but whose audit
+    // record failed is a false claim. The idempotency key makes a retry safe.
+    await ctx.stores.audit
       .append({
         tenantId: principal.tenantId,
         actionId: null,
         runId: null,
-        actorType: 'USER',
+        actorType: principal.actorType,
         actorId: principal.actorId,
         eventType: 'code.executed',
         eventTime: new Date(),
@@ -77,13 +90,13 @@ export async function codeExecutionRoutes(app: ZodFastifyInstance, ctx: AppConte
           error_class: outcome.status === 'SUCCEEDED' ? null : (outcome as { errorClass: string }).errorClass,
         },
       })
-      // A code execution that ran without an audit record is a hole in the
-      // control plane. Do not fail the request after the fact, but never let
-      // the failure disappear silently either.
+      // A code execution with no audit record is a hole in the control plane.
+      // The caller must not receive a clean success in that case.
       .catch((err: unknown) => {
         console.error(
           `[code-execution] audit append failed for ${idempotencyKey}: ${err instanceof Error ? err.message : String(err)}`,
         );
+        throw err;
       });
     return {
       outcome: outcome.status,

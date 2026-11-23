@@ -135,6 +135,11 @@ export class HttpNotificationSink implements NotificationSink {
     try {
       response = await this.fetchImpl(request.destination, {
         method: 'POST',
+        // The host allowlist is checked on the URL we were given. Letting the
+        // client follow a 3xx would send the payload to whatever host the
+        // destination names, including one the operator never approved.
+        // 'manual' keeps the redirect as a response we can refuse below.
+        redirect: 'manual',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           channel: request.channel,
@@ -150,6 +155,9 @@ export class HttpNotificationSink implements NotificationSink {
       return { status: 'FAILED_RETRYABLE', errorClass: 'TRANSPORT_ERROR' };
     } finally {
       clearTimeout(timer);
+    }
+    if (response.status >= 300 && response.status < 400) {
+      return { status: 'FAILED_TERMINAL', errorClass: 'REDIRECT_REFUSED' };
     }
     if (response.status === 429 || response.status >= 500) {
       return { status: 'FAILED_RETRYABLE', errorClass: `HTTP_${response.status}` };
