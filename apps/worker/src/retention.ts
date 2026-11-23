@@ -483,8 +483,9 @@ async function recordRun(
     chainBoundaryHash: string | null;
     detail: Record<string, unknown>;
   },
+  tx?: DbTransaction,
 ): Promise<void> {
-  await deps.db.sql`
+  const statement = sql`
     INSERT INTO public.retention_runs
       (retention_run_id, tenant_id, started_at, finished_at, outcome,
        audit_retention_days, outbox_retention_days, audit_cutoff, outbox_cutoff,
@@ -499,6 +500,10 @@ async function recordRun(
        ${row.chainHeadBefore}, ${row.chainHeadAfter}, ${row.chainBoundaryHash},
        ${deps.config.operatorId}, ${JSON.stringify(row.detail)}::jsonb)
   `;
+  // Inside the purge transaction when one is given, so the record commits or
+  // rolls back together with the purge it describes.
+  if (tx) await tx.execute(statement);
+  else await deps.db.db.execute(statement);
 }
 
 /**
@@ -549,22 +554,28 @@ async function sweepTenant(deps: RetentionDeps, tenantId: string, now: Date): Pr
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended('pz_audit_chain:' || ${tenantId}, 0))`);
       const audit = await purgeAuditChain(tx, deps, tenantId, now);
       const outbox = await purgeOutbox(tx, deps, tenantId);
+      // The run record commits with the purge: if it cannot be written, the
+      // whole transaction rolls back rather than leaving deleted data with no
+      // durable record of the run and its boundary hashes.
+      await recordRun(
+        deps,
+        {
+          tenantId,
+          startedAt,
+          finishedAt: new Date(),
+          outcome: 'purged',
+          auditRowsPurged: audit.purged,
+          outboxRowsPurged: outbox.purged,
+          auditRowsRelinked: audit.relinked,
+          legalHold: false,
+          chainHeadBefore: audit.headBefore,
+          chainHeadAfter: audit.headAfter,
+          chainBoundaryHash: audit.boundaryHash,
+          detail: { outbox_rows_stamped: outbox.stamped },
+        },
+        tx,
+      );
       return { audit, outbox };
-    });
-
-    await recordRun(deps, {
-      tenantId,
-      startedAt,
-      finishedAt: new Date(),
-      outcome: 'purged',
-      auditRowsPurged: outcome.audit.purged,
-      outboxRowsPurged: outcome.outbox.purged,
-      auditRowsRelinked: outcome.audit.relinked,
-      legalHold: false,
-      chainHeadBefore: outcome.audit.headBefore,
-      chainHeadAfter: outcome.audit.headAfter,
-      chainBoundaryHash: outcome.audit.boundaryHash,
-      detail: { outbox_rows_stamped: outcome.outbox.stamped },
     });
 
     return {
@@ -593,7 +604,15 @@ async function sweepTenant(deps: RetentionDeps, tenantId: string, now: Date): Pr
       chainHeadAfter: null,
       chainBoundaryHash: null,
       detail: { error: message },
-    }).catch(() => undefined);
+    }).catch((recordErr: unknown) => {
+      // The purge failed and so did recording that it failed. Do not hide the
+      // second failure: the operator needs to know the run has no record.
+      retentionLog.error(
+        `[worker:retention] tenant ${tenantId}: could not record the failed run — ${
+          recordErr instanceof Error ? recordErr.message : String(recordErr)
+        }`,
+      );
+    });
     return {
       tenantId,
       outcome: message.startsWith('refusing to purge') ? 'skipped' : 'error',
