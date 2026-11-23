@@ -165,9 +165,16 @@ export function ReceiptView({ response }: { response: ExecuteActionResponse }): 
   }
   return (
     <div className="flex flex-col gap-3">
-      <Alert variant="success" title="Executed with a verified receipt">
-        The connector confirmed the effect{receipt.simulated ? ' in simulation — no real money moved' : ''}.
-      </Alert>
+      {receipt.simulated ? (
+        <Alert variant="success" title="Executed with a verified receipt">
+          The connector confirmed the effect in simulation — no real money moved.
+        </Alert>
+      ) : (
+        <Alert variant="success" title="Executed live — real funds">
+          The connector confirmed the effect at the payment provider. This was a LIVE transfer: real funds moved through
+          the connected account, so treat this receipt like a bank statement line.
+        </Alert>
+      )}
       <dl className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
         <div className="flex flex-col gap-0.5">
           <dt className="text-muted-foreground">Amount</dt>

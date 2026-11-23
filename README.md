@@ -373,7 +373,28 @@ permitzero/
 
 ---
 
-## 9. References
+## 9. Judge readiness
+
+Post-submission judge-readiness package (preserves the original submission; all work
+on branch `post-submission/judge-readiness`):
+
+- `docs/judge-readiness/BASELINE.md` — baseline snapshot.
+- `docs/judge-readiness/INSPECTION.md` — inspection findings.
+- `docs/judge-readiness/REPRODUCIBILITY.md` — one-command judge workflow.
+- `docs/judge-readiness/TROUBLESHOOTING.md` — cross-OS troubleshooting.
+- `docs/judge-readiness/ARCHITECTURE.md` — architecture summary.
+- `docs/judge-readiness/THREAT-MODEL.md` — threat model.
+- `docs/judge-readiness/DEMO-EXPECTED-RESULTS.md` — demo expected results.
+- `docs/judge-readiness/TEST-MATRIX.md` — test matrix.
+- `docs/judge-readiness/CLAIMS-AND-EVIDENCE.md` — claims vs evidence.
+- `docs/judge-readiness/LIMITATIONS.md` — honest limitations.
+- `docs/judge-readiness/DEPLOYMENT-MODEL.md` — deployment model.
+- `docs/judge-readiness/PRODUCT-AND-PILOT.md` — product and pilot.
+- `docs/judge-readiness/VIDEO-REVIEW.md` — demo video review.
+
+Judge entry points: `npm run judge:setup`, `npm run judge:demo`, `npm run judge:verify`.
+
+## 10. References
 
 - OWASP Agentic Applications Top 10 — agentic risk taxonomy (goal hijacking, tool misuse, identity/privilege abuse).
 - MAS SAFR (2026) — runtime authorization, human oversight, records of decisions in agentic finance.

@@ -29,6 +29,7 @@ export const ID_PREFIX = {
   idempotency: 'idm',
   ledger: 'ldg',
   dispatch: 'dsp',
+  connectedAccount: 'cac',
 } as const;
 
 export type IdKind = keyof typeof ID_PREFIX;

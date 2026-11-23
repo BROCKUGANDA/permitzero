@@ -9,10 +9,12 @@ export type {
   AgentRow,
   ApprovalRow,
   AuditEventRow,
+  ConnectedAccountRow,
   ConnectorRow,
   ExecutionRow,
   IdempotencyRecordRow,
   InvoiceRow,
+  MarketSnapshotRow,
   MfaSecretRow,
   OutboxEventRow,
   PermitRow,
@@ -23,6 +25,7 @@ export type {
   TenantMembershipRow,
   UserRow,
   VendorRow,
+  WebhookDeliveryRow,
 } from './schema.js';
 export * from './client.js';
 export * from './root-env.js';
@@ -36,7 +39,11 @@ export * from './repos/execution.js';
 export * from './repos/audit.js';
 export * from './repos/outbox.js';
 export * from './repos/catalog.js';
+export * from './repos/connected-accounts.js';
+export * from './repos/market.js';
+export * from './repos/webhooks.js';
 export * from './crypto.js';
+export * from './live-finance.js';
 export * from './stores.js';
 export * from './seed.js';
 export * from './seed-policy.js';

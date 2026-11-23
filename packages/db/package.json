@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@permitzero/broker": "*",
+    "@permitzero/connectors": "*",
     "@permitzero/domain": "*",
     "@permitzero/schemas": "*",
     "dotenv": "^16.4.7",

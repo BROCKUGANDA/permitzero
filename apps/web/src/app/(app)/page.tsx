@@ -7,6 +7,8 @@ import { ApiError, useActions, useMe, useStatus } from '@/lib/api';
 import { canApprove } from '@/lib/permissions';
 import { ModeBadge, StateBadge, ToolBadge } from '@/components/badges';
 import { RequestError } from '@/components/execution';
+import { SignalHero } from '@/components/signal-hero';
+import { Reveal, Stagger, StaggerItem } from '@/components/motion';
 import type { StatusResponse } from '@permitzero/schemas';
 
 function StatusDot({
@@ -130,7 +132,7 @@ export default function OverviewPage(): React.JSX.Element {
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
+          <h1 className="font-mono text-2xl font-semibold tracking-tight">
             {me ? `Good to see you, ${me.display_name.split(' ')[0]}.` : 'Overview'}
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -140,6 +142,10 @@ export default function OverviewPage(): React.JSX.Element {
         {status ? <ModeBadge mode={status.enforcement_mode} /> : null}
       </div>
 
+      <Reveal delay={0.04}>
+        <SignalHero status={status ?? null} />
+      </Reveal>
+
       {error ? (
         <RequestError
           error={error}
@@ -147,30 +153,40 @@ export default function OverviewPage(): React.JSX.Element {
         />
       ) : null}
 
-      {isLoading || !status ? (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <Skeleton className="h-64 w-full" />
-          <Skeleton className="h-64 w-full" />
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Activity className="size-5 text-primary" aria-hidden />
-                Enforcement health
-              </CardTitle>
-              <CardDescription>
-                {status.app_env} · version {status.version}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <DependencyRows status={status} />
-            </CardContent>
-          </Card>
-          <DecisionQueue />
-        </div>
-      )}
+      <Stagger className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        {isLoading || !status ? (
+          <>
+            <StaggerItem>
+              <Skeleton className="h-64 w-full" />
+            </StaggerItem>
+            <StaggerItem>
+              <Skeleton className="h-64 w-full" />
+            </StaggerItem>
+          </>
+        ) : (
+          <>
+            <StaggerItem>
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Activity className="size-5 text-primary" aria-hidden />
+                    Enforcement health
+                  </CardTitle>
+                  <CardDescription>
+                    {status.app_env} · version {status.version}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <DependencyRows status={status} />
+                </CardContent>
+              </Card>
+            </StaggerItem>
+            <StaggerItem>
+              <DecisionQueue />
+            </StaggerItem>
+          </>
+        )}
+      </Stagger>
 
       {status?.enforcement_mode === 'EMERGENCY_STOP' ? (
         <Alert variant="destructive" title="Emergency stop is in force">
@@ -178,28 +194,30 @@ export default function OverviewPage(): React.JSX.Element {
         </Alert>
       ) : null}
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <PlugZap className="size-5 text-primary" aria-hidden />
-            How this console works
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="grid grid-cols-1 gap-4 text-sm leading-relaxed text-muted-foreground sm:grid-cols-3">
-          <p>
-            <strong className="font-semibold text-foreground">Agents ask first.</strong> Every request is checked
-            against policy before anything happens — allowed ones run, risky ones wait here.
-          </p>
-          <p>
-            <strong className="font-semibold text-foreground">Humans decide in plain words.</strong> Approvals show what
-            was asked and why it needs you. One rejection stops a request for good.
-          </p>
-          <p>
-            <strong className="font-semibold text-foreground">Everything is proven.</strong> Effects only count with a
-            verified receipt; ambiguous outcomes reconcile instead of guessing.
-          </p>
-        </CardContent>
-      </Card>
+      <Reveal delay={0.3}>
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 font-mono">
+              <PlugZap className="size-5 text-primary" aria-hidden />
+              How this console works
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="grid grid-cols-1 gap-4 text-sm leading-relaxed text-muted-foreground sm:grid-cols-3">
+            <p>
+              <strong className="font-semibold text-foreground">Agents ask first.</strong> Every request is checked
+              against policy before anything happens — allowed ones run, risky ones wait here.
+            </p>
+            <p>
+              <strong className="font-semibold text-foreground">Humans decide in plain words.</strong> Approvals show
+              what was asked and why it needs you. One rejection stops a request for good.
+            </p>
+            <p>
+              <strong className="font-semibold text-foreground">Everything is proven.</strong> Effects only count with a
+              verified receipt; ambiguous outcomes reconcile instead of guessing.
+            </p>
+          </CardContent>
+        </Card>
+      </Reveal>
     </div>
   );
 }

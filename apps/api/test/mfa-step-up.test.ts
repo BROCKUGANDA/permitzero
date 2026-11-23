@@ -119,7 +119,7 @@ interface EnrolResponse {
 
 async function enrol(token = t.approver1Token): Promise<EnrolResponse> {
   const res = await postJson(t, '/v1/me/mfa/enrol', token, {});
-  expect(res.status).toBe(200);
+  expect(res.status, JSON.stringify(res.json)).toBe(200);
   return res.json as EnrolResponse;
 }
 

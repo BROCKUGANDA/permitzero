@@ -391,6 +391,9 @@ export async function recordDispatch(
       connectorIdempotencyKey: input.connectorIdempotencyKey,
       operation: input.operation,
       startedAt: input.startedAt,
+      // Live connectors persist the provider's own reference via
+      // setDispatchProviderRef the moment the provider returns it.
+      providerRef: null,
     })
     .returning();
   if (!row) throw new Error('dispatch insert returned no row');
@@ -447,6 +450,43 @@ export async function listDispatches(
       ),
     )
     .orderBy(asc(connectorDispatches.startedAt));
+}
+
+/**
+ * Persist the external system's reference on the most recent open marker.
+ * Terminal markers are history, not in-flight state, and never gain a ref.
+ */
+export async function setDispatchProviderRef(
+  ex: DbExecutor,
+  tenantId: string,
+  connectorIdempotencyKey: string,
+  providerRef: string,
+): Promise<void> {
+  const open = await first(
+    ex
+      .select()
+      .from(connectorDispatches)
+      .where(
+        and(
+          eq(connectorDispatches.tenantId, tenantId),
+          eq(connectorDispatches.connectorIdempotencyKey, connectorIdempotencyKey),
+          isNull(connectorDispatches.completedAt),
+        ),
+      )
+      .orderBy(desc(connectorDispatches.startedAt))
+      .limit(1),
+  );
+  if (!open) return;
+  await ex
+    .update(connectorDispatches)
+    .set({ providerRef })
+    .where(
+      and(
+        eq(connectorDispatches.dispatchId, open.dispatchId),
+        eq(connectorDispatches.tenantId, tenantId),
+        isNull(connectorDispatches.completedAt),
+      ),
+    );
 }
 
 // -- Enforcement modes --------------------------------------------------------

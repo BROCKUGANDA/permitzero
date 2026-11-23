@@ -8,7 +8,18 @@
  */
 import type { HandlerResult, JobHandler, QueueJob } from '@permitzero/queue';
 
-const KNOWN_EVENTS = new Set(['action.decided', 'action.approved', 'action.rejected', 'action.expired']);
+const KNOWN_EVENTS = new Set([
+  'action.decided',
+  'action.approved',
+  'action.rejected',
+  'action.expired',
+  // Connected-account lifecycle events are informational; the audit trail is
+  // written at the source, exactly like action.* and the older events.
+  'connected_account.linked',
+  'connected_account.revoked',
+  // Outbound notification lifecycle events (sink side of the boundary).
+  'notification.sent',
+]);
 
 export interface JobEnvelope {
   outboxId: string;
