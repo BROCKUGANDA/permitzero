@@ -10,8 +10,8 @@ import type { OutboxDispatcher, QueueFactory, RedisLike, WorkerFactory, Workers 
 import type { WorkerConfig } from './config.js';
 import { createOutboxRouter } from './handlers/outbox-events.js';
 import { createReconciliationHandler } from './handlers/reconcile.js';
-import { sweepExpiredApprovals, sweepUnknownOutcomes } from './sweeps.js';
-import type { ExpirySweepResult, ReconcileSweepResult } from './sweeps.js';
+import { sweepExpiredApprovals, sweepMarketData, sweepUnknownOutcomes } from './sweeps.js';
+import type { ExpirySweepResult, MarketDataSweepResult, ReconcileSweepResult } from './sweeps.js';
 
 export interface WorkerQueues {
   factory: QueueFactory;
@@ -36,6 +36,8 @@ export interface BuildWorkerDeps {
 export interface SweepReport {
   expiry: ExpirySweepResult;
   reconcile: ReconcileSweepResult;
+  /** Null when the pass itself threw before returning a result. */
+  market: MarketDataSweepResult | null;
 }
 
 export interface DrainReport {
@@ -61,6 +63,9 @@ export function buildWorker(deps: BuildWorkerDeps): BuiltWorker {
     signingKey: deps.config.permitSigningKey,
     signingKeyId: deps.config.permitSigningKeyId,
     auditHmacKey: deps.config.auditHmacKey,
+    // The worker reconciles live outcomes against the provider, so it needs
+    // the same live wiring the API dispatches with. Absent = fail closed.
+    ...(deps.config.liveFinance ? { live: deps.config.liveFinance } : {}),
     clock,
   });
 
@@ -103,14 +108,23 @@ export function buildWorker(deps: BuildWorkerDeps): BuiltWorker {
       { db: runtime, stores, broker, clock },
       { limit: deps.config.sweepBatchSize, graceMs: deps.config.reconcileGraceMs },
     );
+    // Automatic market-data refresh (Yahoo Finance). Never allowed to wedge
+    // the other sweeps; a disabled or failing refresh is reported, not thrown.
+    let market: MarketDataSweepResult | null = null;
+    try {
+      market = await sweepMarketData({ db: runtime, clock }, { symbols: deps.config.marketFxPairs ?? [] });
+    } catch (err) {
+      console.error(`market sweep pass failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
     if (
       expiry.expired > 0 ||
       reconcile.succeeded + reconcile.failed + reconcile.manual > 0 ||
-      expiry.errors + reconcile.errors > 0
+      expiry.errors + reconcile.errors > 0 ||
+      (market?.updated ?? 0) > 0
     ) {
-      console.log(`[worker:sweep] ${JSON.stringify({ expiry, reconcile })}`);
+      console.log(`[worker:sweep] ${JSON.stringify({ expiry, reconcile, market })}`);
     }
-    return { expiry, reconcile };
+    return { expiry, reconcile, market };
   };
 
   let timer: NodeJS.Timeout | null = null;

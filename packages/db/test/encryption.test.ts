@@ -351,7 +351,15 @@ describe('decrypt refuses what it cannot trust', () => {
 
   it('refuses a tampered ciphertext', () => {
     const envelope = encrypt('hello', key);
-    const tampered = `${envelope.slice(0, -1)}${envelope.endsWith('A') ? 'B' : 'A'}`;
+    // Flip a character in the IV segment, not the tail: the tail of a
+    // short ciphertext has unused base64 bits, so flipping it may decode to
+    // the same bytes and the test would pass for the wrong reason.
+    const prefix = 'enc.v1.';
+    const body = envelope.startsWith(prefix) ? envelope.slice(prefix.length) : envelope;
+    const dot = body.indexOf('.');
+    const iv = body.slice(0, dot);
+    const flip = iv.startsWith('A') ? 'B' : 'A';
+    const tampered = `${prefix}${flip}${iv.slice(1)}.${body.slice(dot + 1)}`;
     expect(() => decrypt(tampered, key)).toThrow(DecryptionError);
     try {
       decrypt(tampered, key);

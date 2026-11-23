@@ -10,6 +10,7 @@ import type {
   AgentRecord,
   ApprovalRecord,
   AuditEventRecord,
+  ConnectedAccountRecord,
   ConnectorRecord,
   Decision,
   Environment,
@@ -32,6 +33,7 @@ import type {
   AgentRow,
   ApprovalRow,
   AuditEventRow,
+  ConnectedAccountRow,
   ConnectorDispatchRow,
   ConnectorLedgerRow,
   ConnectorRow,
@@ -121,6 +123,24 @@ export function toConnectorRecord(row: ConnectorRow): ConnectorRecord {
     credentialRef: row.credentialRef,
     lastHealthCheckAt: row.lastHealthCheckAt,
     simulated: row.simulated,
+    ...(row.connectedAccountId !== null && row.connectedAccountId !== undefined
+      ? { connectedAccountId: row.connectedAccountId }
+      : {}),
+  };
+}
+
+export function toConnectedAccountRecord(row: ConnectedAccountRow): ConnectedAccountRecord {
+  return {
+    connectedAccountId: row.connectedAccountId,
+    tenantId: row.tenantId,
+    provider: row.provider,
+    displayName: row.displayName,
+    externalProfileId: row.externalProfileId,
+    status: row.status as ConnectedAccountRecord['status'],
+    scopes: asStringArray(row.scopesJson),
+    connectedBy: row.connectedBy,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   };
 }
 
@@ -299,6 +319,7 @@ export function toConnectorDispatchRecord(row: ConnectorDispatchRow): ConnectorD
     startedAt: row.startedAt,
     completedAt: row.completedAt,
     outcome: row.outcome,
+    providerRef: row.providerRef,
   };
 }
 

@@ -83,6 +83,7 @@ describe('sweeps', () => {
       startedAt: new Date(),
       completedAt: null,
       outcome: null,
+      providerRef: null,
     });
 
     // Fresh unknown work is in flight: hands off.

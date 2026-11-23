@@ -1,7 +1,8 @@
 /**
  * Deterministic simulated finance connector.
  *
- * The only connector in this build. It holds synthetic vendors, invoices and
+ * One of the two implementations of the {@link FinanceConnector} seam (the other
+ * is the live Wise connector in `@permitzero/connectors`). It holds synthetic vendors, invoices and
  * purchase orders, and records every effect in a ledger keyed by the connector
  * idempotency key: a repeated key returns the ORIGINAL receipt and creates no
  * second effect. Reads never touch the ledger; every side-effecting method
@@ -16,50 +17,25 @@ import { canonicalHash, money } from '@permitzero/domain';
 import type { InvoiceRecord, PurchaseOrderRecord, VendorRecord } from '@permitzero/domain';
 import { systemClock } from './ports.js';
 import type { Clock, ConnectorDataStore, ConnectorReceipt } from './ports.js';
+import type {
+  ConnectorCallResult,
+  ConnectorExportRequest,
+  ConnectorPaymentRequest,
+  ConnectorVendorChangeRequest,
+  FinanceConnector,
+} from './ports.js';
 
-export interface ConnectorPaymentRequest {
-  tenantId: string;
-  connectorId: string;
-  idempotencyKey: string;
-  invoiceId: string;
-  vendorId: string;
-  amountMinor: number;
-  currency: string;
-  beneficiaryRef: string;
-  actionId: string;
-  executionId: string;
-  traceId: string;
-}
-
-export interface ConnectorVendorChangeRequest {
-  tenantId: string;
-  connectorId: string;
-  idempotencyKey: string;
-  vendorId: string;
-  newBeneficiaryRef: string;
-  verificationRef: string | null;
-  actionId: string;
-  executionId: string;
-  traceId: string;
-}
-
-export interface ConnectorExportRequest {
-  tenantId: string;
-  connectorId: string;
-  idempotencyKey: string;
-  vendorId: string | null;
-  recordLimit: number;
-  dataClassification: string;
-  actionId: string;
-  executionId: string;
-  traceId: string;
-}
-
-export type ConnectorCallResult =
-  | { status: 'SUCCEEDED'; receipt: ConnectorReceipt }
-  | { status: 'FAILED_RETRYABLE'; errorClass: string }
-  | { status: 'FAILED_TERMINAL'; errorClass: string }
-  | { status: 'TIMEOUT_AFTER_DISPATCH' };
+/**
+ * The canonical request shapes and result union live on the port so both
+ * connector implementations (simulated and live) share one contract. Re-exported
+ * here for compatibility with the module-contract docs that pin this path.
+ */
+export type {
+  ConnectorCallResult,
+  ConnectorExportRequest,
+  ConnectorPaymentRequest,
+  ConnectorVendorChangeRequest,
+} from './ports.js';
 
 /** Fault injection, driven by tests and the demo. Never enabled in production. */
 export interface ConnectorFaultProfile {
@@ -107,7 +83,7 @@ function sha16(input: string): string {
   return createHash('sha256').update(input, 'utf8').digest('hex').slice(0, 16);
 }
 
-export class SimulatedFinanceConnector {
+export class SimulatedFinanceConnector implements FinanceConnector {
   private readonly connectorId: string;
   private readonly data: ConnectorDataStore;
   private readonly clock: Clock;
@@ -168,6 +144,7 @@ export class SimulatedFinanceConnector {
       startedAt: now,
       completedAt: null,
       outcome: null,
+      providerRef: null,
     });
 
     if (faultProfile.failTerminal) {
@@ -253,6 +230,7 @@ export class SimulatedFinanceConnector {
       startedAt: this.clock(),
       completedAt: null,
       outcome: null,
+      providerRef: null,
     });
 
     if (faultProfile.failTerminal) {
@@ -323,6 +301,7 @@ export class SimulatedFinanceConnector {
       startedAt: this.clock(),
       completedAt: null,
       outcome: null,
+      providerRef: null,
     });
     if (faultProfile.failTerminal) {
       await this.complete(request, 'FAILED_TERMINAL');

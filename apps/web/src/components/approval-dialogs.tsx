@@ -4,6 +4,7 @@ import * as React from 'react';
 import { Button, FieldError, Input, Label, Textarea, Alert } from '@permitzero/ui';
 import { ApiError, useApprove, useReject } from '@/lib/api';
 import { shortHash } from '@/lib/format';
+import { haptic } from '@/lib/haptics';
 import {
   Dialog,
   DialogContent,
@@ -55,6 +56,7 @@ export function ApproveDialog({ action }: { action: ActionDto }): React.JSX.Elem
   const approve = useApprove();
 
   const submit = (): void => {
+    haptic('confirm');
     approve.mutate(
       {
         actionId: action.action_id,
@@ -156,10 +158,12 @@ export function RejectDialog({ action }: { action: ActionDto }): React.JSX.Eleme
 
   const submit = (): void => {
     if (reason === 'OTHER' && note.trim().length === 0) {
+      haptic('alert');
       setConfirmError('Explain the rejection in the note when choosing “Other”.');
       return;
     }
     setConfirmError(null);
+    haptic('reject');
     reject.mutate(
       {
         actionId: action.action_id,

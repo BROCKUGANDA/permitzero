@@ -3,58 +3,516 @@
 @tailwind utilities;
 
 @layer base {
-  :root {
-    --background: 40 20% 98%;
-    --foreground: 200 18% 12%;
-    --card: 0 0% 100%;
-    --card-foreground: 200 18% 12%;
-    --primary: 178 58% 26%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 40 14% 93%;
-    --secondary-foreground: 200 18% 12%;
-    --muted: 40 12% 94%;
-    --muted-foreground: 200 10% 38%;
-    --accent: 178 32% 92%;
-    --accent-foreground: 178 58% 22%;
-    --destructive: 4 72% 45%;
+  /* Signal-room palette. Ink, phosphor cyan, and one warm amber for anything
+     that needs a human. The accent is not a "brand purple" — every colour here
+     has a job: cyan is normal operation, amber is attention, red is refused. */
+  :root,
+  .dark {
+    --background: 212 30% 6%;
+    --foreground: 180 14% 88%;
+    --card: 212 26% 9%;
+    --card-foreground: 180 14% 88%;
+    --primary: 174 94% 52%;
+    --primary-foreground: 200 70% 6%;
+    --secondary: 210 20% 14%;
+    --secondary-foreground: 180 12% 86%;
+    --muted: 210 20% 12%;
+    --muted-foreground: 188 12% 60%;
+    --accent: 174 46% 13%;
+    --accent-foreground: 174 94% 72%;
+    --destructive: 3 86% 58%;
     --destructive-foreground: 0 0% 100%;
-    --border: 40 12% 86%;
-    --input: 40 12% 80%;
-    --ring: 178 58% 32%;
-    --radius: 0.5rem;
+    --border: 192 22% 18%;
+    --input: 192 22% 22%;
+    --ring: 174 94% 56%;
+    --radius: 0.375rem;
+    --signal: 42 96% 58%;
+    --signal-foreground: 212 30% 6%;
+    --grid-line: 190 24% 15%;
   }
 
-  .dark {
-    --background: 200 22% 8%;
-    --foreground: 40 20% 94%;
-    --card: 200 20% 11%;
-    --card-foreground: 40 20% 94%;
-    --primary: 178 45% 42%;
-    --primary-foreground: 200 22% 8%;
-    --secondary: 200 16% 16%;
-    --secondary-foreground: 40 20% 94%;
-    --muted: 200 16% 15%;
-    --muted-foreground: 40 10% 62%;
-    --accent: 200 16% 18%;
-    --accent-foreground: 178 45% 62%;
-    --destructive: 4 70% 55%;
+  /* A deliberately different light mode: a paper dossier, not a pale copy of
+     the dark theme. Kept for operators who need to print or work in daylight. */
+  .light {
+    --background: 40 20% 96%;
+    --foreground: 200 24% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 200 24% 12%;
+    --primary: 183 76% 26%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 40 14% 91%;
+    --secondary-foreground: 200 24% 12%;
+    --muted: 40 12% 93%;
+    --muted-foreground: 200 10% 38%;
+    --accent: 183 40% 88%;
+    --accent-foreground: 183 76% 20%;
+    --destructive: 4 72% 44%;
     --destructive-foreground: 0 0% 100%;
-    --border: 200 14% 20%;
-    --input: 200 14% 26%;
-    --ring: 178 45% 48%;
+    --border: 40 12% 84%;
+    --input: 40 12% 78%;
+    --ring: 183 76% 30%;
+    --signal: 32 90% 40%;
+    --signal-foreground: 0 0% 100%;
+    --grid-line: 190 18% 86%;
   }
 
   * {
     @apply border-border;
   }
 
+  html {
+    scroll-behavior: smooth;
+  }
+
   body {
     @apply bg-background font-sans text-foreground antialiased;
     font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    background-image:
+      radial-gradient(ellipse 70% 45% at 50% -12%, hsl(var(--primary) / 0.09), transparent 70%),
+      radial-gradient(ellipse 45% 35% at 100% 100%, hsl(var(--signal) / 0.045), transparent 70%),
+      linear-gradient(to right, hsl(var(--grid-line) / 0.32) 1px, transparent 1px),
+      linear-gradient(to bottom, hsl(var(--grid-line) / 0.32) 1px, transparent 1px);
+    background-size:
+      auto,
+      auto,
+      48px 48px,
+      48px 48px;
+    background-attachment: fixed;
   }
 
   ::selection {
-    background: hsl(var(--primary) / 0.18);
+    background: hsl(var(--primary) / 0.26);
+    color: hsl(var(--foreground));
+  }
+
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+
+  /* Micro-interactions: a control answers the finger immediately. No spring
+     library needed for a 1-pixel press. */
+  button,
+  [role='button'],
+  a {
+    transition:
+      transform 120ms ease,
+      background-color 160ms ease,
+      border-color 160ms ease,
+      color 160ms ease,
+      box-shadow 160ms ease;
+  }
+
+  button:active:not(:disabled),
+  [role='button']:active {
+    transform: translateY(1px) scale(0.985);
+  }
+}
+
+@layer components {
+  /* ----------------------------------------------------------------------- */
+  /* The authority disc                                                      */
+  /* ----------------------------------------------------------------------- */
+
+  .vinyl-scene {
+    --vinyl-size: 240px;
+    position: relative;
+    width: var(--vinyl-size);
+    height: var(--vinyl-size);
+    flex: none;
+    perspective: 900px;
+  }
+
+  .vinyl-tilt {
+    position: absolute;
+    inset: 0;
+    transform-style: preserve-3d;
+    transform: rotateX(15deg) rotateY(-17deg);
+    filter: drop-shadow(0 26px 30px hsl(200 70% 2% / 0.75));
+  }
+
+  .vinyl-edge {
+    position: absolute;
+    inset: 3%;
+    border-radius: 50%;
+    background: #05070a;
+    transform: translateZ(-9px);
+    box-shadow: 0 0 0 7px #05070a;
+  }
+
+  .vinyl-disc {
+    position: absolute;
+    inset: 3%;
+    border-radius: 50%;
+    overflow: hidden;
+    background:
+      repeating-radial-gradient(circle at 50% 50%, hsl(0 0% 100% / 0.032) 0 1px, transparent 1px 4px),
+      radial-gradient(circle at 36% 28%, #202830 0%, #0d1116 56%, #05070a 100%);
+    box-shadow:
+      inset 0 0 0 1px hsl(180 22% 34% / 0.4),
+      inset 0 0 26px hsl(0 0% 0% / 0.9),
+      0 0 0 3px hsl(220 12% 7%),
+      0 0 0 4px hsl(180 22% 26% / 0.35);
+  }
+
+  .vinyl-disc.is-playing {
+    animation: vinyl-spin 3.4s linear infinite;
+  }
+
+  .vinyl-grooves {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background:
+      repeating-radial-gradient(circle at 50% 50%, transparent 0 7px, hsl(0 0% 100% / 0.022) 7px 8px),
+      repeating-radial-gradient(circle at 50% 50%, hsl(0 0% 0% / 0.3) 0 2px, transparent 2px 5px);
+    pointer-events: none;
+  }
+
+  /* The light stays put while the surface turns. That fixed reflection is
+     what makes the disc read as a physical object rather than a spinner. */
+  .vinyl-sheen {
+    position: absolute;
+    inset: 3%;
+    border-radius: 50%;
+    background: conic-gradient(
+      from 212deg,
+      transparent 0deg,
+      hsl(174 100% 78% / 0.16) 22deg,
+      transparent 58deg,
+      transparent 176deg,
+      hsl(0 0% 100% / 0.055) 205deg,
+      transparent 240deg
+    );
+    mix-blend-mode: screen;
+    pointer-events: none;
+  }
+
+  .vinyl-label {
+    position: absolute;
+    inset: 34%;
+    border-radius: 50%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    background: radial-gradient(circle at 38% 28%, hsl(var(--primary)), hsl(178 78% 20%) 76%);
+    color: hsl(var(--primary-foreground));
+    box-shadow:
+      0 0 0 1px hsl(var(--primary) / 0.4),
+      inset 0 0 20px hsl(0 0% 0% / 0.32);
+  }
+
+  .vinyl-label::after {
+    content: '';
+    position: absolute;
+    inset: 13%;
+    border-radius: 50%;
+    border: 1px dashed hsl(var(--primary-foreground) / 0.35);
+  }
+
+  .vinyl-label-mark {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 0.95rem;
+    font-weight: 700;
+    letter-spacing: -0.04em;
+    line-height: 1;
+  }
+
+  .vinyl-label-sub {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 0.42rem;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    opacity: 0.85;
+  }
+
+  .vinyl-spindle {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    background: radial-gradient(circle at 35% 30%, #d6e2e4, #4a5a60 70%);
+    box-shadow: 0 0 0 2px hsl(0 0% 0% / 0.6);
+  }
+
+  .vinyl-compact .vinyl-label-mark {
+    font-size: 0.5rem;
+  }
+
+  /* ----------------------------------------------------------------------- */
+  /* The deck: one live record, two filed records, one tonearm               */
+  /* ----------------------------------------------------------------------- */
+
+  .vinyl-deck {
+    position: relative;
+    width: 340px;
+    max-width: 100%;
+    height: 320px;
+    display: grid;
+    place-items: center;
+  }
+
+  .vinyl-deck .vinyl-scene {
+    position: absolute;
+    inset: 0;
+    margin: auto;
+  }
+
+  .vinyl-deck-back {
+    transform: translate(-34px, -16px) rotate(-11deg) scale(0.92);
+    opacity: 0.4;
+    filter: saturate(0.5);
+  }
+
+  .vinyl-deck-mid {
+    transform: translate(30px, 8px) rotate(9deg) scale(0.96);
+    opacity: 0.62;
+    filter: saturate(0.7);
+  }
+
+  .vinyl-deck-front {
+    z-index: 2;
+  }
+
+  .vinyl-deck-halo {
+    position: absolute;
+    width: 300px;
+    height: 300px;
+    border-radius: 50%;
+    background: radial-gradient(circle, hsl(var(--primary) / 0.16), transparent 68%);
+    filter: blur(18px);
+  }
+
+  .vinyl-tonearm {
+    position: absolute;
+    z-index: 3;
+    top: 12px;
+    right: 24px;
+    width: 9px;
+    height: 172px;
+    border-radius: 6px;
+    transform-origin: 50% 10px;
+    transform: rotate(42deg);
+    transition: transform 900ms cubic-bezier(0.16, 1, 0.3, 1);
+    background: linear-gradient(90deg, #46545a, #9fb0b4 45%, #3b484d);
+    box-shadow: 0 6px 14px hsl(200 70% 2% / 0.6);
+  }
+
+  .vinyl-tonearm.is-cued {
+    transform: rotate(23deg);
+  }
+
+  .vinyl-tonearm::before {
+    content: '';
+    position: absolute;
+    top: -9px;
+    left: 50%;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    transform: translateX(-50%);
+    background: radial-gradient(circle at 35% 30%, #b9c8cb, #3a474c 72%);
+    box-shadow: 0 0 0 3px hsl(200 30% 10%);
+  }
+
+  .vinyl-tonearm::after {
+    content: '';
+    position: absolute;
+    bottom: -12px;
+    left: -7px;
+    width: 23px;
+    height: 18px;
+    border-radius: 3px;
+    background: linear-gradient(180deg, #c2d0d2, #58666b);
+    box-shadow: 0 4px 10px hsl(200 70% 2% / 0.7);
+  }
+
+  /* ----------------------------------------------------------------------- */
+  /* Signal hero                                                             */
+  /* ----------------------------------------------------------------------- */
+
+  .signal-hero {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
+    align-items: center;
+    gap: 1.5rem;
+    overflow: hidden;
+    border: 1px solid hsl(var(--border));
+    border-radius: calc(var(--radius) * 1.5);
+    background:
+      radial-gradient(ellipse at 82% 50%, hsl(var(--primary) / 0.1), transparent 55%),
+      linear-gradient(140deg, hsl(var(--card)), hsl(212 30% 7%));
+    box-shadow:
+      inset 0 1px 0 hsl(0 0% 100% / 0.035),
+      0 24px 60px -32px hsl(200 80% 2%);
+  }
+
+  /* Faint rack-mount scanlines, only over this panel. */
+  .signal-hero::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.035;
+    background: repeating-linear-gradient(0deg, transparent 0 3px, hsl(180 30% 90%) 3px 4px);
+  }
+
+  .signal-hero-copy {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 2rem 0 2rem 2rem;
+  }
+
+  .signal-eyebrow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: hsl(var(--primary));
+  }
+
+  .signal-led {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: hsl(var(--primary));
+    box-shadow: 0 0 12px hsl(var(--primary));
+    animation: led-pulse 2.4s ease-in-out infinite;
+  }
+
+  .signal-led.is-alert {
+    background: hsl(var(--signal));
+    box-shadow: 0 0 12px hsl(var(--signal));
+    animation-duration: 0.8s;
+  }
+
+  .signal-headline {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: clamp(1.6rem, 3.2vw, 2.35rem);
+    font-weight: 650;
+    letter-spacing: -0.045em;
+    line-height: 1.05;
+    color: hsl(var(--foreground));
+  }
+
+  .signal-sub {
+    max-width: 42ch;
+    font-size: 0.875rem;
+    line-height: 1.65;
+    color: hsl(var(--muted-foreground));
+  }
+
+  .signal-readout {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.5rem;
+    margin-top: 0.25rem;
+  }
+
+  .signal-readout div {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .signal-readout dt {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 0.6rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: hsl(var(--muted-foreground));
+  }
+
+  .signal-readout dd {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 0.85rem;
+    font-variant-numeric: tabular-nums;
+    color: hsl(var(--foreground));
+  }
+
+  .signal-cue {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    margin-top: 0.35rem;
+    padding: 0.45rem 0.75rem;
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    background: hsl(var(--secondary) / 0.6);
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: hsl(var(--muted-foreground));
+  }
+
+  .signal-cue:hover {
+    color: hsl(var(--foreground));
+    border-color: hsl(var(--primary) / 0.5);
+  }
+
+  .signal-cue-glyph {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    border: 2px solid currentColor;
+  }
+
+  .signal-cue[aria-pressed='true'] .signal-cue-glyph {
+    background: hsl(var(--primary));
+    border-color: hsl(var(--primary));
+    box-shadow: 0 0 10px hsl(var(--primary) / 0.7);
+  }
+
+  .signal-hero-stage {
+    display: grid;
+    place-items: center;
+    min-height: 320px;
+  }
+}
+
+@keyframes vinyl-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes led-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (max-width: 860px) {
+  .signal-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .signal-hero-copy {
+    padding: 1.75rem 1.75rem 0;
+  }
+
+  .signal-hero-stage {
+    min-height: 260px;
+    transform: scale(0.82);
   }
 }
 
@@ -63,6 +521,8 @@
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

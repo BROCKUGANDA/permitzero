@@ -120,6 +120,14 @@ export const DenyReason = {
   QUARANTINE_ACTIVE: 'QUARANTINE_ACTIVE',
   AUDIT_WRITE_FAILED: 'AUDIT_WRITE_FAILED',
   RATE_LIMITED: 'RATE_LIMITED',
+
+  // Live finance execution (the simulated/live seam). A deployment opts into
+  // real money explicitly; every guard here fails closed before a permit is
+  // burned, so a misconfiguration can never spend funds by accident.
+  LIVE_FINANCE_DISABLED: 'LIVE_FINANCE_DISABLED',
+  LIVE_LIMIT_EXCEEDED: 'LIVE_LIMIT_EXCEEDED',
+  LIVE_CONNECTOR_NOT_CONFIGURED: 'LIVE_CONNECTOR_NOT_CONFIGURED',
+  CONNECTED_ACCOUNT_MISSING: 'CONNECTED_ACCOUNT_MISSING',
 } as const;
 export type DenyReason = (typeof DenyReason)[keyof typeof DenyReason];
 
@@ -170,6 +178,11 @@ export const FAIL_CLOSED_REASONS: readonly ReasonCode[] = [
   DenyReason.POLICY_STORE_UNAVAILABLE,
   DenyReason.ENFORCEMENT_UNAVAILABLE,
   DenyReason.AUDIT_WRITE_FAILED,
+  // Live-finance guards are fail-closed by construction: no connected account,
+  // no explicit deployment opt-in, or an unconfigured provider means no dispatch.
+  DenyReason.LIVE_FINANCE_DISABLED,
+  DenyReason.CONNECTED_ACCOUNT_MISSING,
+  DenyReason.LIVE_CONNECTOR_NOT_CONFIGURED,
   IndeterminateReason.POLICY_EVALUATOR_UNAVAILABLE,
   IndeterminateReason.AUTHORITATIVE_STATE_UNAVAILABLE,
   IndeterminateReason.REQUIRED_MODEL_SIGNAL_UNAVAILABLE,

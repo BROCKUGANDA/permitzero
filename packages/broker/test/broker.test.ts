@@ -502,6 +502,7 @@ describe('Broker.reconcile', () => {
       startedAt: new Date('2026-10-26T12:00:00Z'),
       completedAt: null,
       outcome: null,
+      providerRef: null,
     });
     await stores.executions.recordIntent({
       executionId: newId('execution'),

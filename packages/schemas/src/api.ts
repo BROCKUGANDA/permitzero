@@ -363,7 +363,10 @@ export const executeActionResponseSchema = z
         currency: z.string(),
         beneficiary_ref: z.string(),
         completed_at: z.date(),
-        simulated: z.literal(true),
+        // False ONLY for live connectors: the receipt of a real external
+        // transfer. Every UI surface branches on this, so it may never be
+        // omitted or guessed.
+        simulated: z.boolean(),
       })
       .strict()
       .nullable(),
@@ -685,3 +688,42 @@ export const replaySessionSchema = z
 export type ReplaySession = z.infer<typeof replaySessionSchema>;
 
 export { pageSchema, paginationQuerySchema };
+
+// ---------------------------------------------------------------------------
+// Provider webhooks (Wise transfers#state-change)
+// ---------------------------------------------------------------------------
+export const wiseWebhookEventSchema = z
+  .object({
+    schema_version: z.string().optional(),
+    subscription_id: z.string().optional(),
+    event_type: z.literal('transfers#state-change'),
+    data: z
+      .object({
+        id: z.union([z.string(), z.number()]).optional(),
+        transfer_id: z.union([z.string(), z.number()]).optional(),
+        status: z.string().optional(),
+        state: z.string().optional(),
+        newState: z.string().optional(),
+        currentState: z.string().optional(),
+      })
+      .passthrough(),
+    sent_at: z.string().optional(),
+  })
+  .passthrough();
+
+export type WiseWebhookEvent = z.infer<typeof wiseWebhookEventSchema>;
+
+export const wiseWebhookDeliverySchema = z
+  .object({
+    provider: z.string(),
+    delivery_id: z.string(),
+    trace_id: z.string(),
+    outcome: z.string(),
+    resolved_tenant_id: z.string().nullable(),
+    resolved_action_id: z.string().nullable(),
+    provider_ref: z.string().nullable(),
+    received_at: z.date(),
+  })
+  .strict();
+
+export type WiseWebhookDelivery = z.infer<typeof wiseWebhookDeliverySchema>;

@@ -1,0 +1,139 @@
+name: Auto-version
+
+# The repository had promotion and deployment but no release identity: the
+# version reported by /status was the placeholder in package.json, and nothing
+# recorded which commit had actually shipped. This workflow gives every green
+# main commit a monotonic `vX.Y.Z` tag, which is the single source of truth for
+# the release number. It never deploys and never pushes to a branch.
+#
+# It is deliberately keyed on the SAME verdict as deploy: a CI run that has
+# finished, passed, and ran against main in this repository. Tagging a commit
+# that CI has not cleared would put a release name on unverified code.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+
+# One version pass at a time, and never cancel one in progress: cancelling
+# between the "which tag exists" read and the push can leave two jobs believing
+# they own the same number. `cancel-in-progress: false` makes the second job
+# queue behind the first, which then finds no new commits and does nothing.
+concurrency:
+  group: auto-version
+  cancel-in-progress: false
+
+permissions:
+  # The only write is a git tag. Giving this workflow pull-requests or actions
+  # access would let a tag created here touch the promotion machinery.
+  contents: write
+
+jobs:
+  version:
+    name: Tag the green main commit
+    # The same three-way test as deploy's automatic path. A fork cannot name a
+    # branch `main` and get a release tag for a commit this repository never
+    # verified, and a red CI run never becomes a version.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - name: Check out the commit CI verified
+        uses: actions/checkout@v4
+        with:
+          # On the workflow_run path github.sha is whatever main was when the
+          # event was delivered, not the commit CI actually tested. The ref has
+          # to be the run's head SHA.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          # History AND tags are both needed: the version is computed from the
+          # commits since the previous tag. A shallow clone would find no tags
+          # and start numbering from zero on every release.
+          fetch-depth: 0
+
+      - name: Compute and push the next version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TARGET_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          # Tags are fetched explicitly. checkout fetches tags reachable from
+          # the checked-out ref, but a tag on an unrelated ref would otherwise
+          # be invisible and the version could go backwards.
+          git fetch --tags --force --quiet
+
+          # A commit that already carries a version tag has been released.
+          # This is the idempotency guard: workflow_run can fire more than once
+          # for one CI run, and a manual dispatch can repeat a recent commit.
+          EXISTING=$(git tag --points-at "$TARGET_SHA" --list 'v[0-9]*' | head -n 1)
+          if [ -n "$EXISTING" ]; then
+            echo "$TARGET_SHA is already released as $EXISTING; nothing to do"
+            exit 0
+          fi
+
+          LATEST=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)
+          if [ -z "$LATEST" ]; then
+            CURRENT="0.0.0"
+            echo "no prior version tag; starting from $CURRENT"
+          else
+            CURRENT="${LATEST#v}"
+            echo "last release: $LATEST"
+          fi
+
+          # Only commits after the last tag count. An empty range means the
+          # tagged commit is still HEAD, which the guard above already covers,
+          # but the check also protects a re-run after a tag was deleted.
+          RANGE="${LATEST}..${TARGET_SHA}"
+          if [ -z "$LATEST" ]; then
+            RANGE="$TARGET_SHA"
+          fi
+          LOG=$(git log "$RANGE" --pretty=format:'%s%n%b')
+
+          if [ -z "$LOG" ]; then
+            echo "no commits since $LATEST; nothing to version"
+            exit 0
+          fi
+
+          # Conventional-commit bump. A breaking change wins over a feature,
+          # and a feature wins over a fix. Anything else is a patch: a silent
+          # "no bump" for unknown messages would let a change ship with a
+          # version that says nothing changed.
+          if printf '%s\n' "$LOG" | grep -Eq '(^|!)?:?.*BREAKING CHANGE|^[^ ]+!:' ; then
+            PART=major
+          elif printf '%s\n' "$LOG" | grep -Eq '^feat(\([^)]*\))?:' ; then
+            PART=minor
+          else
+            PART=patch
+          fi
+
+          MAJOR=$(printf '%s' "$CURRENT" | cut -d. -f1)
+          MINOR=$(printf '%s' "$CURRENT" | cut -d. -f2)
+          PATCH=$(printf '%s' "$CURRENT" | cut -d. -f3)
+          case "$PART" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+          NEXT="v${MAJOR}.${MINOR}.${PATCH}"
+
+          # Guards against a tag that exists locally but was not returned by
+          # the sorted lookup (for example a lightweight tag with the same
+          # number). Creating it would fail with an opaque git error; reporting
+          # it here says which number collided and why.
+          if git rev-parse -q --verify "refs/tags/$NEXT" > /dev/null; then
+            echo "$NEXT already exists but does not point at $TARGET_SHA" >&2
+            echo "refusing to move an existing release tag" >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEXT" "$TARGET_SHA" -m "Release $NEXT ($PART) from $TARGET_SHA"
+          git push origin "refs/tags/$NEXT"
+
+          echo "released $NEXT from $TARGET_SHA ($PART bump)"
