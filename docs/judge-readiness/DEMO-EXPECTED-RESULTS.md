@@ -5,14 +5,14 @@ End-to-end demonstration scenario evidence. Fixture values verified against
 
 ## Fixtures
 
-| Fixture | Value |
-| --- | --- |
-| Vendor | `VEN-017`, `SYNTHETIC Example Ltd`, status `VERIFIED`, verified beneficiary `BEN-017-VERIFIED`, account age 400 days |
-| Vendor (unverified) | `VEN-042`, `SYNTHETIC Acme Parts`, status `UNVERIFIED`, account age 12 days |
-| Legitimate invoice | `INV-2041`, `$3,000.00` (300000 minor), USD, `PO-882`, Net 30 |
-| Suspicious invoice | `INV-2042`, `$75,000.00` (7500000 minor), USD, `purchaseOrderId: null`, document text contains an embedded instruction to change bank details to `BEN-999-ATTACKER` and pay immediately without review |
-| Large invoice | `INV-2043`, `$30,000.00` (3000000 minor), USD, `PO-883`, fully documented, held only by amount threshold |
-| Purchase orders | `PO-882` ($3,000), `PO-883` ($30,000), both vendor `VEN-017` |
+| Fixture             | Value                                                                                                                                                                                                  |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Vendor              | `VEN-017`, `SYNTHETIC Example Ltd`, status `VERIFIED`, verified beneficiary `BEN-017-VERIFIED`, account age 400 days                                                                                   |
+| Vendor (unverified) | `VEN-042`, `SYNTHETIC Acme Parts`, status `UNVERIFIED`, account age 12 days                                                                                                                            |
+| Legitimate invoice  | `INV-2041`, `$3,000.00` (300000 minor), USD, `PO-882`, Net 30                                                                                                                                          |
+| Suspicious invoice  | `INV-2042`, `$75,000.00` (7500000 minor), USD, `purchaseOrderId: null`, document text contains an embedded instruction to change bank details to `BEN-999-ATTACKER` and pay immediately without review |
+| Large invoice       | `INV-2043`, `$30,000.00` (3000000 minor), USD, `PO-883`, fully documented, held only by amount threshold                                                                                               |
+| Purchase orders     | `PO-882` ($3,000), `PO-883` ($30,000), both vendor `VEN-017`                                                                                                                                           |
 
 ## Scenario steps
 

@@ -134,17 +134,32 @@ export class HttpFinanceConnector implements FinanceConnector {
         signal: controller.signal,
       });
     } catch (err) {
-      await this.config.data.completeDispatch(request.tenantId, request.idempotencyKey, 'FAILED_RETRYABLE', this.clock());
+      await this.config.data.completeDispatch(
+        request.tenantId,
+        request.idempotencyKey,
+        'FAILED_RETRYABLE',
+        this.clock(),
+      );
       return { status: 'FAILED_RETRYABLE', errorClass: 'TRANSPORT_ERROR' };
     } finally {
       clearTimeout(timer);
     }
     if (response.status >= 500 || response.status === 429) {
-      await this.config.data.completeDispatch(request.tenantId, request.idempotencyKey, 'FAILED_RETRYABLE', this.clock());
+      await this.config.data.completeDispatch(
+        request.tenantId,
+        request.idempotencyKey,
+        'FAILED_RETRYABLE',
+        this.clock(),
+      );
       return { status: 'FAILED_RETRYABLE', errorClass: `HTTP_${response.status}` };
     }
     if (response.status >= 400) {
-      await this.config.data.completeDispatch(request.tenantId, request.idempotencyKey, 'FAILED_TERMINAL', this.clock());
+      await this.config.data.completeDispatch(
+        request.tenantId,
+        request.idempotencyKey,
+        'FAILED_TERMINAL',
+        this.clock(),
+      );
       return { status: 'FAILED_TERMINAL', errorClass: `HTTP_${response.status}` };
     }
     const receipt = this.buildReceipt(request.idempotencyKey, request.idempotencyKey, this.clock());

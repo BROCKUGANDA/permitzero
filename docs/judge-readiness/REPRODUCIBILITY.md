@@ -103,12 +103,12 @@ production build. A required step that is skipped fails the gate under `--strict
 
 ## Port conflict handling
 
-| Service | Default port | If already in use |
-| --- | --- | --- |
-| API | 8080 (`PORT`) | Set `PORT` in `.env`; the demo script reads `API_URL`/`API_BASE_URL`/`PORT` |
-| Web console | 3000 | `next dev -p 3000`; change `-p` in `apps/web/package.json` or `PORT` |
-| PostgreSQL | 5432 | Set `DATABASE_URL` / `DATABASE_URL_RUNTIME` / `DATABASE_URL_TEST` |
-| Redis | 6379 | Set `REDIS_URL` |
+| Service     | Default port  | If already in use                                                           |
+| ----------- | ------------- | --------------------------------------------------------------------------- |
+| API         | 8080 (`PORT`) | Set `PORT` in `.env`; the demo script reads `API_URL`/`API_BASE_URL`/`PORT` |
+| Web console | 3000          | `next dev -p 3000`; change `-p` in `apps/web/package.json` or `PORT`        |
+| PostgreSQL  | 5432          | Set `DATABASE_URL` / `DATABASE_URL_RUNTIME` / `DATABASE_URL_TEST`           |
+| Redis       | 6379          | Set `REDIS_URL`                                                             |
 
 `npm run dev` (`scripts/dev.mjs`) starts API, worker and web; if a port is taken
 the corresponding process fails to bind and prints its own `EADDRINUSE` diagnostic.
@@ -125,6 +125,7 @@ Stop any existing process on the port before rerunning, or change the port in `.
 ## Dependency checks
 
 Before migrate/seed the setup script confirms:
+
 - PostgreSQL accepts connections as the admin role (`DATABASE_URL`) and as the runtime
   role (`DATABASE_URL_RUNTIME` = `pz_app`).
 - Redis accepts `PING`.
@@ -174,27 +175,27 @@ PRD FR-072), and `MODEL_ENABLED=true`; this is opt-in and not part of the defaul
 
 - Scripts are Node (`.mjs`) and run anywhere Node ≥ 20 runs.
 - PostgreSQL/Redis startup differs by OS: native service on Windows/macOS, `docker
-  compose` or package manager on Linux. `TROUBLESHOOTING.md` covers each.
+compose` or package manager on Linux. `TROUBLESHOOTING.md` covers each.
 - Paths in scripts use `path.join`/`fileURLToPath`, not hardcoded separators.
 
 ## Reproducibility verdict (this session)
 
-| Step | Result in this session |
-| --- | --- |
-| `npm ci` | Dependencies already installed (node_modules present); `npm ci` against `package-lock.json` is the judge's clean-install step |
-| `cp .env.example .env` | Verifiable (file present) |
-| `npm run db:migrate` | PASS (PostgreSQL 18 via WSL; all 11 migrations applied) |
-| `npm run db:seed` | PASS (synthetic tenant + tokens written) |
-| `npm run dev` | PASS (API :8080 ready, RLS enforced, 25/25 tables) |
-| `npm run demo:scenario` | PASS (allow / approval / dual-control, all steps) |
-| `npm run verify -- --strict` | PASS (typecheck, lint, 606 tests, build) |
-| `npm run typecheck` | PASS (all 12 workspaces) |
-| `npm run lint` | PASS (`--max-warnings=0`) |
-| `npm run secret:scan` | PASS (no leaks) |
-| DB tests | 606/606 PASS (incl. RLS, audit concurrency, tenant isolation) |
-| `npm run judge:setup` | PASS (after Windows shell fix) |
-| `npm run judge:demo` | PASS |
-| `npm run judge:verify` | PASS (full gate green) |
+| Step                         | Result in this session                                                                                                        |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `npm ci`                     | Dependencies already installed (node_modules present); `npm ci` against `package-lock.json` is the judge's clean-install step |
+| `cp .env.example .env`       | Verifiable (file present)                                                                                                     |
+| `npm run db:migrate`         | PASS (PostgreSQL 18 via WSL; all 11 migrations applied)                                                                       |
+| `npm run db:seed`            | PASS (synthetic tenant + tokens written)                                                                                      |
+| `npm run dev`                | PASS (API :8080 ready, RLS enforced, 25/25 tables)                                                                            |
+| `npm run demo:scenario`      | PASS (allow / approval / dual-control, all steps)                                                                             |
+| `npm run verify -- --strict` | PASS (typecheck, lint, 606 tests, build)                                                                                      |
+| `npm run typecheck`          | PASS (all 12 workspaces)                                                                                                      |
+| `npm run lint`               | PASS (`--max-warnings=0`)                                                                                                     |
+| `npm run secret:scan`        | PASS (no leaks)                                                                                                               |
+| DB tests                     | 606/606 PASS (incl. RLS, audit concurrency, tenant isolation)                                                                 |
+| `npm run judge:setup`        | PASS (after Windows shell fix)                                                                                                |
+| `npm run judge:demo`         | PASS                                                                                                                          |
+| `npm run judge:verify`       | PASS (full gate green)                                                                                                        |
 
 **Workaround used:** the native Windows PostgreSQL 17 build is unstable in this
 sandbox (`0xC0000142`); PostgreSQL 18 was installed in WSL2 (Ubuntu) and reached

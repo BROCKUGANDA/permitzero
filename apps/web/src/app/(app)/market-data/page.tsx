@@ -25,7 +25,9 @@ export default function MarketDataPage(): React.JSX.Element {
     setBusy(true);
     setError(null);
     try {
-      const response = await fetch(`/api/v1/market-data/quote?symbol=${encodeURIComponent(s)}`, { credentials: 'same-origin' });
+      const response = await fetch(`/api/v1/market-data/quote?symbol=${encodeURIComponent(s)}`, {
+        credentials: 'same-origin',
+      });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       setQuote((await response.json()) as Quote);
     } catch (err) {
@@ -39,9 +41,12 @@ export default function MarketDataPage(): React.JSX.Element {
     setBusy(true);
     setError(null);
     try {
-      const response = await fetch(`/api/v1/market-data/fx?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, {
-        credentials: 'same-origin',
-      });
+      const response = await fetch(
+        `/api/v1/market-data/fx?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+        {
+          credentials: 'same-origin',
+        },
+      );
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       setQuote((await response.json()) as Quote);
     } catch (err) {

@@ -57,8 +57,8 @@ export default function ConnectedAccountsPage(): React.JSX.Element {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Connected accounts</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Payment-provider accounts tenants authorise PermitZero against, via OAuth. PermitZero never holds a
-            provider API key; tokens are encrypted at rest and decrypted only inside the connector.
+            Payment-provider accounts tenants authorise PermitZero against, via OAuth. PermitZero never holds a provider
+            API key; tokens are encrypted at rest and decrypted only inside the connector.
           </p>
         </div>
         <a href="/api/v1/connect/wise/start" className={buttonVariants()}>
@@ -92,10 +92,19 @@ export default function ConnectedAccountsPage(): React.JSX.Element {
                   <td className="px-3 py-2">{account.display_name}</td>
                   <td className="px-3 py-2 font-mono">{account.external_profile_id}</td>
                   <td className="px-3 py-2">{account.status}</td>
-                  <td className="px-3 py-2">{account.created_at instanceof Date ? account.created_at.toLocaleString() : String(account.created_at)}</td>
+                  <td className="px-3 py-2">
+                    {account.created_at instanceof Date
+                      ? account.created_at.toLocaleString()
+                      : String(account.created_at)}
+                  </td>
                   <td className="px-3 py-2 text-right">
                     {account.status === 'ACTIVE' ? (
-                      <Button variant="destructive" size="sm" disabled={busy} onClick={() => revoke(account.connected_account_id)}>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        disabled={busy}
+                        onClick={() => revoke(account.connected_account_id)}
+                      >
                         Revoke
                       </Button>
                     ) : null}

@@ -85,11 +85,20 @@ export async function exchangeStripeCode(
       }).toString(),
     });
   } catch (err) {
-    throw new StripeOAuthError(`Stripe token endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`, 0, null);
+    throw new StripeOAuthError(
+      `Stripe token endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`,
+      0,
+      null,
+    );
   }
-  const body = (await response.json().catch(() => null)) as
-    | { access_token?: unknown; refresh_token?: unknown; stripe_user_id?: unknown; scope?: unknown; error?: unknown; error_description?: unknown }
-    | null;
+  const body = (await response.json().catch(() => null)) as {
+    access_token?: unknown;
+    refresh_token?: unknown;
+    stripe_user_id?: unknown;
+    scope?: unknown;
+    error?: unknown;
+    error_description?: unknown;
+  } | null;
   if (!response.ok || typeof body?.access_token !== 'string' || typeof body?.stripe_user_id !== 'string') {
     throw new StripeOAuthError(
       typeof body?.error_description === 'string' ? body.error_description : 'Stripe rejected the token request.',
@@ -158,12 +167,19 @@ export class StripeClient {
         signal: controller.signal,
       });
     } catch (err) {
-      throw new StripeApiError(`Stripe request failed: ${err instanceof Error ? err.message : String(err)}`, 0, null, true);
+      throw new StripeApiError(
+        `Stripe request failed: ${err instanceof Error ? err.message : String(err)}`,
+        0,
+        null,
+        true,
+      );
     } finally {
       clearTimeout(timer);
     }
     if (!response.ok) {
-      const problem = (await response.json().catch(() => null)) as { error?: { code?: unknown; message?: unknown } } | null;
+      const problem = (await response.json().catch(() => null)) as {
+        error?: { code?: unknown; message?: unknown };
+      } | null;
       throw new StripeApiError(
         typeof problem?.error?.message === 'string' ? problem.error.message : `Stripe returned ${response.status}.`,
         response.status,
@@ -171,8 +187,15 @@ export class StripeClient {
         response.status >= 500 || response.status === 429,
       );
     }
-    const data = (await response.json()) as { id?: unknown; amount?: unknown; currency?: unknown; destination?: unknown; reversed?: unknown };
-    if (typeof data.id !== 'string') throw new StripeApiError('Stripe transfer response was malformed.', 200, null, false);
+    const data = (await response.json()) as {
+      id?: unknown;
+      amount?: unknown;
+      currency?: unknown;
+      destination?: unknown;
+      reversed?: unknown;
+    };
+    if (typeof data.id !== 'string')
+      throw new StripeApiError('Stripe transfer response was malformed.', 200, null, false);
     return {
       id: data.id,
       amount: typeof data.amount === 'number' ? data.amount : body.amount,
@@ -182,7 +205,10 @@ export class StripeClient {
     };
   }
 
-  async retrieveTransfer(token: string, transferId: string): Promise<{ id: string; amount: number; currency: string; destination: string; reversed: boolean }> {
+  async retrieveTransfer(
+    token: string,
+    transferId: string,
+  ): Promise<{ id: string; amount: number; currency: string; destination: string; reversed: boolean }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     let response: Awaited<ReturnType<typeof fetch>>;
@@ -193,12 +219,19 @@ export class StripeClient {
         signal: controller.signal,
       });
     } catch (err) {
-      throw new StripeApiError(`Stripe request failed: ${err instanceof Error ? err.message : String(err)}`, 0, null, true);
+      throw new StripeApiError(
+        `Stripe request failed: ${err instanceof Error ? err.message : String(err)}`,
+        0,
+        null,
+        true,
+      );
     } finally {
       clearTimeout(timer);
     }
     if (!response.ok) {
-      const problem = (await response.json().catch(() => null)) as { error?: { code?: unknown; message?: unknown } } | null;
+      const problem = (await response.json().catch(() => null)) as {
+        error?: { code?: unknown; message?: unknown };
+      } | null;
       throw new StripeApiError(
         typeof problem?.error?.message === 'string' ? problem.error.message : `Stripe returned ${response.status}.`,
         response.status,
@@ -206,8 +239,15 @@ export class StripeClient {
         response.status >= 500 || response.status === 429,
       );
     }
-    const data = (await response.json()) as { id?: unknown; amount?: unknown; currency?: unknown; destination?: unknown; reversed?: unknown };
-    if (typeof data.id !== 'string') throw new StripeApiError('Stripe transfer response was malformed.', 200, null, false);
+    const data = (await response.json()) as {
+      id?: unknown;
+      amount?: unknown;
+      currency?: unknown;
+      destination?: unknown;
+      reversed?: unknown;
+    };
+    if (typeof data.id !== 'string')
+      throw new StripeApiError('Stripe transfer response was malformed.', 200, null, false);
     return {
       id: data.id,
       amount: typeof data.amount === 'number' ? data.amount : 0,
@@ -259,7 +299,12 @@ export class StripeFinanceConnector implements FinanceConnector {
     try {
       token = await this.config.tokenProvider(request.tenantId, this.config.connectedAccountId);
     } catch {
-      await this.config.data.completeDispatch(request.tenantId, request.idempotencyKey, 'FAILED_TERMINAL', this.clock());
+      await this.config.data.completeDispatch(
+        request.tenantId,
+        request.idempotencyKey,
+        'FAILED_TERMINAL',
+        this.clock(),
+      );
       return { status: 'FAILED_TERMINAL', errorClass: 'CONNECTED_ACCOUNT_TOKEN_INVALID' };
     }
 
@@ -273,7 +318,12 @@ export class StripeFinanceConnector implements FinanceConnector {
       });
     } catch (err) {
       if (err instanceof StripeApiError) {
-        await this.config.data.completeDispatch(request.tenantId, request.idempotencyKey, err.retryable ? 'FAILED_RETRYABLE' : 'FAILED_TERMINAL', this.clock());
+        await this.config.data.completeDispatch(
+          request.tenantId,
+          request.idempotencyKey,
+          err.retryable ? 'FAILED_RETRYABLE' : 'FAILED_TERMINAL',
+          this.clock(),
+        );
         return err.retryable
           ? { status: 'FAILED_RETRYABLE', errorClass: 'PROVIDER_UNAVAILABLE' }
           : { status: 'FAILED_TERMINAL', errorClass: `PROVIDER_TRANSFER_FAILED:${err.providerCode ?? err.status}` };
@@ -305,7 +355,12 @@ export class StripeFinanceConnector implements FinanceConnector {
       operation: 'payment.execute',
       externalReference: receipt.externalReference,
       receipt,
-      detailRedacted: { provider_transfer_id: transfer.id, destination, action_id: request.actionId, execution_id: request.executionId },
+      detailRedacted: {
+        provider_transfer_id: transfer.id,
+        destination,
+        action_id: request.actionId,
+        execution_id: request.executionId,
+      },
       actionId: request.actionId,
       executionId: request.executionId,
       recordedAt: this.clock(),
@@ -366,7 +421,12 @@ export class StripeFinanceConnector implements FinanceConnector {
       operation: 'vendor.update_bank_details',
       externalReference: receipt.externalReference,
       receipt,
-      detailRedacted: { vendor_id: request.vendorId, account_id: accountId, action_id: request.actionId, execution_id: request.executionId },
+      detailRedacted: {
+        vendor_id: request.vendorId,
+        account_id: accountId,
+        action_id: request.actionId,
+        execution_id: request.executionId,
+      },
       actionId: request.actionId,
       executionId: request.executionId,
       recordedAt: this.clock(),

@@ -45,7 +45,9 @@ export interface ConnectedAccountInput {
  * closed rather than store plaintext tokens.
  */
 function tokenKeyRing(explicitMaster: string | null, env: NodeJS.ProcessEnv = process.env): Buffer[] {
-  const masters = [explicitMaster, ...verificationKeys(env)].filter((k): k is string => typeof k === 'string' && k.length > 0);
+  const masters = [explicitMaster, ...verificationKeys(env)].filter(
+    (k): k is string => typeof k === 'string' && k.length > 0,
+  );
   if (masters.length > 0) return masters.map((k) => deriveKey(k, SECRET_MATERIAL_PURPOSE));
   const appEnv = env['APP_ENV'] ?? 'development';
   if (appEnv === 'development' || appEnv === 'test') {

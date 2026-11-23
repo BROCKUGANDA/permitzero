@@ -11,7 +11,7 @@ export interface ApiConfig {
   port: number;
   appEnv: string;
   version: string;
-  databaseUrl: string;  /**
+  databaseUrl: string; /**
    * The restricted `pz_app` role created by
    * `infra/migrations/0006_row_level_security.sql`, used for every tenant read
    * and write. Falls back to `databaseUrl` when unset, which means the
@@ -178,7 +178,8 @@ function booleanOf(env: NodeJS.ProcessEnv, name: string, def: boolean): boolean 
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
-  const permitSigningKey = required(env, 'PERMIT_SIGNING_KEY');  if (permitSigningKey.length < 16) {
+  const permitSigningKey = required(env, 'PERMIT_SIGNING_KEY');
+  if (permitSigningKey.length < 16) {
     throw new Error('PERMIT_SIGNING_KEY must be at least 16 characters.');
   }
   const explicitOff = (env['MODEL_ENABLED'] ?? '').toLowerCase() === 'false';

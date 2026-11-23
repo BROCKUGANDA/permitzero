@@ -35,21 +35,21 @@ Finance execution is **simulated**. No real money movement.
 
 ## 3. Workspaces
 
-| Workspace | Responsibility |
-| --- | --- |
-| `packages/domain` | Types, reason codes, errors, canonicalization, money |
-| `packages/schemas` | Zod request/response, policy, risk-hints (Meta structured output) |
-| `packages/policy` | Pure deterministic PDP: deny precedence, default deny, field resolution, lint, simulation, signed MFA assertions |
-| `packages/broker` | Permit issuing/verification/consumption, broker, simulated finance connector, reconciliation |
-| `packages/db` | Drizzle + postgres; migrations, seeds, stores, RLS-friendly tenant scoping |
-| `packages/queue` | BullMQ + transactional outbox, dispatcher, workers, DLQ, Redis circuit breaker |
-| `packages/provider-meta` | Meta Model API client: config, prompt, retry, circuit breaker, semaphore, strict validation |
-| `packages/observability` | Metrics, trace context, SLO definitions, multi-window burn-rate evaluation |
-| `packages/ui` | Shared React UI kit |
-| `packages/test-fixtures` | Synthetic corpus + builders |
-| `apps/api` | Fastify API: intake, approvals, execution, policies, replay, health, status |
-| `apps/worker` | Outbox dispatcher, model-analysis consumer, reconciliation, sweeps, DLQ redrive |
-| `apps/web` | Next.js operator console |
+| Workspace                | Responsibility                                                                                                   |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `packages/domain`        | Types, reason codes, errors, canonicalization, money                                                             |
+| `packages/schemas`       | Zod request/response, policy, risk-hints (Meta structured output)                                                |
+| `packages/policy`        | Pure deterministic PDP: deny precedence, default deny, field resolution, lint, simulation, signed MFA assertions |
+| `packages/broker`        | Permit issuing/verification/consumption, broker, simulated finance connector, reconciliation                     |
+| `packages/db`            | Drizzle + postgres; migrations, seeds, stores, RLS-friendly tenant scoping                                       |
+| `packages/queue`         | BullMQ + transactional outbox, dispatcher, workers, DLQ, Redis circuit breaker                                   |
+| `packages/provider-meta` | Meta Model API client: config, prompt, retry, circuit breaker, semaphore, strict validation                      |
+| `packages/observability` | Metrics, trace context, SLO definitions, multi-window burn-rate evaluation                                       |
+| `packages/ui`            | Shared React UI kit                                                                                              |
+| `packages/test-fixtures` | Synthetic corpus + builders                                                                                      |
+| `apps/api`               | Fastify API: intake, approvals, execution, policies, replay, health, status                                      |
+| `apps/worker`            | Outbox dispatcher, model-analysis consumer, reconciliation, sweeps, DLQ redrive                                  |
+| `apps/web`               | Next.js operator console                                                                                         |
 
 ## 4. Trust boundaries
 

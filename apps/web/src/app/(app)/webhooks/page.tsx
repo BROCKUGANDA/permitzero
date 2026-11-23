@@ -35,8 +35,8 @@ export default function WebhooksPage(): React.JSX.Element {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Webhooks</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Provider webhook deliveries (Wise <code>transfers#state-change</code>). Each delivery is recorded before
-          any work happens; the tenant is resolved by the provider&apos;s own reference, and the existing reconciliation
+          Provider webhook deliveries (Wise <code>transfers#state-change</code>). Each delivery is recorded before any
+          work happens; the tenant is resolved by the provider&apos;s own reference, and the existing reconciliation
           consumer settles the action against provider truth. Webhooks never flip money state themselves.
         </p>
       </div>

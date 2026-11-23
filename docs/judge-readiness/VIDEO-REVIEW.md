@@ -9,14 +9,14 @@
 
 ## 2. Timestamped claims vs implementation
 
-| Time | Subtitle / claim | Source path | Match? |
-| --- | --- | --- | --- |
-| 00:00–00:08 | "PermitZero. Authority before action. Runtime authorization and transaction control for AI agents." | README.md title | Match |
-| 00:08–00:18 | "Sign in with a token. Paste an agent, operator, or approver token. Who you are decides what you may see and do." | `apps/web` auth flow, `apps/api/src` auth | Match (role-based access) |
-| 00:18–00:32 | "Good to see you, Jordan. Enforcement health: database up, cache up, queue healthy. Two requests need your decision." | `GET /health/ready`, `apps/web` dashboard | Match (health endpoints exist; "Jordan" is a demo persona) |
-| 00:32–00:48 | "New request. Choose a tool, enter the purpose, amount, currency, destination, and agent ID. Then submit for authorization." | `apps/web` new-request form, `POST /v1/actions` | Match |
+| Time        | Subtitle / claim                                                                                                                                             | Source path                                              | Match?                                                        |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- | ------------------------------------------------------------- |
+| 00:00–00:08 | "PermitZero. Authority before action. Runtime authorization and transaction control for AI agents."                                                          | README.md title                                          | Match                                                         |
+| 00:08–00:18 | "Sign in with a token. Paste an agent, operator, or approver token. Who you are decides what you may see and do."                                            | `apps/web` auth flow, `apps/api/src` auth                | Match (role-based access)                                     |
+| 00:18–00:32 | "Good to see you, Jordan. Enforcement health: database up, cache up, queue healthy. Two requests need your decision."                                        | `GET /health/ready`, `apps/web` dashboard                | Match (health endpoints exist; "Jordan" is a demo persona)    |
+| 00:32–00:48 | "New request. Choose a tool, enter the purpose, amount, currency, destination, and agent ID. Then submit for authorization."                                 | `apps/web` new-request form, `POST /v1/actions`          | Match                                                         |
 | 00:48–01:08 | "Action detail. The request is masked for privacy. Policy reasons: amount exceeds limit, dual approval required. Risk signals flagged. Approve to continue." | `apps/api/src/intake.ts`, `packages/policy`, model hints | Match (masking, policy reasons, risk signals are implemented) |
-| 01:08–01:20 | "Execution receipt. Verified. Audit-complete, append-only, hash-chained." | `packages/broker`, `verifyAuditChain` | Match |
+| 01:08–01:20 | "Execution receipt. Verified. Audit-complete, append-only, hash-chained."                                                                                    | `packages/broker`, `verifyAuditChain`                    | Match                                                         |
 
 ## 3. Discrepancies / notes
 

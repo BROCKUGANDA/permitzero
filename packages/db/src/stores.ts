@@ -567,7 +567,14 @@ export function createBroker(db: Db | DbExecutor, opts: BrokerFactoryOptions): B
     },
     save: async (tenantId, connectedAccountId, token) => {
       const write = (tx: DbExecutor) =>
-        saveConnectedAccountToken(tx, tenantId, connectedAccountId, token, opts.auditHmacKey ?? null, clock?.() ?? new Date());
+        saveConnectedAccountToken(
+          tx,
+          tenantId,
+          connectedAccountId,
+          token,
+          opts.auditHmacKey ?? null,
+          clock?.() ?? new Date(),
+        );
       if (root) await withTenantTransaction(root, tenantId, write);
       else await write(ex);
     },
@@ -621,7 +628,14 @@ export function createBroker(db: Db | DbExecutor, opts: BrokerFactoryOptions): B
         ...(clock ? { clock } : {}),
       });
     }
-    if (live && tokenManager && wiseClient && record.type === 'wise' && live.providerTypes.includes('wise') && record.connectedAccountId) {
+    if (
+      live &&
+      tokenManager &&
+      wiseClient &&
+      record.type === 'wise' &&
+      live.providerTypes.includes('wise') &&
+      record.connectedAccountId
+    ) {
       return new WiseFinanceConnector({
         connectorId: record.connectorId,
         connectedAccountId: record.connectedAccountId,
@@ -668,14 +682,16 @@ export function createBroker(db: Db | DbExecutor, opts: BrokerFactoryOptions): B
       return row ? toConnectorRecord(row) : null;
     },
     getConnector,
-    ...(live ? { live: { enabled: live.enabled, providerTypes: live.providerTypes, maxAmountMinor: live.maxAmountMinor } } : {}),
+    ...(live
+      ? { live: { enabled: live.enabled, providerTypes: live.providerTypes, maxAmountMinor: live.maxAmountMinor } }
+      : {}),
     ...(clock ? { clock } : {}),
   });
   return { broker, permits, stores };
 }
 
 /** Structural type so the registry needs no import cycle beyond the broker. */
-type ConnectorRecordForRegistry = ConnectorRecord;/**
+type ConnectorRecordForRegistry = ConnectorRecord; /**
  * A live connector row the deployment did not wire (no live wiring, an
  * unconfigured provider type, or a missing connected account). Every
  * operation fails closed — the broker's guard rejects these rows before the

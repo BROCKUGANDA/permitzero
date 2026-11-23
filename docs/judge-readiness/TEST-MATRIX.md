@@ -6,40 +6,45 @@ find coverage. DB-dependent files require PostgreSQL; they fail with
 
 ## 1. Commands
 
-| Command | Scope |
-| --- | --- |
-| `npm test` | All workspaces (Vitest) |
-| `npm run typecheck` | All workspaces (`tsc --noEmit`) |
-| `npm run lint` | ESLint, `--max-warnings=0` |
+| Command                                         | Scope                                                                                                                            |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `npm test`                                      | All workspaces (Vitest)                                                                                                          |
+| `npm run typecheck`                             | All workspaces (`tsc --noEmit`)                                                                                                  |
+| `npm run lint`                                  | ESLint, `--max-warnings=0`                                                                                                       |
 | `npm run verify` / `npm run verify -- --strict` | Release gate (typecheck, lint, tests, build, format, gitleaks, dependency gate, evidence-map gate, resilience drill, strict SLO) |
-| `npm run secret:scan` | gitleaks |
-| `npm run audit:gate` | Evidence map gate |
-| `npm run compliance:gate` | Control evidence gate |
-| `npm run drill:resilience` | Resilience drill |
-| `npm run slo:report:strict` | Strict SLO report |
-| `npm run test:e2e` | Playwright (web) |
+| `npm run secret:scan`                           | gitleaks                                                                                                                         |
+| `npm run audit:gate`                            | Evidence map gate                                                                                                                |
+| `npm run compliance:gate`                       | Control evidence gate                                                                                                            |
+| `npm run drill:resilience`                      | Resilience drill                                                                                                                 |
+| `npm run slo:report:strict`                     | Strict SLO report                                                                                                                |
+| `npm run test:e2e`                              | Playwright (web)                                                                                                                 |
 
 ## 2. Category → test files
 
 ### Domain / schemas (DB-independent)
+
 - `packages/domain/test/domain.test.ts`
 - `packages/schemas` (covered via consumers; schema tests in policy/provider-meta)
 
 ### Policy (DB-independent)
+
 - `packages/policy/test/policy.test.ts` — deny precedence, default deny, amount boundaries, velocity, budget, vendor suspension, PO mismatch, missing evidence, model hints, `MODEL_FIELD_IN_ALLOW_RULE` lint.
 
 ### Provider-meta / Meta model (DB-independent)
+
 - `packages/provider-meta/test/client.test.ts`
 - `packages/provider-meta/test/config.test.ts`
 - `packages/provider-meta/test/prompt.test.ts`
 - `apps/api/test/model.test.ts`
 
 ### Broker / permits / connector
+
 - `packages/broker/test/broker.test.ts`
 - `packages/broker/test/connector.test.ts`
 - `packages/broker/test/permits.test.ts`
 
 ### Database / RLS / audit / outbox (DB-required)
+
 - `packages/db/test/rls.test.ts`
 - `packages/db/test/audit-concurrency.test.ts` (10 concurrent writers, gapless)
 - `packages/db/test/outbox-concurrency.test.ts`
@@ -52,6 +57,7 @@ find coverage. DB-dependent files require PostgreSQL; they fail with
 - `packages/db/test/root-env.test.ts`
 
 ### Queue / worker
+
 - `packages/queue/test/dispatcher.test.ts`
 - `packages/queue/test/dispatcher-resilience.test.ts`
 - `packages/queue/test/dlq-durability.test.ts`
@@ -62,6 +68,7 @@ find coverage. DB-dependent files require PostgreSQL; they fail with
 - `apps/worker/test/sweeps.test.ts`
 
 ### API intake / approvals / execution / security (DB-required)
+
 - `apps/api/test/intake.test.ts`
 - `apps/api/test/approvals.test.ts`
 - `apps/api/test/execute.test.ts`
@@ -78,6 +85,7 @@ find coverage. DB-dependent files require PostgreSQL; they fail with
 - `apps/api/test/shutdown.test.ts`
 
 ### Observability
+
 - `packages/observability/test/observability.test.ts`
 - `packages/observability/test/alert-rules.test.ts`
 - `packages/observability/test/dashboard.test.ts`
@@ -85,6 +93,7 @@ find coverage. DB-dependent files require PostgreSQL; they fail with
 - `packages/observability/test/tracing.test.ts`
 
 ### Test fixtures
+
 - `packages/test-fixtures/test/corpus.test.ts`
 
 ## 3. Coverage highlights

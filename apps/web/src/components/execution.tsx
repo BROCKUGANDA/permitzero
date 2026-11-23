@@ -171,8 +171,8 @@ export function ReceiptView({ response }: { response: ExecuteActionResponse }): 
         </Alert>
       ) : (
         <Alert variant="success" title="Executed live — real funds">
-          The connector confirmed the effect at the payment provider. This was a LIVE transfer: real funds moved
-          through the connected account, so treat this receipt like a bank statement line.
+          The connector confirmed the effect at the payment provider. This was a LIVE transfer: real funds moved through
+          the connected account, so treat this receipt like a bank statement line.
         </Alert>
       )}
       <dl className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">

@@ -43,9 +43,7 @@ export function liveFinanceWiringFromEnv(env: NodeJS.ProcessEnv = process.env): 
 }
 
 /** The OAuth values the CONNECT routes need; null when live finance is off. */
-export function connectOAuthConfigFromEnv(
-  env: NodeJS.ProcessEnv = process.env,
-): {
+export function connectOAuthConfigFromEnv(env: NodeJS.ProcessEnv = process.env): {
   authorizeUrl: string;
   tokenUrl: string;
   clientId: string;

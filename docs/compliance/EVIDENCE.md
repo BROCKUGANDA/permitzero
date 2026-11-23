@@ -31,7 +31,7 @@ note: The first version of the deployment script wrote `DATABASE_URL` but not `D
 status: implemented
 sources: SOC 2 CC6.1, CC6.6; OWASP Agentic (identity/privilege abuse); MAS SAFR (runtime authorization)
 claim: Every tenant-bearing table is under RLS with `ENABLE`+`FORCE`, the runtime role is non-exempt, and the session context is transaction-local, so a query that forgets `WHERE tenant_id = ?` returns zero foreign rows rather than all of them.
-evidence: infra/migrations/0006_row_level_security.sql:254 expect:CREATE POLICY tenant_isolation; infra/migrations/0006_row_level_security.sql:244 expect:FORCE ROW LEVEL SECURITY; packages/db/src/tenant.ts:44 expect:set_config('app.tenant_id'; packages/db/src/stores.ts:205 expect:withTenantTransaction(root
+evidence: infra/migrations/0006_row_level_security.sql:254 expect:CREATE POLICY tenant_isolation; infra/migrations/0006_row_level_security.sql:244 expect:FORCE ROW LEVEL SECURITY; packages/db/src/tenant.ts:44 expect:set_config('app.tenant_id'; packages/db/src/stores.ts:215 expect:withTenantTransaction(root
 tests: packages/db/test/rls.test.ts; apps/api/test/tenant-isolation.test.ts
 gap: —
 
@@ -148,7 +148,7 @@ note: TLS termination is the edge proxy's job (infra/caddy/Caddyfile); the app i
 status: implemented
 sources: SOC 2 CC7.3 (availability); OWASP (brute force)
 claim: A global ceiling plus per-route mutation and credential budgets are wired into Fastify's rate limiter, and the credential and mutation budgets are counted in Redis so they are the SAME allowance on every replica rather than one per process. The budget is charged against the presented credential, hashed — not the client address, because a brute-force attempt presents a different token each time and an address-keyed bucket is bypassed by walking around it, and because every tenant behind the edge proxy would otherwise share one bucket. When Redis cannot be reached the local limit still applies, so a limiter outage cannot grant an unlimited budget, and the fallback is counted and published as a metric rather than left to be discovered.
-evidence: apps/api/src/app.ts:268 expect:createSharedBudgets; apps/api/src/app.ts:220 expect:rateLimit; apps/api/src/config.ts:161 expect:export function loadConfig(env: NodeJS.ProcessEnv = process.env); packages/observability/src/shared-rate-limit.ts:182 expect:export class SharedRateLimiter
+evidence: apps/api/src/app.ts:268 expect:createSharedBudgets; apps/api/src/app.ts:229 expect:rateLimit; apps/api/src/config.ts:180 expect:export function loadConfig(env: NodeJS.ProcessEnv = process.env); packages/observability/src/shared-rate-limit.ts:182 expect:export class SharedRateLimiter
 tests: apps/api/test/rate-limit.test.ts; apps/api/test/security.test.ts; apps/api/test/tenant-isolation.test.ts
 note: The shared counter fails OPEN onto the local limit rather than closed. A limiter is a defence against abuse; it is not the control that decides whether an action is allowed, and an outage of it must not take the authorization API down with it. The failure is counted and exported so a permanently degraded limiter is visible.
 
@@ -166,7 +166,7 @@ gap: —
 status: implemented
 sources: SOC 2 CC7.2; ISO 27001 (logging)
 claim: `LOG_LEVEL` is parsed, validated and handed to Fastify's logger; an unknown level fails boot naming the variable, and credential-shaped fields are redacted at the serializer.
-evidence: apps/api/src/config.ts:205 expect:logLevelOf(env); apps/api/src/app.ts:178 expect:loggerOptions(deps.config)
+evidence: apps/api/src/config.ts:228 expect:logLevelOf(env); apps/api/src/app.ts:178 expect:loggerOptions(deps.config)
 tests: apps/api/test/logging.test.ts | is actually enabled, at the configured level
 note: Correlation travels as an explicit `traceId` field on the calls that matter, not on every line: the pinned Fastify (5.2) has no `setLogContext`, and the attempt to use it 500'd every request before a test caught it.
 
@@ -184,7 +184,7 @@ note: The scope used to be `--omit=dev`, so a build-time advisory could hide out
 status: implemented
 sources: SOC 2 CC6.1; OWASP (secrets management)
 claim: Secrets come from the environment and fail fast naming the variable, the RLS role password is substituted from the environment into migration SQL behind a character-class guard, gitleaks runs in CI over the history, and the demo credential file is gitignored with mode 0600. The master key can be ROTATED without losing the ability to verify the audit chain: the environment carries a keyRING, the first entry current and the rest accepted for verification, so a new key is added before it becomes current and the old one is retired afterwards.
-evidence: apps/api/src/config.ts:103 expect:function required(env: NodeJS.ProcessEnv, name: string); packages/db/src/client.ts:74 expect:PZ_RLS_ROLE_PASSWORD; packages/db/src/crypto.ts:117 expect:export function deriveKey
+evidence: apps/api/src/config.ts:122 expect:function required(env: NodeJS.ProcessEnv, name: string); packages/db/src/client.ts:74 expect:PZ_RLS_ROLE_PASSWORD; packages/db/src/crypto.ts:117 expect:export function deriveKey
 tests: packages/db/test/root-env.test.ts; packages/db/test/rotation.test.ts
 note: The keyring is an environment variable rather than an external secret manager, so the rotation window is an operator decision and the procedure is a script with a documented order. Rotation is deliberately not automated: how long a retired key stays acceptable is a risk decision, and a cron job cannot make it.
 

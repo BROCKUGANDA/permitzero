@@ -59,6 +59,10 @@ export async function notificationRoutes(app: ZodFastifyInstance, ctx: AppContex
         })
         .catch(() => undefined);
     }
-    return { outcome: outcome.status, receipt: outcome.status === 'DELIVERED' ? outcome.receipt : null, errorClass: outcome.status === 'DELIVERED' ? null : outcome.errorClass };
+    return {
+      outcome: outcome.status,
+      receipt: outcome.status === 'DELIVERED' ? outcome.receipt : null,
+      errorClass: outcome.status === 'DELIVERED' ? null : outcome.errorClass,
+    };
   });
 }

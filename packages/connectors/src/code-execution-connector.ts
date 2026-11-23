@@ -105,7 +105,12 @@ export class CodeExecutionFinanceConnector implements FinanceConnector {
       await mkdir(dir, { recursive: true });
       await writeFile(file, request.code, 'utf8');
     } catch {
-      await this.config.data.completeDispatch(request.tenantId, request.idempotencyKey, 'FAILED_TERMINAL', this.clock());
+      await this.config.data.completeDispatch(
+        request.tenantId,
+        request.idempotencyKey,
+        'FAILED_TERMINAL',
+        this.clock(),
+      );
       return { status: 'FAILED_TERMINAL', errorClass: 'SANDBOX_PREP_FAILED' };
     }
 
@@ -139,35 +144,47 @@ export class CodeExecutionFinanceConnector implements FinanceConnector {
     child.stdout.on('data', (c: Buffer) => collect(c, 'out'));
     child.stderr.on('data', (c: Buffer) => collect(c, 'err'));
 
-    const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null; timedOut: boolean }>((resolve) => {
-      const timer = setTimeout(() => {
-        try {
-          child.kill('SIGKILL');
-        } catch {
-          /* already dead */
-        }
-        resolve({ code: null, signal: 'SIGKILL', timedOut: true });
-      }, this.timeoutMs);
-      child.on('close', (code, signal) => {
-        clearTimeout(timer);
-        resolve({ code, signal, timedOut: false });
-      });
-      child.on('error', () => {
-        clearTimeout(timer);
-        resolve({ code: -1, signal: null, timedOut: false });
-      });
-    });
+    const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null; timedOut: boolean }>(
+      (resolve) => {
+        const timer = setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            /* already dead */
+          }
+          resolve({ code: null, signal: 'SIGKILL', timedOut: true });
+        }, this.timeoutMs);
+        child.on('close', (code, signal) => {
+          clearTimeout(timer);
+          resolve({ code, signal, timedOut: false });
+        });
+        child.on('error', () => {
+          clearTimeout(timer);
+          resolve({ code: -1, signal: null, timedOut: false });
+        });
+      },
+    );
 
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
 
     if (result.timedOut) {
       // The process may have produced a partial side effect inside the
       // sandbox; the ledger has nothing yet, so the honest outcome is unknown.
-      await this.config.data.completeDispatch(request.tenantId, request.idempotencyKey, 'FAILED_RETRYABLE', this.clock());
+      await this.config.data.completeDispatch(
+        request.tenantId,
+        request.idempotencyKey,
+        'FAILED_RETRYABLE',
+        this.clock(),
+      );
       return { status: 'TIMEOUT_AFTER_DISPATCH' };
     }
     if (result.code !== 0) {
-      await this.config.data.completeDispatch(request.tenantId, request.idempotencyKey, 'FAILED_TERMINAL', this.clock());
+      await this.config.data.completeDispatch(
+        request.tenantId,
+        request.idempotencyKey,
+        'FAILED_TERMINAL',
+        this.clock(),
+      );
       return { status: 'FAILED_TERMINAL', errorClass: `EXIT_${result.code ?? 'SIGNAL'}:${stderr.slice(0, 120)}` };
     }
 
