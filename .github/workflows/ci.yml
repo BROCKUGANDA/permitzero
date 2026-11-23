@@ -134,14 +134,17 @@ jobs:
     # The ports are therefore per-job, and the step below checks that the
     # port this job was given is actually the one its container is serving.
     env:
-      PG_PORT: '5433'
-      REDIS_PORT: '6380'
+      # High, unusual host ports: this runner is shared with other projects
+      # whose compose files bind 5433/6381 on loopback. A collision here fails
+      # at "Initialize containers" before a single test runs.
+      PG_PORT: '25433'
+      REDIS_PORT: '26380'
     services:
       postgres:
         image: postgres:17
         env:
           POSTGRES_PASSWORD: postgres
-        ports: ['5433:5432']
+        ports: ['25433:5432']
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -149,7 +152,7 @@ jobs:
           --health-retries 5
       redis:
         image: redis:7
-        ports: ['6380:6379']
+        ports: ['26380:6379']
     steps:
       # The order below is a dependency chain, not a preference: the environment
       # file first, then the schema and the seed data, then the verify gate
@@ -322,14 +325,16 @@ jobs:
     # service containers publishing the same host port collide, and the
     # collision is silent.
     env:
-      PG_PORT: '5434'
-      REDIS_PORT: '6381'
+      # See the Verify job: these ports must not collide with other projects
+      # on this shared runner.
+      PG_PORT: '25434'
+      REDIS_PORT: '26381'
     services:
       postgres:
         image: postgres:17
         env:
           POSTGRES_PASSWORD: postgres
-        ports: ['5434:5432']
+        ports: ['25434:5432']
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -337,7 +342,7 @@ jobs:
           --health-retries 5
       redis:
         image: redis:7
-        ports: ['6381:6379']
+        ports: ['26381:6379']
     steps:
       # No reclaim step here: GitHub starts this job's service containers
       # before any step in it runs, so the disk is reclaimed by the `reclaim`
