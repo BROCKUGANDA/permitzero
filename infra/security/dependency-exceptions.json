@@ -346,6 +346,67 @@
       "decidedBy": "PermitZero engineering",
       "decidedOn": "2026-10-29",
       "reviewBy": "2027-01-29"
+    },
+    {
+      "package": "glob",
+      "severity": "moderate",
+      "advisory": "AbortSignal cancellation bypass allows post-timeout filesystem traversal",
+      "advisories": [
+        {
+          "id": "GHSA-3g3m-2fjr-6pw4",
+          "severity": "moderate",
+          "title": "Glob: AbortSignal cancellation bypass allows post-timeout filesystem traversal"
+        }
+      ],
+      "vulnerableRange": "9.0.0 - 14.0.1",
+      "acceptedBecause": [
+        "The only glob in this tree is pulled in by `test-exclude` under Vitest's coverage provider. It expands the repository's own source paths from a checked-out working tree; it is never given a caller-controlled pattern in CI or in a deployed service.",
+        "The only non-breaking fix is none: npm reports the fix as `@vitest/coverage-v8@5.1.1`, a major upgrade of the whole test toolchain that has to move Vitest 3 to 5 across every workspace at once."
+      ],
+      "residualRisk": "A malicious pull request that edits coverage configuration could ask glob to traverse outside the checkout, but such a PR already runs arbitrary code in CI. The CI token is read-only and holds no deployment secrets.",
+      "compensatingControl": "Dev-only dependency, absent from every runtime image; untrusted pull requests run with a read-only token.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-11-23",
+      "reviewBy": "2027-01-29"
+    },
+    {
+      "package": "minimatch",
+      "severity": "moderate",
+      "advisory": "denial of service via globparts amplification",
+      "advisories": [
+        {
+          "id": "GHSA-g3hv-75wg-m249",
+          "severity": "moderate",
+          "title": "minimatch has potential denial of service via globparts amplification"
+        }
+      ],
+      "vulnerableRange": "7.0.0 - 11.0.0",
+      "acceptedBecause": [
+        "Both copies are transitive under Vitest's coverage tooling (`glob` and `test-exclude`). Patterns come from the repository's own coverage configuration, not from network input, and a DoS here would slow a local or CI test run rather than a deployed service.",
+        "The patched line is minimatch 11.x; reaching it needs the same Vitest coverage major upgrade as the glob entry, which is a coordinated test-toolchain migration."
+      ],
+      "residualRisk": "A deliberately pathological glob pattern in a malicious pull request could make a CI coverage step slow. It cannot affect production, which does not install this package.",
+      "compensatingControl": "Dev-only dependency, absent from every runtime image; CI has a job timeout and a read-only token.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-11-23",
+      "reviewBy": "2027-01-29"
+    },
+    {
+      "package": "test-exclude",
+      "severity": "moderate",
+      "advisory": "inherits the advisories of glob and minimatch",
+      "advisories": [],
+      "inheritsFrom": "glob",
+      "vulnerableRange": ">=7.0.0",
+      "acceptedBecause": [
+        "It has no independent advisory: both findings are the transitive glob and minimatch ones named above, and the only fix is the same Vitest coverage major upgrade.",
+        "It is used only to decide which files the coverage report includes, from configuration in this repository."
+      ],
+      "residualRisk": "Same as the glob and minimatch entries.",
+      "compensatingControl": "Dev-only dependency, absent from every runtime image.",
+      "decidedBy": "PermitZero engineering",
+      "decidedOn": "2026-11-23",
+      "reviewBy": "2027-01-29"
     }
   ]
 }
