@@ -16,7 +16,7 @@
  * material; list/delete see only references. Linking and revocation are
  * audited as outbox events like every other administrative change.
  */
-import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
+import { randomBytes, createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { buildAuthorizeUrl, exchangeAuthorizationCode } from '@permitzero/connectors';
 import type { WiseOAuthConfig } from '@permitzero/connectors';
 import {
@@ -34,6 +34,36 @@ import { authenticateToken } from '../auth.js';
 
 const PROVIDER = 'wise';
 const STATE_TTL_MS = 10 * 60 * 1000;
+const NONCE_COOKIE = 'pz_oauth_nonce';
+
+/** Process-local, expiry-pruned record of used state nonces. */
+const consumedNonces = new Map<string, number>();
+
+function nonceHash(nonce: string): string {
+  return createHash('sha256').update(nonce).digest('hex');
+}
+
+function consumeNonce(hash: string, expiresAt: number): boolean {
+  const now = Date.now();
+  for (const [key, expiry] of consumedNonces) {
+    if (expiry < now) consumedNonces.delete(key);
+  }
+  if (consumedNonces.has(hash)) return false;
+  consumedNonces.set(hash, expiresAt);
+  return true;
+}
+
+function cookieValue(header: string | undefined, name: string): string | null {
+  if (!header) return null;
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=');
+    if (separator < 0) continue;
+    if (part.slice(0, separator).trim() === name) {
+      return decodeURIComponent(part.slice(separator + 1).trim());
+    }
+  }
+  return null;
+}
 
 interface StatePayload {
   t: string; // tenant id
@@ -115,15 +145,25 @@ export async function connectRoutes(app: ZodFastifyInstance, ctx: AppContext): P
   app.get('/connect/wise/start', async (request, reply) => {
     const principal = await authenticateToken(ctx.runtime, request.headers.authorization, new Date());
     if (!principal) throw new UnauthenticatedError();
+    const nonce = randomBytes(24).toString('base64url');
+    const expiresAt = Date.now() + STATE_TTL_MS;
     const state = signState(
       {
         t: principal.tenantId,
         a: principal.actorId,
         p: PROVIDER,
-        n: randomUUID(),
-        e: Date.now() + STATE_TTL_MS,
+        // Only the hash travels in the signed state. The browser keeps the
+        // nonce in an HttpOnly cookie that an attacker who plants a URL cannot
+        // read, which binds the callback to the browser that started the flow.
+        n: nonceHash(nonce),
+        e: expiresAt,
       },
       ctx.config.permitSigningKey,
+    );
+    const secure = ctx.config.appEnv === 'development' || ctx.config.appEnv === 'test' ? '' : '; Secure';
+    reply.header(
+      'Set-Cookie',
+      `${NONCE_COOKIE}=${encodeURIComponent(nonce)}; Max-Age=${Math.floor(STATE_TTL_MS / 1000)}; Path=/connect/wise/callback; HttpOnly; SameSite=Lax${secure}`,
     );
     return reply.redirect(buildAuthorizeUrl(oauthConfig, state), 302);
   });
@@ -135,6 +175,20 @@ export async function connectRoutes(app: ZodFastifyInstance, ctx: AppContext): P
       throw new ForbiddenError('The provider redirect is missing its code or state.');
     }
     const state = verifyState(query.state, ctx.config.permitSigningKey);
+
+    // The signed state alone proves the server issued it; it does not prove
+    // THIS browser started the flow. Require the matching HttpOnly cookie and
+    // consume the nonce so a captured redirect cannot be replayed.
+    const nonce = cookieValue(request.headers.cookie, NONCE_COOKIE);
+    if (!nonce) throw new ForbiddenError('The connection must start in this browser.');
+    const suppliedHash = Buffer.from(nonceHash(nonce));
+    const expectedHash = Buffer.from(state.n);
+    if (suppliedHash.length !== expectedHash.length || !timingSafeEqual(suppliedHash, expectedHash)) {
+      throw new ForbiddenError('OAuth state does not match this browser; start the connection again.');
+    }
+    if (!consumeNonce(nonceHash(nonce), state.e)) {
+      throw new ForbiddenError('OAuth state has already been used; start the connection again.');
+    }
 
     const tokenResponse = await exchangeAuthorizationCode(oauthConfig, query.code, fetch);
     // The Wise profile the token acts on: prefer the business profile, fall

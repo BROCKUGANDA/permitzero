@@ -22,36 +22,30 @@ export interface WebhookDeliveryInput {
 
 export type DeliveryInsert = { kind: 'inserted'; traceId: string } | { kind: 'duplicate' };
 
-const uniqueViolationCodes = new Set(['23505']);
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    'code' in err &&
-    typeof (err as { code: unknown }).code === 'string' &&
-    uniqueViolationCodes.has((err as { code: string }).code)
-  );
-}
-
 /**
  * Insert the dedupe row. The (provider, delivery_id) PK is the guard: a
  * redelivered webhook inserts nothing and returns 'duplicate'.
+ *
+ * Catching a uniqueness error here is NOT equivalent: PostgreSQL aborts the
+ * transaction when the insert violates the PK, so returning 'duplicate' from
+ * the catch leaves the caller's transaction unusable and the commit fails with
+ * a 409. `ON CONFLICT DO NOTHING` keeps the transaction usable.
  */
 export async function recordWebhookDelivery(ex: DbExecutor, input: WebhookDeliveryInput): Promise<DeliveryInsert> {
   const traceId = newId('trace');
-  try {
-    await ex.insert(webhookDeliveries).values({
+  const inserted = await ex
+    .insert(webhookDeliveries)
+    .values({
       provider: input.provider,
       deliveryId: input.deliveryId,
       traceId,
       outcome: 'received',
       providerRef: input.providerRef,
-    });
-    return { kind: 'inserted', traceId };
-  } catch (err) {
-    if (isUniqueViolation(err)) return { kind: 'duplicate' };
-    throw err;
-  }
+    })
+    .onConflictDoNothing()
+    .returning({ traceId: webhookDeliveries.traceId });
+  if (inserted.length === 0) return { kind: 'duplicate' };
+  return { kind: 'inserted', traceId: inserted[0]?.traceId ?? traceId };
 }
 
 export interface DeliveryOutcome {

@@ -424,7 +424,11 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
     // finance is configured; the factory itself decides, so a deployment that
     // never opts in exposes no connect surface at all.
     await v1.register((scope) => connectRoutes(scope, ctx), { prefix: '/v1' });
-    await v1.register((scope) => codeExecutionRoutes(scope, ctx), { prefix: '/v1' });
+    // Code execution spawns a real interpreter as the API's OS user. It is a
+    // deliberate opt-in: no flag, no route — not a route behind a flag check.
+    if (deps.config.codeExecutionEnabled) {
+      await v1.register((scope) => codeExecutionRoutes(scope, ctx), { prefix: '/v1' });
+    }
     // Provider webhooks (Wise transfers#state-change). Registered only when
     // the platform's webhook public key is configured — otherwise there is no
     // route to probe, which is the fail-closed shape.
