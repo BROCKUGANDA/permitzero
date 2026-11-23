@@ -1212,6 +1212,8 @@ export const retentionRuns = pgTable(
 export type LegalHoldRow = typeof legalHolds.$inferSelect;
 export type RetentionRunRow = typeof retentionRuns.$inferSelect;
 
+/**
+
 /** Every table this package owns, in dependency-safe insert order. */
 export const ALL_TABLES = [
   tenants,
