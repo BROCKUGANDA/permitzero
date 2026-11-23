@@ -497,6 +497,14 @@ export const connectors = pgTable(
     credentialHash: text('credential_hash'),
     credentialPrefix: text('credential_prefix'),
     simulated: boolean('simulated').notNull().default(true),
+    /**
+     * The tenant's OAuth-connected provider account a LIVE connector dispatches
+     * through. Null on simulated connectors. The FK (added in migration 0012)
+     * references the composite key and ON DELETE SET NULL, so deleting a
+     * connected account detaches the connector and every later dispatch fails
+     * closed on the missing-account guard.
+     */
+    connectedAccountId: text('connected_account_id'),
     lastHealthCheckAt: ts('last_health_check_at'),
     healthStatus: text('health_status').$type<'ok' | 'degraded' | 'down' | 'disabled' | null>(),
     createdAt: tsNow('created_at'),
@@ -988,12 +996,57 @@ export const connectorDispatches = pgTable(
     startedAt: ts('started_at').notNull(),
     completedAt: ts('completed_at'),
     outcome: text('outcome'),
+    /**
+     * The external system's own reference for an in-flight effect (e.g. a Wise
+     * transfer id), persisted the moment the provider returns it. Live
+     * reconciliation reads this when no ledger receipt exists yet.
+     */
+    providerRef: text('provider_ref'),
     createdAt: tsNow('created_at'),
   },
   (t) => [
     primaryKey({ columns: [t.dispatchId, t.tenantId] }),
     index('idx_dispatches_tenant_key').on(t.tenantId, t.connectorIdempotencyKey),
     check('chk_dispatches_completed', sql`${t.completedAt} IS NULL OR ${t.completedAt} >= ${t.startedAt}`),
+  ],
+);
+
+/**
+ * A payment-provider account a tenant connected through OAuth (the user's own
+ * account — PermitZero never holds provider API keys). `tokenEnvelope` holds
+ * the OAuth token pair ENCRYPTED AT REST under the `secret-material` key; it
+ * is decrypted only inside the connector's token manager and is never selected
+ * into an API response.
+ */
+export const connectedAccounts = pgTable(
+  'connected_accounts',
+  {
+    connectedAccountId: text('connected_account_id').notNull(),
+    tenantId: text('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    /** Connector namespace, e.g. 'wise'. One ACTIVE account per provider. */
+    provider: text('provider').notNull(),
+    displayName: text('display_name').notNull(),
+    /** Provider-side profile the token acts on (e.g. the Wise profile id). */
+    externalProfileId: text('external_profile_id').notNull(),
+    status: text('status').notNull().default('ACTIVE').$type<'ACTIVE' | 'REVOKED'>(),
+    scopesJson: jsonb('scopes_json')
+      .notNull()
+      .default(sql`'[]'::jsonb`)
+      .$type<readonly string[]>(),
+    tokenEnvelope: jsonb('token_envelope'),
+    tokenExpiresAt: ts('token_expires_at'),
+    /** Actor that completed the OAuth redirect flow. */
+    connectedBy: text('connected_by').notNull(),
+    createdAt: tsNow('created_at'),
+    updatedAt: tsNow('updated_at'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.connectedAccountId, t.tenantId] }),
+    index('idx_connected_accounts_tenant').on(t.tenantId, t.provider),
+    check('chk_connected_accounts_status', sql`${t.status} IN ('ACTIVE','REVOKED')`),
+    check('chk_connected_accounts_provider_nonempty', sql`length(btrim(${t.provider})) > 0`),
   ],
 );
 
@@ -1026,6 +1079,57 @@ export type InvoiceRow = typeof invoices.$inferSelect;
 export type PurchaseOrderRow = typeof purchaseOrders.$inferSelect;
 export type ConnectorLedgerRow = typeof connectorLedger.$inferSelect;
 export type ConnectorDispatchRow = typeof connectorDispatches.$inferSelect;
+/**
+ * Global market reference data from Yahoo Finance. NOT tenant-owned. Served
+ * read-only behind authentication; staleness is derived from `fetchedAt`.
+ */
+export const marketSnapshots = pgTable(
+  'market_snapshots',
+  {
+    symbol: text('symbol').notNull().primaryKey(),
+    price: text('price').notNull(),
+    currency: text('currency'),
+    source: text('source').notNull().default('yahoo_finance'),
+    marketTime: ts('market_time'),
+    fetchedAt: tsNow('fetched_at'),
+    rawJson: jsonb('raw_json')
+      .notNull()
+      .default(sql`'{}'::jsonb`)
+      .$type<Record<string, unknown>>(),
+  },
+  (t) => [
+    check('chk_market_snapshots_symbol', sql`${t.symbol} ~ '^[A-Za-z0-9.^=_-]{1,32}$'`),
+    check('chk_market_snapshots_price', sql`length(btrim(${t.price})) > 0`),
+  ],
+);
+
+/**
+ * Provider webhook dedupe + routing evidence. Global: `provider + delivery_id`
+ * is the key regardless of tenant. Tenant ids are recorded only when a
+ * provider_ref could be resolved, for evidence — not for isolation.
+ */
+export const webhookDeliveries = pgTable(
+  'webhook_deliveries',
+  {
+    provider: text('provider').notNull(),
+    deliveryId: text('delivery_id').notNull(),
+    traceId: text('trace_id').notNull(),
+    outcome: text('outcome').notNull().default('received'),
+    resolvedTenantId: text('resolved_tenant_id'),
+    resolvedActionId: text('resolved_action_id'),
+    providerRef: text('provider_ref'),
+    receivedAt: tsNow('received_at'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.provider, t.deliveryId] }),
+    index('idx_webhook_deliveries_provider_ref').on(t.provider, t.providerRef),
+    check('chk_webhook_deliveries_outcome', sql`${t.outcome} ~ '^[a-z_]{3,64}$'`),
+  ],
+);
+
+export type ConnectedAccountRow = typeof connectedAccounts.$inferSelect;
+export type MarketSnapshotRow = typeof marketSnapshots.$inferSelect;
+export type WebhookDeliveryRow = typeof webhookDeliveries.$inferSelect;
 
 /**
  * A legal hold: this tenant's data must not be deleted, whatever the
@@ -1137,4 +1241,6 @@ export const ALL_TABLES = [
   connectorDispatches,
   legalHolds,
   retentionRuns,
+  marketSnapshots,
+  webhookDeliveries,
 ] as const;

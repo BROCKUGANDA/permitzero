@@ -41,7 +41,11 @@ const nextConfig: NextConfig = {
             key: 'Content-Security-Policy',
             value: [
               "default-src 'self'",
-              "script-src 'self' 'unsafe-inline'",
+              // Next's dev compiler evaluates modules at runtime for HMR.
+              // Without this exception the dev server returns its HTML but
+              // the console renders blank, which looks like a broken app.
+              // Production never carries unsafe-eval.
+              `script-src 'self' 'unsafe-inline'${process.env.NODE_ENV === 'production' ? '' : " 'unsafe-eval'"}`,
               "style-src 'self' 'unsafe-inline'",
               "img-src 'self' data:",
               "font-src 'self'",

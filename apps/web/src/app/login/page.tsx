@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation';
 import { ShieldCheck } from 'lucide-react';
 import { Alert, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Input, Label } from '@permitzero/ui';
 import { useAuth } from '@/lib/auth';
+import { VinylMark } from '@/components/vinyl';
+import { haptic } from '@/lib/haptics';
 
 export default function LoginPage(): React.JSX.Element {
   const { token, setToken } = useAuth();
@@ -19,10 +21,12 @@ export default function LoginPage(): React.JSX.Element {
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-md flex-col justify-center px-4">
       <div className="mb-6 flex items-center gap-2.5">
-        <span className="flex size-8 items-center justify-center rounded-md bg-primary font-mono text-base font-bold text-primary-foreground">
-          P
+        <span className="grid size-9 place-items-center rounded-sm border border-primary/30 bg-primary/5">
+          <VinylMark size={28} />
         </span>
-        <span className="text-lg font-semibold tracking-tight">PermitZero</span>
+        <span className="font-mono text-base font-semibold tracking-tight">
+          Permit<span className="text-primary">Zero</span>
+        </span>
       </div>
       <Card>
         <CardHeader>
@@ -45,6 +49,7 @@ export default function LoginPage(): React.JSX.Element {
                 return;
               }
               setError(null);
+              haptic('confirm');
               setToken(trimmed);
               router.push('/');
             }}

@@ -146,6 +146,9 @@ describe('schema parity', () => {
       purchase_orders: ['chk_purchase_orders_amount_nonneg', 'chk_purchase_orders_currency_shape'],
       connector_ledger: ['chk_connector_ledger_amount_nonneg', 'chk_connector_ledger_currency_shape'],
       connector_dispatches: ['chk_dispatches_completed'],
+      connected_accounts: ['chk_connected_accounts_status', 'chk_connected_accounts_provider_nonempty'],
+      market_snapshots: ['chk_market_snapshots_symbol', 'chk_market_snapshots_price'],
+      webhook_deliveries: ['chk_webhook_deliveries_outcome'],
       mfa_secrets: ['chk_mfa_secrets_encrypted_shape'],
       legal_holds: [
         'chk_legal_holds_reason_nonempty',
@@ -216,6 +219,8 @@ describe('schema parity', () => {
       '0009_encryption_at_rest.sql',
       '0010_retention_and_legal_hold.sql',
       '0011_mfa_last_used_step.sql',
+      '0012_live_finance.sql',
+      '0013_market_and_webhooks.sql',
     ]);
   });
 });

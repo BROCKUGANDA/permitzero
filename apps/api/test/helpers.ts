@@ -180,6 +180,10 @@ export function testConfig(): ApiConfig {
     // Short, so a test that shuts an app down does not wait on the
     // production grace window.
     shutdownGraceMs: 2_000,
+    // New capabilities default to their honest "off" state in tests.
+    marketSnapshotMaxAgeMs: 300_000,
+    wiseWebhookPublicKey: null,
+    notificationAllowedHosts: [],
   };
 }
 

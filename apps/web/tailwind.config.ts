@@ -17,6 +17,7 @@ const config: Config = {
         muted: { DEFAULT: 'hsl(var(--muted))', foreground: 'hsl(var(--muted-foreground))' },
         accent: { DEFAULT: 'hsl(var(--accent))', foreground: 'hsl(var(--accent-foreground))' },
         card: { DEFAULT: 'hsl(var(--card))', foreground: 'hsl(var(--card-foreground))' },
+        signal: { DEFAULT: 'hsl(var(--signal))', foreground: 'hsl(var(--signal-foreground))' },
       },
       borderRadius: {
         lg: 'var(--radius)',
@@ -29,8 +30,20 @@ const config: Config = {
       },
       keyframes: {
         'fade-in': { from: { opacity: '0', transform: 'translateY(4px)' }, to: { opacity: '1', transform: 'none' } },
+        'signal-pulse': {
+          '0%, 100%': { opacity: '1', boxShadow: '0 0 0 0 hsl(var(--primary) / 0.45)' },
+          '50%': { opacity: '0.75', boxShadow: '0 0 0 5px hsl(var(--primary) / 0)' },
+        },
+        'scan-sweep': {
+          from: { transform: 'translateX(-100%)' },
+          to: { transform: 'translateX(100%)' },
+        },
       },
-      animation: { 'fade-in': 'fade-in 0.25s ease-out' },
+      animation: {
+        'fade-in': 'fade-in 0.25s ease-out',
+        'signal-pulse': 'signal-pulse 2.4s ease-in-out infinite',
+        'scan-sweep': 'scan-sweep 2.8s ease-in-out infinite',
+      },
     },
   },
   plugins: [],

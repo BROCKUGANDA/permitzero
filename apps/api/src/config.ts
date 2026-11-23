@@ -1,3 +1,6 @@
+import { liveFinanceWiringFromEnv } from '@permitzero/db';
+import type { LiveFinanceWiring } from '@permitzero/db';
+
 /**
  * API configuration. Everything comes from the environment with safe
  * defaults; missing secrets fail fast with a message that names the variable
@@ -8,8 +11,7 @@ export interface ApiConfig {
   port: number;
   appEnv: string;
   version: string;
-  databaseUrl: string;
-  /**
+  databaseUrl: string;  /**
    * The restricted `pz_app` role created by
    * `infra/migrations/0006_row_level_security.sql`, used for every tenant read
    * and write. Falls back to `databaseUrl` when unset, which means the
@@ -95,6 +97,23 @@ export interface ApiConfig {
    * anybody yet, and it is deliberately not a bypass.
    */
   mfaEnabled?: boolean;
+  /**
+   * Live finance wiring, built from the environment by
+   * `liveFinanceWiringFromEnv`. Absent (the default) means live connectors can
+   * never dispatch in this deployment — the broker fails closed on every live
+   * row before burning a permit. Enabling it is an explicit deployment act:
+   * LIVE_FINANCE_ENABLED plus the platform OAuth client.
+   */
+  liveFinance?: LiveFinanceWiring;
+  /** How stale a persisted market snapshot may be before the API re-fetches. */
+  marketSnapshotMaxAgeMs: number;
+  /**
+   * Wise's public key (PEM) for verifying `X-Signature-SHA256` on webhooks.
+   * Unset means the webhook route is not registered at all.
+   */
+  wiseWebhookPublicKey: string | null;
+  /** Allowlisted destination hosts for outbound notification sinks. Empty = no delivery (fail closed). */
+  notificationAllowedHosts: readonly string[];
 }
 
 /** The step-up window used when the configuration does not name one. */
@@ -159,8 +178,7 @@ function booleanOf(env: NodeJS.ProcessEnv, name: string, def: boolean): boolean 
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
-  const permitSigningKey = required(env, 'PERMIT_SIGNING_KEY');
-  if (permitSigningKey.length < 16) {
+  const permitSigningKey = required(env, 'PERMIT_SIGNING_KEY');  if (permitSigningKey.length < 16) {
     throw new Error('PERMIT_SIGNING_KEY must be at least 16 characters.');
   }
   const explicitOff = (env['MODEL_ENABLED'] ?? '').toLowerCase() === 'false';
@@ -175,6 +193,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     ? 'disabled'
     : (requested as ApiConfig['modelProvider']);
   const appEnv = env['APP_ENV'] ?? 'development';
+  // Live finance is off unless the deployment names every required value; the
+  // helper throws naming the missing variable rather than letting a
+  // half-configured live path boot.
+  const liveFinance = liveFinanceWiringFromEnv(env);
   return {
     host: env['HOST'] ?? '127.0.0.1',
     port: intIn(env, 'PORT', 3000, 1, 65535),
@@ -207,5 +229,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     shutdownGraceMs: intIn(env, 'SHUTDOWN_GRACE_MS', 10_000, 100, 120_000),
     mfaStepUpWindowSeconds: intIn(env, 'MFA_STEP_UP_WINDOW_SECONDS', DEFAULT_MFA_STEP_UP_WINDOW_SECONDS, 30, 3600),
     mfaEnabled: booleanOf(env, 'MFA_ENABLED', true),
+    ...(liveFinance ? { liveFinance } : {}),
+    marketSnapshotMaxAgeMs: intIn(env, 'MARKET_SNAPSHOT_MAX_AGE_MS', 300_000, 5_000, 86_400_000),
+    wiseWebhookPublicKey: env['WISE_WEBHOOK_PUBLIC_KEY']?.trim() ? env['WISE_WEBHOOK_PUBLIC_KEY'].trim() : null,
+    notificationAllowedHosts: csvList(env['NOTIFICATION_ALLOWED_HOSTS']),
   };
 }

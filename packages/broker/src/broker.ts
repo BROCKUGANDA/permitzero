@@ -37,9 +37,10 @@ import type {
   ConnectorDataStore,
   ConnectorReceipt,
   ExecutionStore,
+  FinanceConnector,
   PersistedExecution,
 } from './ports.js';
-import type { ConnectorCallResult, SimulatedFinanceConnector } from './connector.js';
+import type { ConnectorCallResult } from './connector.js';
 import { PermitService } from './permits.js';
 
 export interface BrokerExecuteRequest {
@@ -67,8 +68,27 @@ export type ReconciliationResult =
 /** Resolves the connector row authorized for a tool. Implemented by the API/db layer. */
 export type ConnectorResolver = (tenantId: string, toolName: string) => Promise<ConnectorRecord | null>;
 
-/** Returns the live connector instance for a row. MVP: simulated only. */
-export type ConnectorProvider = (record: ConnectorRecord) => SimulatedFinanceConnector;
+/**
+ * Returns the connector instance that owns a connector row — simulated or live.
+ * The broker is polymorphic over the seam only; which provider sits behind a
+ * row is deployment wiring, never broker logic.
+ */
+export type ConnectorProvider = (record: ConnectorRecord) => FinanceConnector;
+
+/**
+ * The guards a live connector must pass before dispatch. Deployment-scoped,
+ * never tenant-supplied: the deployment opts into real money explicitly, names
+ * the provider type it wired, and caps every live transfer regardless of what
+ * any policy says (a policy error must not widen the cap).
+ */
+export interface LiveFinanceGuard {
+  /** Master switch. False means every live connector is rejected outright. */
+  enabled: boolean;
+  /** Connector `type`s the deployment actually wired (e.g. ['wise','stripe']). */
+  providerTypes: readonly string[];
+  /** Absolute per-transfer ceiling in minor units. Checked pre-permit. */
+  maxAmountMinor: number;
+}
 
 export interface BrokerDeps {
   permits: PermitService;
@@ -78,6 +98,8 @@ export interface BrokerDeps {
   audit: AuditSink;
   resolveConnector: ConnectorResolver;
   getConnector: ConnectorProvider;
+  /** Live-finance guards. Undefined means live connectors are not wired at all. */
+  live?: LiveFinanceGuard;
   clock?: Clock;
 }
 
@@ -125,7 +147,14 @@ type ExportParams = {
   recordLimit: number;
   dataClassification: string;
 };
-type DispatchParams = PaymentParams | VendorChangeParams | ExportParams;
+
+type CodeExecutionParams = {
+  tool: 'code.execute';
+  code: string;
+  language: 'node' | 'python';
+  args: readonly string[];
+};
+type DispatchParams = PaymentParams | VendorChangeParams | ExportParams | CodeExecutionParams;
 
 interface DispatchBase {
   tenantId: string;
@@ -144,6 +173,7 @@ export class Broker {
   private readonly audit: AuditSink;
   private readonly resolveConnector: ConnectorResolver;
   private readonly getConnector: ConnectorProvider;
+  private readonly live: LiveFinanceGuard | null;
   private readonly clock: Clock;
 
   constructor(deps: BrokerDeps) {
@@ -154,6 +184,7 @@ export class Broker {
     this.audit = deps.audit;
     this.resolveConnector = deps.resolveConnector;
     this.getConnector = deps.getConnector;
+    this.live = deps.live ?? null;
     this.clock = deps.clock ?? systemClock;
   }
 
@@ -233,12 +264,52 @@ export class Broker {
       );
     }
     if (!connectorRecord.simulated) {
-      return this.reject(
-        action,
-        request.traceId,
-        DenyReason.CONNECTOR_UNKNOWN,
-        'Only simulated connectors are supported in this build.',
-      );
+      // A live connector moves real money. Every guard below fails closed
+      // BEFORE the permit is consumed, so a misconfiguration can never spend
+      // funds; the live guard is deployment state, not tenant-supplied input.
+      if (!this.live?.enabled) {
+        return this.reject(
+          action,
+          request.traceId,
+          DenyReason.LIVE_FINANCE_DISABLED,
+          'Live finance execution is not enabled for this deployment; only simulated connectors may dispatch.',
+        );
+      }
+      if (!this.live.providerTypes.includes(connectorRecord.type)) {
+        return this.reject(
+          action,
+          request.traceId,
+          DenyReason.LIVE_CONNECTOR_NOT_CONFIGURED,
+          `Live connectors of type ${connectorRecord.type} are not wired in this deployment.`,
+        );
+      }
+      if (!connectorRecord.connectedAccountId) {
+        return this.reject(
+          action,
+          request.traceId,
+          DenyReason.CONNECTED_ACCOUNT_MISSING,
+          'The live connector has no OAuth-connected provider account; connect an account before dispatching.',
+        );
+      }
+      const liveAmount = cleanInt(action.argumentsRedacted['amount_minor']);
+      if (action.toolName === 'payment.execute' && liveAmount === null) {
+        // The amount is masked or unreadable: refuse before burning the permit
+        // rather than discovering it at dispatch time.
+        return this.reject(
+          action,
+          request.traceId,
+          DenyReason.NON_CANONICAL_INPUT,
+          'The stored amount is not readable; a live payment cannot be capped reliably.',
+        );
+      }
+      if (action.toolName === 'payment.execute' && liveAmount !== null && liveAmount > this.live.maxAmountMinor) {
+        return this.reject(
+          action,
+          request.traceId,
+          DenyReason.LIVE_LIMIT_EXCEEDED,
+          `The transfer exceeds the live-execution ceiling of ${this.live.maxAmountMinor} minor units.`,
+        );
+      }
     }
 
     const verified = await this.permits.verifyAndConsume(request.permitToken, {
@@ -407,9 +478,12 @@ export class Broker {
     });
 
     const connectorRecord = await this.resolveConnector(tenantId, reconciling.toolName);
-    if (!connectorRecord || !connectorRecord.simulated) {
+    if (!connectorRecord) {
       return this.manualReview(reconciling, latest, traceId, 'Connector unavailable during reconciliation.');
     }
+    // Simulated and live connectors both implement the lookup port: a live
+    // connector resolves against the PROVIDER's truth (the transfer's actual
+    // state), which is the whole point of reconciling real money.
     const receipt = await this.getConnector(connectorRecord).lookupByIdempotencyKey(
       tenantId,
       latest.connectorIdempotencyKey,
@@ -547,13 +621,25 @@ export class Broker {
         if (recordLimit === null || !dataClassification) return null;
         return { tool: 'vendor.export', vendorId, recordLimit, dataClassification };
       }
+      case 'code.execute': {
+        const code = cleanString(args['code']);
+        const rawLanguage = cleanString(args['language']);
+        const language = rawLanguage === 'node' || rawLanguage === 'python' ? rawLanguage : null;
+        if (!code || !language) return null;
+        const rawArgs = args['args'];
+        const argsList = Array.isArray(rawArgs)
+          ? rawArgs.filter((a): a is string => typeof a === 'string' && a.length <= 256).slice(0, 16)
+          : [];
+        if (rawArgs !== undefined && !Array.isArray(rawArgs)) return null;
+        return { tool: 'code.execute', code, language, args: argsList };
+      }
       default:
         return 'UNSUPPORTED_TOOL';
     }
   }
 
   private async dispatchWithDeadline(
-    connector: SimulatedFinanceConnector,
+    connector: FinanceConnector,
     params: DispatchParams,
     base: DispatchBase,
     intent: PersistedExecution,
@@ -586,6 +672,23 @@ export class Broker {
             vendorId: params.vendorId,
             newBeneficiaryRef: params.newBeneficiaryRef,
             verificationRef: params.verificationRef,
+            actionId: base.actionId,
+            executionId: base.executionId,
+            traceId: base.traceId,
+          });
+        }
+        if (params.tool === 'code.execute') {
+          const runCode = connector.executeCode;
+          if (typeof runCode !== 'function') {
+            return { status: 'FAILED_TERMINAL', errorClass: 'CODE_EXECUTION_NOT_SUPPORTED' };
+          }
+          return await runCode({
+            tenantId: base.tenantId,
+            connectorId: base.connectorId,
+            idempotencyKey: base.idempotencyKey,
+            code: params.code,
+            language: params.language,
+            args: params.args,
             actionId: base.actionId,
             executionId: base.executionId,
             traceId: base.traceId,

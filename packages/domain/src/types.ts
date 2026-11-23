@@ -110,6 +110,37 @@ export interface ConnectorRecord {
   credentialRef: string;
   lastHealthCheckAt: Date | null;
   simulated: boolean;
+  /**
+   * The tenant's OAuth-connected provider account this connector dispatches
+   * through. Required for live connectors (the broker refuses a live connector
+   * without one — fail closed), absent on simulated ones. The OAuth tokens
+   * themselves live encrypted at rest behind the connected-account row; this is
+   * only the reference.
+   */
+  connectedAccountId?: string | null;
+}
+
+/**
+ * A payment-provider account a tenant connected through an OAuth redirect flow.
+ * PermitZero never holds provider API keys: the user authorizes PermitZero
+ * against their own account, and only the reference + encrypted token envelope
+ * are stored. Token material is decrypted solely inside the connector's token
+ * manager, never in API responses or logs.
+ */
+export interface ConnectedAccountRecord {
+  connectedAccountId: string;
+  tenantId: string;
+  /** Connector namespace, e.g. 'wise'. One namespace per external provider. */
+  provider: string;
+  displayName: string;
+  /** Provider-side profile the token acts on (e.g. the Wise profile id). */
+  externalProfileId: string;
+  status: 'ACTIVE' | 'REVOKED';
+  scopes: readonly string[];
+  /** Actor that completed the OAuth flow. */
+  connectedBy: string;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 /** Advisory output from the model provider. Structurally validated, semantically

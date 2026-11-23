@@ -97,6 +97,7 @@ describe('reconciliation handler', () => {
       startedAt: new Date(),
       completedAt: null,
       outcome: null,
+      providerRef: null,
     });
 
     const result = await createReconciliationHandler({ db: t.db, broker: t.broker })(

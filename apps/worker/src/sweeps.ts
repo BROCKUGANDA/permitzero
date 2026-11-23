@@ -27,7 +27,9 @@ import {
   listExpiredApprovalActions,
   tenantScope,
   transitionAction,
+  upsertMarketSnapshot,
   withTenantBlindTransaction,
+  withTransaction,
 } from '@permitzero/db';
 import type { Db, DbStores } from '@permitzero/db';
 
@@ -130,6 +132,76 @@ export interface ReconcileSweepResult {
 }
 
 const RECONCILABLE_STATES = new Set(['UNKNOWN_OUTCOME', 'RECONCILING']);
+
+export interface MarketDataSweepResult {
+  checked: number;
+  updated: number;
+  errors: number;
+  /** True when no symbols are configured and the pass did nothing on purpose. */
+  disabled: boolean;
+}
+
+const MARKET_SYMBOL_PATTERN = /^[A-Za-z0-9.^=_-]{1,32}$/;
+
+/**
+ * Automatic market-data refresh (Yahoo Finance).
+ *
+ * Configured with `MARKET_FX_PAIRS` — an empty list disables the sweep. Each
+ * configured symbol is fetched over HTTPS, validated, and upserted into the
+ * global `market_snapshots` table with the provider's own market time and the
+ * fetch timestamp. Failures are logged per symbol and never wedge the rest of
+ * the pass. Reference data only: nothing here authorizes an action.
+ */
+export async function sweepMarketData(
+  deps: Pick<SweepDeps, 'db' | 'clock'> & { fetchImpl?: typeof fetch },
+  opts?: { symbols?: string[]; now?: Date; fetchImpl?: typeof fetch },
+): Promise<MarketDataSweepResult> {
+  const symbols = opts?.symbols ?? [];
+  const result: MarketDataSweepResult = {
+    checked: symbols.length,
+    updated: 0,
+    errors: 0,
+    disabled: symbols.length === 0,
+  };
+  if (symbols.length === 0) return result;
+  const now = opts?.now ?? deps.clock?.() ?? new Date();
+  const { YahooFinanceClient, YahooFinanceError } = await import('@permitzero/connectors');
+  const client = new YahooFinanceClient({
+    ...((opts?.fetchImpl ?? deps.fetchImpl) ? { fetchImpl: (opts?.fetchImpl ?? deps.fetchImpl)! } : {}),
+  });
+  for (const symbol of symbols) {
+    if (!MARKET_SYMBOL_PATTERN.test(symbol)) {
+      console.error(`market sweep skipped invalid symbol ${JSON.stringify(symbol)}`);
+      result.errors += 1;
+      continue;
+    }
+    try {
+      const quote = await client.getQuote(symbol);
+      await withTransaction(deps.db, async (tx) => {
+        await upsertMarketSnapshot(tx, {
+          symbol: quote.symbol,
+          price: String(quote.regularMarketPrice),
+          currency: quote.currency,
+          marketTime: quote.regularMarketTimeSeconds ? new Date(quote.regularMarketTimeSeconds * 1000) : null,
+          fetchedAt: now,
+          raw: {
+            regularMarketPrice: quote.regularMarketPrice,
+            currency: quote.currency,
+            regularMarketTimeSeconds: quote.regularMarketTimeSeconds,
+          },
+        });
+      });
+      result.updated += 1;
+    } catch (err) {
+      result.errors += 1;
+      const kind = err instanceof YahooFinanceError ? `yahoo:${err.status ?? 'network'}` : 'market_sweep';
+      console.error(
+        `market sweep failed for symbol ${symbol}: ${kind}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  return result;
+}
 
 export async function sweepUnknownOutcomes(
   deps: SweepDeps,

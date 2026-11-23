@@ -52,7 +52,92 @@ export interface ConnectorReceipt {
   currency: string;
   beneficiaryRef: string;
   completedAt: Date;
-  simulated: true;
+  /**
+   * True when the effect happened only inside a simulated environment (no real
+   * money moved). False ONLY for live connectors dispatching to an external
+   * provider — every UI surface, export and evidence record branches on this,
+   * so it may never be omitted or guessed.
+   */
+  simulated: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// The finance-connector seam — the internal/external boundary.
+//
+// The broker depends ONLY on this interface. Everything behind it — a synthetic
+// ledger or an external payment provider — is swappable without touching the
+// broker, which is what makes "live money under the same enforcement" possible
+// without widening any trust boundary: the connector is the only code the
+// broker can reach, and the provider is the only code the connector can reach.
+// ---------------------------------------------------------------------------
+
+export interface ConnectorPaymentRequest {
+  tenantId: string;
+  connectorId: string;
+  idempotencyKey: string;
+  invoiceId: string;
+  vendorId: string;
+  amountMinor: number;
+  currency: string;
+  beneficiaryRef: string;
+  actionId: string;
+  executionId: string;
+  traceId: string;
+}
+
+export interface ConnectorVendorChangeRequest {
+  tenantId: string;
+  connectorId: string;
+  idempotencyKey: string;
+  vendorId: string;
+  newBeneficiaryRef: string;
+  verificationRef: string | null;
+  actionId: string;
+  executionId: string;
+  traceId: string;
+}
+
+export interface ConnectorExportRequest {
+  tenantId: string;
+  connectorId: string;
+  idempotencyKey: string;
+  vendorId: string | null;
+  recordLimit: number;
+  dataClassification: string;
+  actionId: string;
+  executionId: string;
+  traceId: string;
+}
+
+export interface CodeExecutionRequest {
+  tenantId: string;
+  connectorId: string;
+  idempotencyKey: string;
+  code: string;
+  language: 'node' | 'python';
+  args: readonly string[];
+  actionId: string;
+  executionId: string;
+  traceId: string;
+}
+
+export type ConnectorCallResult =
+  | { status: 'SUCCEEDED'; receipt: ConnectorReceipt }
+  | { status: 'FAILED_RETRYABLE'; errorClass: string }
+  | { status: 'FAILED_TERMINAL'; errorClass: string }
+  | { status: 'TIMEOUT_AFTER_DISPATCH' };
+
+export interface FinanceConnector {
+  executePayment(request: ConnectorPaymentRequest): Promise<ConnectorCallResult>;
+  updateVendorBankDetails(request: ConnectorVendorChangeRequest): Promise<ConnectorCallResult>;
+  exportVendors(request: ConnectorExportRequest): Promise<ConnectorCallResult>;
+  executeCode?(request: CodeExecutionRequest): Promise<ConnectorCallResult>;
+  /**
+   * Truth lookup for reconciliation. Returns the receipt when the effect is
+   * provably complete, null when it is provably absent, still pending, or
+   * unverifiable — the broker treats null as "not proven", never as "failed".
+   */
+  lookupByIdempotencyKey(tenantId: string, connectorIdempotencyKey: string): Promise<ConnectorReceipt | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +333,14 @@ export interface ConnectorDispatchRecord {
   completedAt: Date | null;
   /** `null` when unknown; otherwise the connector's declared outcome. */
   outcome: string | null;
+  /**
+   * The external system's reference for the in-flight effect (e.g. the Wise
+   * transfer id), recorded the moment the provider accepts the request. Live
+   * reconciliation reads THIS, not the ledger: an execution whose process died
+   * between "provider accepted" and "receipt written" still has a provider
+   * reference to resolve against. Always null for simulated connectors.
+   */
+  providerRef: string | null;
 }
 
 export interface LedgerInsertResult {
@@ -279,6 +372,14 @@ export interface ConnectorDataStore {
     completedAt: Date,
   ): Promise<void>;
   listDispatches(tenantId: string, connectorIdempotencyKey: string): Promise<ConnectorDispatchRecord[]>;
+  /**
+   * Persist the external system's reference for an in-flight effect. Live
+   * connectors call this the moment the provider returns its own id, so that a
+   * process dying between dispatch and receipt still leaves reconciliation a
+   * handle on the truth. Must scope by `(tenant_id, connector_idempotency_key)`
+   * and stay a no-op when the dispatch row is already terminal.
+   */
+  setDispatchProviderRef(tenantId: string, connectorIdempotencyKey: string, providerRef: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
