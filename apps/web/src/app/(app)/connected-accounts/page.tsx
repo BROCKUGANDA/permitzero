@@ -1,125 +1,41 @@
 'use client';
 
 import * as React from 'react';
-import { Button, buttonVariants } from '@permitzero/ui';
+import { FlaskConical, ShieldCheck } from 'lucide-react';
 
-interface ConnectedAccount {
-  connected_account_id: string;
-  provider: string;
-  display_name: string;
-  external_profile_id: string;
-  status: 'ACTIVE' | 'REVOKED';
-  connected_by: string;
-  created_at: Date;
-  updated_at: Date;
-}
-
+/**
+ * The commercial release is simulation-only. This screen replaces the live
+ * provider OAuth flow rather than leaving a dormant route or a dead Connect
+ * button behind. Historical delivery evidence remains available elsewhere.
+ */
 export default function ConnectedAccountsPage(): React.JSX.Element {
-  const [accounts, setAccounts] = React.useState<ConnectedAccount[] | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
-  const [busy, setBusy] = React.useState(false);
-
-  const load = React.useCallback(async () => {
-    try {
-      const response = await fetch('/api/v1/connected-accounts', { credentials: 'same-origin' });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const body = (await response.json()) as { items: ConnectedAccount[] };
-      setAccounts(body.items);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load connected accounts.');
-    }
-  }, []);
-
-  React.useEffect(() => {
-    void load();
-  }, [load]);
-
-  const revoke = async (id: string) => {
-    setBusy(true);
-    try {
-      const response = await fetch(`/api/v1/connected-accounts/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-        credentials: 'same-origin',
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to revoke the connected account.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <div className="flex flex-col gap-5">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Connected accounts</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Payment-provider accounts tenants authorise PermitZero against, via OAuth. PermitZero never holds a provider
-            API key; tokens are encrypted at rest and decrypted only inside the connector.
-          </p>
-        </div>
-        <a href="/api/v1/connect/wise/start" className={buttonVariants()}>
-          Connect a Wise account
-        </a>
+      <div>
+        <h1 className="font-mono text-2xl font-semibold tracking-tight">Simulation accounts</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Provider connections are disabled in this release. PermitZero executes against its isolated simulated ledger.
+        </p>
       </div>
 
-      {error ? <p className="text-sm text-destructive">{error}</p> : null}
-
-      {accounts === null ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
-      ) : accounts.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No connected accounts yet. Connect one to enable live dispatch.</p>
-      ) : (
-        <div className="overflow-x-auto rounded-md border">
-          <table className="w-full text-sm">
-            <thead className="bg-muted/50">
-              <tr>
-                <th className="px-3 py-2 text-left font-medium">Provider</th>
-                <th className="px-3 py-2 text-left font-medium">Display name</th>
-                <th className="px-3 py-2 text-left font-medium">Profile</th>
-                <th className="px-3 py-2 text-left font-medium">Status</th>
-                <th className="px-3 py-2 text-left font-medium">Connected</th>
-                <th className="px-3 py-2 text-right font-medium">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {accounts.map((account) => (
-                <tr key={account.connected_account_id} className="border-t">
-                  <td className="px-3 py-2 font-mono">{account.provider}</td>
-                  <td className="px-3 py-2">{account.display_name}</td>
-                  <td className="px-3 py-2 font-mono">{account.external_profile_id}</td>
-                  <td className="px-3 py-2">{account.status}</td>
-                  <td className="px-3 py-2">
-                    {account.created_at instanceof Date
-                      ? account.created_at.toLocaleString()
-                      : String(account.created_at)}
-                  </td>
-                  <td className="px-3 py-2 text-right">
-                    {account.status === 'ACTIVE' ? (
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        disabled={busy}
-                        onClick={() => revoke(account.connected_account_id)}
-                      >
-                        Revoke
-                      </Button>
-                    ) : null}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      <p className="text-xs text-muted-foreground">
-        Live dispatch is gated by <code>LIVE_FINANCE_ENABLED</code>, the connected account and the
-        <code>LIVE_MAX_AMOUNT_MINOR</code> ceiling — see docs/judge-readiness/LIVE-FINANCE.md.
-      </p>
+      <div className="grid gap-4 md:grid-cols-2">
+        <section className="rounded-md border border-primary/30 bg-primary/5 p-5">
+          <FlaskConical className="size-6 text-primary" aria-hidden />
+          <h2 className="mt-3 font-mono text-sm font-semibold uppercase tracking-wider">Simulated by design</h2>
+          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+            Accounts, counterparties, transfers and reconciliation are deterministic fixtures. No live banking endpoint,
+            payment credential or settlement rail is reachable from the runtime.
+          </p>
+        </section>
+        <section className="rounded-md border border-border bg-card p-5">
+          <ShieldCheck className="size-6 text-primary" aria-hidden />
+          <h2 className="mt-3 font-mono text-sm font-semibold uppercase tracking-wider">Hard boundary</h2>
+          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+            Setting <code>LIVE_FINANCE_ENABLED</code> fails API and worker startup. The OAuth and inbound
+            provider-webhook routes are not registered, so there is no hidden switch to turn live dispatch on.
+          </p>
+        </section>
+      </div>
     </div>
   );
 }

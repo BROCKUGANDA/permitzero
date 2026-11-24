@@ -63,9 +63,6 @@ export function buildWorker(deps: BuildWorkerDeps): BuiltWorker {
     signingKey: deps.config.permitSigningKey,
     signingKeyId: deps.config.permitSigningKeyId,
     auditHmacKey: deps.config.auditHmacKey,
-    // The worker reconciles live outcomes against the provider, so it needs
-    // the same live wiring the API dispatches with. Absent = fail closed.
-    ...(deps.config.liveFinance ? { live: deps.config.liveFinance } : {}),
     clock,
   });
 

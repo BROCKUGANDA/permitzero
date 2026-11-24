@@ -133,7 +133,14 @@ export class HttpFinanceConnector implements FinanceConnector {
         ...(request.body ? { body: request.body } : {}),
         signal: controller.signal,
       });
-    } catch (err) {
+    } catch {
+      if (controller.signal.aborted) {
+        // The request may already have reached the target. Marking this as a
+        // retryable transport failure would let the broker send the same write
+        // again; leave the dispatch open as an unknown outcome for
+        // reconciliation instead.
+        return { status: 'TIMEOUT_AFTER_DISPATCH' };
+      }
       await this.config.data.completeDispatch(
         request.tenantId,
         request.idempotencyKey,

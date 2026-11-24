@@ -23,18 +23,10 @@ import type {
 } from '@permitzero/broker';
 import { Broker, PermitService, SimulatedFinanceConnector } from '@permitzero/broker';
 import type { Clock, FinanceConnector } from '@permitzero/broker';
-import { WiseClient, WiseFinanceConnector, WiseTokenManager } from '@permitzero/connectors';
-import type { TokenStore } from '@permitzero/connectors';
-import { StripeFinanceConnector } from '@permitzero/connectors';
 import { newId } from '@permitzero/domain';
 import type { ConnectorRecord } from '@permitzero/domain';
 import type { Db, DbExecutor } from './client.js';
 import { withTenantBlindTransaction, withTenantTransaction } from './tenant.js';
-import {
-  getConnectedAccount,
-  readConnectedAccountToken,
-  saveConnectedAccountToken,
-} from './repos/connected-accounts.js';
 import {
   toActionRecord,
   toConnectorDispatchRecord,
@@ -492,38 +484,6 @@ export interface BrokerFactoryOptions {
   signingKeyId: string;
   auditHmacKey?: string | null;
   clock?: Clock;
-  /**
-   * Live finance wiring. Absent means live connectors are not supported in
-   * this deployment at all: the broker's guard rejects every live connector
-   * row before any dispatch, so wiring is the opt-in, and a deployment that
-   * never names it can never move real money.
-   */
-  live?: LiveFinanceWiring;
-}
-
-/**
- * Everything the deployment must name explicitly to allow real-money
- * dispatch. Nothing here is tenant-supplied: the ceiling and the provider are
- * deployment decisions, and the OAuth client is PermitZero's platform
- * credential (the USER's account is connected per tenant through the
- * connected_accounts table, never through these values).
- */
-export interface LiveFinanceWiring {
-  enabled: boolean;
-  /** The connector `type`s this deployment wired, e.g. ['wise','stripe']. */
-  providerTypes: readonly string[];
-  /** Absolute per-transfer ceiling in minor units. */
-  maxAmountMinor: number;
-  /** Wise Platform base URL (sandbox or live). */
-  wiseBaseUrl: string;
-  wiseTimeoutMs?: number;
-  oauth: {
-    clientId: string;
-    clientSecret: string;
-    tokenUrl: string;
-  };
-  /** Injectable for tests; production uses the global fetch. */
-  fetchImpl?: typeof fetch;
 }
 
 export interface BuiltBroker {
@@ -551,115 +511,18 @@ export function createBroker(db: Db | DbExecutor, opts: BrokerFactoryOptions): B
   // itself for the `in` check, so `root ? root.db : db` would leave the else
   // branch as the union.
   const ex: DbExecutor = 'sql' in db ? db.db : db;
-  const live = opts.live;
-
-  // Connector-owned token persistence: the connector sees only the port; the
-  // decrypted pair exists solely inside its token manager. Same tenant-scoping
-  // rule as every store: a root pool picks its tenant per call, a
-  // caller-supplied transaction already has one.
-  const tokenStore: TokenStore = {
-    load: async (tenantId, connectedAccountId) => {
-      return root
-        ? withTenantTransaction(root, tenantId, (tx) =>
-            readConnectedAccountToken(tx, tenantId, connectedAccountId, opts.auditHmacKey ?? null),
-          )
-        : readConnectedAccountToken(ex, tenantId, connectedAccountId, opts.auditHmacKey ?? null);
-    },
-    save: async (tenantId, connectedAccountId, token) => {
-      const write = (tx: DbExecutor) =>
-        saveConnectedAccountToken(
-          tx,
-          tenantId,
-          connectedAccountId,
-          token,
-          opts.auditHmacKey ?? null,
-          clock?.() ?? new Date(),
-        );
-      if (root) await withTenantTransaction(root, tenantId, write);
-      else await write(ex);
-    },
-  };
-  const profileResolver = async (tenantId: string, connectedAccountId: string): Promise<string> => {
-    const read = (tx: DbExecutor) => getConnectedAccount(tx, tenantId, connectedAccountId);
-    const row = root ? await withTenantTransaction(root, tenantId, read) : await read(ex);
-    if (!row || row.status !== 'ACTIVE') {
-      throw new Error(`Connected account ${connectedAccountId} is not active for this tenant.`);
-    }
-    return row.externalProfileId;
-  };
-
-  // The token manager and HTTP client are record-independent: build once, reuse
-  // for every live connector row.
-  const tokenManager = live
-    ? new WiseTokenManager({
-        oauth: {
-          clientId: live.oauth.clientId,
-          clientSecret: live.oauth.clientSecret,
-          authorizeUrl: '', // Unused at runtime; refreshes only.
-          tokenUrl: live.oauth.tokenUrl,
-          redirectUri: '',
-          scopes: [],
-        },
-        tokenStore,
-        ...(live.fetchImpl ? { fetchImpl: live.fetchImpl } : {}),
-        ...(clock ? { clock } : {}),
-      })
-    : null;
-  const wiseClient = live
-    ? new WiseClient({
-        baseUrl: live.wiseBaseUrl,
-        ...(live.wiseTimeoutMs !== undefined ? { timeoutMs: live.wiseTimeoutMs } : {}),
-        ...(live.fetchImpl ? { fetchImpl: live.fetchImpl } : {}),
-      })
-    : null;
 
   /**
-   * The connector registry: which instance owns a connector row. Simulated
-   * rows keep the synthetic ledger; rows matching the wired provider type get
-   * the live Wise adapter bound to their connected account; anything else is
-   * an unwired live row that can never dispatch.
+   * The connector registry is simulation-only. Simulated rows use the
+   * synthetic ledger; every non-simulated row gets an unwired connector that
+   * fails closed. There is no live provider branch and no connected-account
+   * token path in this release.
    */
   const getConnector = (record: ConnectorRecordForRegistry): FinanceConnector => {
     if (record.simulated) {
       return new SimulatedFinanceConnector({
         connectorId: record.connectorId,
         credentialRef: record.credentialRef,
-        data: stores.data,
-        ...(clock ? { clock } : {}),
-      });
-    }
-    if (
-      live &&
-      tokenManager &&
-      wiseClient &&
-      record.type === 'wise' &&
-      live.providerTypes.includes('wise') &&
-      record.connectedAccountId
-    ) {
-      return new WiseFinanceConnector({
-        connectorId: record.connectorId,
-        connectedAccountId: record.connectedAccountId,
-        tokenManager,
-        wiseClient,
-        data: stores.data,
-        profileResolver,
-        ...(clock ? { clock } : {}),
-      });
-    }
-    if (live && live.providerTypes.includes('stripe') && record.connectedAccountId) {
-      const stripeTokenProvider = async (tenantId: string, connectedAccountId: string): Promise<string> => {
-        const token = root
-          ? await withTenantTransaction(root, tenantId, (tx) =>
-              readConnectedAccountToken(tx, tenantId, connectedAccountId, opts.auditHmacKey ?? null),
-            )
-          : await readConnectedAccountToken(ex, tenantId, connectedAccountId, opts.auditHmacKey ?? null);
-        if (!token) throw new Error('Stripe connected account has no usable token.');
-        return token.accessToken;
-      };
-      return new StripeFinanceConnector({
-        connectorId: record.connectorId,
-        connectedAccountId: record.connectedAccountId,
-        tokenProvider: stripeTokenProvider,
         data: stores.data,
         ...(clock ? { clock } : {}),
       });
@@ -682,9 +545,6 @@ export function createBroker(db: Db | DbExecutor, opts: BrokerFactoryOptions): B
       return row ? toConnectorRecord(row) : null;
     },
     getConnector,
-    ...(live
-      ? { live: { enabled: live.enabled, providerTypes: live.providerTypes, maxAmountMinor: live.maxAmountMinor } }
-      : {}),
     ...(clock ? { clock } : {}),
   });
   return { broker, permits, stores };

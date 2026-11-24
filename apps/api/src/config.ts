@@ -1,6 +1,3 @@
-import { liveFinanceWiringFromEnv } from '@permitzero/db';
-import type { LiveFinanceWiring } from '@permitzero/db';
-
 /**
  * API configuration. Everything comes from the environment with safe
  * defaults; missing secrets fail fast with a message that names the variable
@@ -97,14 +94,6 @@ export interface ApiConfig {
    * anybody yet, and it is deliberately not a bypass.
    */
   mfaEnabled?: boolean;
-  /**
-   * Live finance wiring, built from the environment by
-   * `liveFinanceWiringFromEnv`. Absent (the default) means live connectors can
-   * never dispatch in this deployment — the broker fails closed on every live
-   * row before burning a permit. Enabling it is an explicit deployment act:
-   * LIVE_FINANCE_ENABLED plus the platform OAuth client.
-   */
-  liveFinance?: LiveFinanceWiring;
   /** How stale a persisted market snapshot may be before the API re-fetches. */
   marketSnapshotMaxAgeMs: number;
   /**
@@ -200,10 +189,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     ? 'disabled'
     : (requested as ApiConfig['modelProvider']);
   const appEnv = env['APP_ENV'] ?? 'development';
-  // Live finance is off unless the deployment names every required value; the
-  // helper throws naming the missing variable rather than letting a
-  // half-configured live path boot.
-  const liveFinance = liveFinanceWiringFromEnv(env);
+  // The PRD's non-negotiable boundary: this release is simulation-only. A
+  // deployment that tries to turn live finance on must fail at boot, naming the
+  // variable without ever constructing a provider client.
+  if (booleanOf(env, 'LIVE_FINANCE_ENABLED', false)) {
+    throw new Error('LIVE_FINANCE_ENABLED is forbidden: this release is simulation-only.');
+  }
   return {
     host: env['HOST'] ?? '127.0.0.1',
     port: intIn(env, 'PORT', 3000, 1, 65535),
@@ -236,7 +227,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     shutdownGraceMs: intIn(env, 'SHUTDOWN_GRACE_MS', 10_000, 100, 120_000),
     mfaStepUpWindowSeconds: intIn(env, 'MFA_STEP_UP_WINDOW_SECONDS', DEFAULT_MFA_STEP_UP_WINDOW_SECONDS, 30, 3600),
     mfaEnabled: booleanOf(env, 'MFA_ENABLED', true),
-    ...(liveFinance ? { liveFinance } : {}),
     marketSnapshotMaxAgeMs: intIn(env, 'MARKET_SNAPSHOT_MAX_AGE_MS', 300_000, 5_000, 86_400_000),
     wiseWebhookPublicKey: env['WISE_WEBHOOK_PUBLIC_KEY']?.trim() ? env['WISE_WEBHOOK_PUBLIC_KEY'].trim() : null,
     notificationAllowedHosts: csvList(env['NOTIFICATION_ALLOWED_HOSTS']),
