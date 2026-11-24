@@ -43,7 +43,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out the commit CI verified
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # On the workflow_run path github.sha is whatever main was when the
           # event was delivered, not the commit CI actually tested. The ref has
