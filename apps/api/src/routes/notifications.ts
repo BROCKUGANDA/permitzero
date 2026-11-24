@@ -8,7 +8,7 @@
  * and audits the outcome.
  */
 import { HttpNotificationSink } from '@permitzero/connectors';
-import { UnauthenticatedError, BadRequestError } from '@permitzero/domain';
+import { UnauthenticatedError, BadRequestError, ForbiddenError, Role, canonicalHash } from '@permitzero/domain';
 import type { AppContext, ZodFastifyInstance } from '../app.js';
 import { authenticateToken } from '../auth.js';
 
@@ -18,6 +18,17 @@ export async function notificationRoutes(app: ZodFastifyInstance, ctx: AppContex
   app.post('/notifications/send', async (request) => {
     const principal = await authenticateToken(ctx.runtime, request.headers.authorization, new Date());
     if (!principal) throw new UnauthenticatedError();
+    // Sending a message outside the platform is a privileged consequence, not
+    // a read. Agents, approvers and auditors cannot turn their credential into
+    // an outbound notification channel.
+    if (
+      principal.actorType !== 'USER' ||
+      (!principal.roles.includes(Role.OWNER) &&
+        !principal.roles.includes(Role.POLICY_ADMIN) &&
+        !principal.roles.includes(Role.OPERATOR))
+    ) {
+      throw new ForbiddenError('This credential may not send external notifications.');
+    }
     const body = request.body as { destination?: unknown; channel?: unknown; message?: unknown; severity?: unknown };
     if (typeof body?.destination !== 'string' || body.destination.trim().length === 0) {
       throw new BadRequestError('destination is required.');
@@ -29,8 +40,28 @@ export async function notificationRoutes(app: ZodFastifyInstance, ctx: AppContex
       throw new BadRequestError('message is required.');
     }
     const severity = body.severity === 'warning' || body.severity === 'critical' ? body.severity : 'info';
+    // A clock/random delivery id defeats the sink's idempotency on every
+    // retry. Use the caller's key when supplied, otherwise a canonical hash
+    // of the exact notification, scoped to tenant and actor.
+    const supplied =
+      typeof request.headers['idempotency-key'] === 'string' ? request.headers['idempotency-key'].trim() : '';
+    if (supplied && (supplied.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(supplied))) {
+      throw new BadRequestError(
+        'Idempotency-Key must be at most 128 characters using letters, numbers, dot, underscore, colon or dash.',
+      );
+    }
+    const deliveryId = supplied
+      ? `notif:${principal.tenantId}:${supplied}`
+      : `notif:${canonicalHash({
+          tenant_id: principal.tenantId,
+          actor_id: principal.actorId,
+          destination: body.destination.trim(),
+          channel: body.channel.trim(),
+          message: body.message,
+          severity,
+        })}`;
     const outcome = await sink.deliver({
-      deliveryId: `notif-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      deliveryId,
       destination: body.destination.trim(),
       channel: body.channel.trim(),
       message: body.message,
@@ -39,12 +70,12 @@ export async function notificationRoutes(app: ZodFastifyInstance, ctx: AppContex
       traceId: null,
     });
     if (outcome.status === 'DELIVERED') {
-      ctx.stores.audit
+      await ctx.stores.audit
         .append({
           tenantId: principal.tenantId,
           actionId: null,
           runId: null,
-          actorType: 'USER',
+          actorType: principal.actorType,
           actorId: principal.actorId,
           eventType: 'notification.sent',
           eventTime: new Date(),
@@ -57,7 +88,12 @@ export async function notificationRoutes(app: ZodFastifyInstance, ctx: AppContex
             status_code: outcome.receipt.statusCode,
           },
         })
-        .catch(() => undefined);
+        .catch((err: unknown) => {
+          console.error(
+            `[notifications] audit append failed for ${deliveryId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          throw err;
+        });
     }
     return {
       outcome: outcome.status,

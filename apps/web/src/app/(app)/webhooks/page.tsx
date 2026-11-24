@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import { useAuth } from '@/lib/auth';
 
 interface Delivery {
   provider: string;
@@ -14,42 +15,37 @@ interface Delivery {
 }
 
 export default function WebhooksPage(): React.JSX.Element {
+  const { token } = useAuth();
   const [deliveries, setDeliveries] = React.useState<Delivery[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
     (async () => {
       try {
-        const response = await fetch('/api/v1/webhooks/wise/deliveries', { credentials: 'same-origin' });
+        const response = await fetch('/api/v1/webhooks/wise/deliveries', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const body = (await response.json()) as { items: Delivery[] };
-        setDeliveries(body.items);
+        if (!cancelled) setDeliveries(body.items);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load webhook deliveries.');
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load webhook deliveries.');
       }
     })();
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
   return (
     <div className="flex flex-col gap-5">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Webhooks</h1>
+        <h1 className="font-mono text-2xl font-semibold tracking-tight">Delivery evidence</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Provider webhook deliveries (Wise <code>transfers#state-change</code>). Each delivery is recorded before any
-          work happens; the tenant is resolved by the provider&apos;s own reference, and the existing reconciliation
-          consumer settles the action against provider truth. Webhooks never flip money state themselves.
-        </p>
-      </div>
-
-      <div className="rounded-md border p-4 text-sm">
-        <p className="font-medium">Endpoint to register with the provider</p>
-        <code className="mt-1 block break-all font-mono text-xs">
-          {typeof window !== 'undefined' ? `${window.location.origin}/api/v1/webhooks/wise` : '/api/v1/webhooks/wise'}
-        </code>
-        <p className="mt-2 text-xs text-muted-foreground">
-          Requires <code>WISE_WEBHOOK_PUBLIC_KEY</code> (PEM) to be configured; otherwise the route is not registered
-          (fail closed). Wise signs the raw body with RSA-SHA256 in <code>X-Signature-SHA256</code> and sends
-          <code>X-Delivery-Id</code> for dedupe.
+          Historical provider-delivery records, scoped to your tenant. This release is simulation-only: the inbound Wise
+          webhook route is not registered and no live provider callback is accepted.
         </p>
       </div>
 

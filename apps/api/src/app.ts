@@ -44,10 +44,9 @@ import type { CollectDeps } from './permits.js';
 import type { ExecuteDeps } from './execute.js';
 import { actionRoutes } from './routes/actions.js';
 import { codeExecutionRoutes } from './routes/code-execution.js';
-import { connectRoutes } from './routes/connect.js';
 import { marketRoutes } from './routes/market.js';
 import { notificationRoutes } from './routes/notifications.js';
-import { webhookDeliveryRoutes, webhookRoutes } from './routes/webhooks.js';
+import { webhookDeliveryRoutes } from './routes/webhooks.js';
 import { alertSinkRoutes } from './routes/alerts.js';
 import { auditRoutes } from './routes/audit.js';
 import { evidenceRoutes } from './routes/evidence.js';
@@ -131,7 +130,6 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
     signingKey: deps.config.permitSigningKey,
     signingKeyId: deps.config.permitSigningKeyId,
     auditHmacKey: deps.config.auditHmacKey,
-    ...(deps.config.liveFinance ? { live: deps.config.liveFinance } : {}),
     clock,
   });
   const metrics = createMetrics({
@@ -420,19 +418,13 @@ export async function buildApp(deps: BuildAppDeps): Promise<BuiltApp> {
     await v1.register((scope) => auditRoutes(scope, ctx), { prefix: '/v1' });
     await v1.register((scope) => evidenceRoutes(scope, ctx), { prefix: '/v1' });
     await v1.register((scope) => statusRoutes(scope, ctx), { prefix: '/v1' });
-    // Connected accounts (OAuth account linking). Registered only when live
-    // finance is configured; the factory itself decides, so a deployment that
-    // never opts in exposes no connect surface at all.
-    await v1.register((scope) => connectRoutes(scope, ctx), { prefix: '/v1' });
     // Code execution spawns a real interpreter as the API's OS user. It is a
     // deliberate opt-in: no flag, no route — not a route behind a flag check.
     if (deps.config.codeExecutionEnabled) {
       await v1.register((scope) => codeExecutionRoutes(scope, ctx), { prefix: '/v1' });
     }
-    // Provider webhooks (Wise transfers#state-change). Registered only when
-    // the platform's webhook public key is configured — otherwise there is no
-    // route to probe, which is the fail-closed shape.
-    await v1.register((scope) => webhookRoutes(scope, ctx), { prefix: '/v1' });
+    // Delivery history remains readable for evidence, but the inbound Wise
+    // webhook route is deliberately absent: this release is simulation-only.
     await v1.register((scope) => webhookDeliveryRoutes(scope, ctx), { prefix: '/v1' });
     // Market reference data (Yahoo Finance). Read-only, authenticated.
     await v1.register((scope) => marketRoutes(scope, ctx), { prefix: '/v1' });

@@ -141,7 +141,7 @@ describe('HttpFinanceConnector', () => {
     expect(second.status).toBe('SUCCEEDED');
   });
 
-  it('reports a transport timeout as retryable with no ledger entry', async () => {
+  it('reports a post-dispatch timeout as unknown instead of retryable', async () => {
     const stores = createMemoryStores({ clock: () => new Date() });
     const connector = new HttpFinanceConnector({
       connectorId: 'con_http',
@@ -166,7 +166,10 @@ describe('HttpFinanceConnector', () => {
       executionId: 'e6',
       traceId: 't6',
     });
-    expect(result).toEqual({ status: 'FAILED_RETRYABLE', errorClass: 'TRANSPORT_ERROR' });
+    expect(result).toEqual({ status: 'TIMEOUT_AFTER_DISPATCH' });
     expect(await stores.data.listLedger(TENANT)).toHaveLength(0);
+    const dispatches = await stores.data.listDispatches(TENANT, 'k6');
+    expect(dispatches).toHaveLength(1);
+    expect(dispatches[0]?.outcome).toBeNull();
   });
 });

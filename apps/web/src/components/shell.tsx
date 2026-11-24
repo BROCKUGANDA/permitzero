@@ -11,7 +11,6 @@ import {
   PlusCircle,
   ScrollText,
   UserRound,
-  Plug,
   LineChart,
   Webhook,
 } from 'lucide-react';
@@ -34,7 +33,7 @@ const NAV = [
   { href: '/', label: 'Overview', icon: LayoutDashboard },
   { href: '/actions', label: 'Actions', icon: ScrollText },
   { href: '/actions/new', label: 'New request', icon: PlusCircle },
-  { href: '/connected-accounts', label: 'Connected accounts', icon: Plug },
+  { href: '/connected-accounts', label: 'Simulation', icon: FlaskConical },
   { href: '/market-data', label: 'Market data', icon: LineChart },
   { href: '/webhooks', label: 'Webhooks', icon: Webhook },
 ] as const;

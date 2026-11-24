@@ -3,9 +3,6 @@
  * queue consumers stay home and the process runs the database sweeps only —
  * degraded but honest, and exactly what the API reports on /v1/status.
  */
-import { liveFinanceWiringFromEnv } from '@permitzero/db';
-import type { LiveFinanceWiring } from '@permitzero/db';
-
 export interface WorkerConfig {
   appEnv: string;
   databaseUrl: string;
@@ -50,12 +47,6 @@ export interface WorkerConfig {
   auditRetentionDays?: number;
   /** Days a delivery record is kept before the sweep may remove it. */
   outboxRetentionDays?: number;
-  /**
-   * Live finance wiring, shared with the API. The worker reconciles live
-   * transfers against the provider, so it needs the same opt-in; absent means
-   * live rows fail closed here too.
-   */
-  liveFinance?: LiveFinanceWiring;
   /**
    * Market symbols to auto-refresh each sweep pass (Yahoo Finance chart API),
    * e.g. ["USDILS=X","EURILS=X"]. An empty list disables the sweep entirely —
@@ -124,7 +115,9 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     throw new Error('PERMIT_SIGNING_KEY must be at least 16 characters.');
   }
   const appEnv = env['APP_ENV'] ?? 'development';
-  const liveFinance = liveFinanceWiringFromEnv(env);
+  if (boolIn(env, 'LIVE_FINANCE_ENABLED', false)) {
+    throw new Error('LIVE_FINANCE_ENABLED is forbidden: this release is simulation-only.');
+  }
   return {
     appEnv,
     databaseUrl: required(env, 'DATABASE_URL'),
@@ -164,7 +157,6 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     ),
     auditRetentionDays: intIn(env, 'AUDIT_RETENTION_DAYS', RETENTION_DEFAULTS.auditRetentionDays, 1, 3650),
     outboxRetentionDays: intIn(env, 'OUTBOX_RETENTION_DAYS', RETENTION_DEFAULTS.outboxRetentionDays, 1, 3650),
-    ...(liveFinance ? { liveFinance } : {}),
     marketFxPairs: parseMarketPairs(env['MARKET_FX_PAIRS']),
   };
 }

@@ -35,7 +35,7 @@ jobs:
     # branch `main` and get a release tag for a commit this repository never
     # verified, and a red CI run never becomes a version.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
@@ -53,6 +53,45 @@ jobs:
           # commits since the previous tag. A shallow clone would find no tags
           # and start numbering from zero on every release.
           fetch-depth: 0
+
+      - name: Verify a manual dispatch is a green main commit
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "manual auto-version dispatch is only allowed on main" >&2
+            exit 1
+          fi
+          if ! command -v gh > /dev/null 2>&1; then
+            GH_VERSION=2.63.2
+            curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" -o /tmp/gh.tar.gz
+            tar -xzf /tmp/gh.tar.gz -C /tmp
+            export PATH="/tmp/gh_${GH_VERSION}_bin:$PATH"
+          fi
+          REQUIRED_CHECKS=(
+            "Verify (typecheck, lint, tests, build, format, gates)"
+            "SLO report (live scrape, strict)"
+            "Secret scan (gitleaks)"
+          )
+          RUNS=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate \
+            --jq '.check_runs[] | [.name, .status, (.conclusion // "none")] | join("|")')
+          for NAME in "${REQUIRED_CHECKS[@]}"; do
+            LINE=$(printf '%s\n' "$RUNS" | grep -F -- "$NAME|" | head -n 1 || true)
+            if [ -z "$LINE" ]; then
+              echo "$NAME has not reported on $SHA; refusing to tag" >&2
+              exit 1
+            fi
+            STATUS=$(printf '%s' "$LINE" | cut -d'|' -f2)
+            CONCLUSION=$(printf '%s' "$LINE" | cut -d'|' -f3)
+            if [ "$STATUS" != "completed" ] || [ "$CONCLUSION" != "success" ]; then
+              echo "$NAME is $STATUS/$CONCLUSION on $SHA; refusing to tag" >&2
+              exit 1
+            fi
+          done
 
       - name: Compute and push the next version
         env:
@@ -103,7 +142,7 @@ jobs:
           # and a feature wins over a fix. Anything else is a patch: a silent
           # "no bump" for unknown messages would let a change ship with a
           # version that says nothing changed.
-          if printf '%s\n' "$LOG" | grep -Eq '(^|!)?:?.*BREAKING CHANGE|^[^ ]+!:' ; then
+          if printf '%s\n' "$LOG" | grep -Eq '^BREAKING[ -]CHANGE: |^[a-z]+(\([^)]*\))?!:' ; then
             PART=major
           elif printf '%s\n' "$LOG" | grep -Eq '^feat(\([^)]*\))?:' ; then
             PART=minor

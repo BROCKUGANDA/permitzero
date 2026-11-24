@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import { Button, Input, Label } from '@permitzero/ui';
+import { useAuth } from '@/lib/auth';
 
 interface Quote {
   symbol: string;
@@ -14,6 +15,7 @@ interface Quote {
 }
 
 export default function MarketDataPage(): React.JSX.Element {
+  const { token } = useAuth();
   const [symbol, setSymbol] = React.useState('USDILS=X');
   const [from, setFrom] = React.useState('USD');
   const [to, setTo] = React.useState('ILS');
@@ -26,7 +28,7 @@ export default function MarketDataPage(): React.JSX.Element {
     setError(null);
     try {
       const response = await fetch(`/api/v1/market-data/quote?symbol=${encodeURIComponent(s)}`, {
-        credentials: 'same-origin',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       setQuote((await response.json()) as Quote);
@@ -44,7 +46,7 @@ export default function MarketDataPage(): React.JSX.Element {
       const response = await fetch(
         `/api/v1/market-data/fx?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
         {
-          credentials: 'same-origin',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
         },
       );
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
